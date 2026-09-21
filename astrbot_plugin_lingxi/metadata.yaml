@@ -1,0 +1,21 @@
+name: "astrbot_plugin_lingxi"
+display_name: "灵犀 (Lingxi)"
+author: "DBJD-CR"
+version: "v2.0.0"
+desc: "让 Bot 像活人一样社交：私聊定时主动消息、回复后概率追发、群聊智能接话（判定模型插话）、群聊历史增强与图片转述、Mention/Quote 标签、封禁控制与联网搜索。"
+repo: ""
+astrbot_version: ">=4.8.0"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - wecom
+  - lark
+  - dingtalk
+  - kook
+social_link: https://github.com/DBJD-CR
+tags:
+  - 主动消息
+  - 拟人
+  - TTS
+  - WebUI
