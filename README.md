@@ -2,6 +2,7 @@
 
 让 Bot 像活人一样社交的 AstrBot 插件。一句话概括：**它让 Bot 在没人理它的时候也会自己开口、
 在被搭话时像真人一样分几条把话说完、在群聊里像群友一样见缝插针、还能自己"看懂"图片和网页。**
+**有问题别找我，让ai去修，我也是用ai拉出来的，在这里感谢workbuddy**
 
 > 本插件基于 [Pancakes-Labs/astrbot_plugin_proactive_chat](https://github.com/Pancakes-Labs/astrbot_plugin_proactive_chat)（AGPL-3.0）深度改造而来，
 > 并吸收了 [astrbot_plugin_astrbot_enhance_mode](https://github.com/Axi404/astrbot_plugin_astrbot_enhance_mode)
