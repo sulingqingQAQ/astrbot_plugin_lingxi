@@ -727,23 +727,23 @@ class GroupEnhanceMixin:
         except Exception as e:
             logger.debug(f"[群聊增强] 图片转述任务异常: {e}")
 
-    def _enh_apply_caption(self, umo: str, msg_id: str, image_index: int, caption: str) -> None:
-        """把历史行里的第 image_index 个 [Image] 替换为 [Image: caption]。"""
+    # fix: 修复Image拼接错误
+    def _enh_apply_caption(self, umo, msg_id, image_index, caption):
         chats = self._enhance_chats.get(umo)
         if not chats:
             return
         marker = f"#msg{msg_id}:"
         for line_index, line in enumerate(chats):
-            if marker not in line:
+            if marker not in line or "[Image]" not in line:
                 continue
             parts = line.split("[Image]")
-            # 第 image_index 个 [Image]（0 基）在 parts[1..] 的边界上
             if image_index + 1 >= len(parts):
                 return
-            parts[image_index + 1] = f"[Image: {caption}]" + parts[image_index + 1]
-            chats[line_index] = "[Image]".join(parts[: image_index + 2]) + "".join(
-                parts[image_index + 2 :]
-            )
+            out = parts[0]
+            for i, part in enumerate(parts[1:]):
+                out += f"[Image: {caption}]" if i == image_index else "[Image]"
+                out += part
+            chats[line_index] = out
             return
 
     # ------------------------------------------------------------------ #
@@ -816,6 +816,10 @@ class GroupEnhanceMixin:
     # ------------------------------------------------------------------ #
 
     async def enhance_inject_role(self, event: AstrMessageEvent, req) -> None:
+        # fix: 私聊Role注入过滤
+        umo = event.unified_msg_origin
+        if "GroupMessage" not in umo and "GuildMessage" not in umo:
+            return
         """把发送者角色（admin/member）注入 system_reminder。"""
         if not self.enh_role_display():
             return

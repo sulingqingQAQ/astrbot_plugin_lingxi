@@ -291,6 +291,12 @@ class ProactiveChatPlugin(
         """结果装饰入口：<refuse/> 拦截 + 接话回复空行拆分，委托 GroupChimeMixin。"""
         await GroupChimeMixin.chime_decorating_result(self, event)
 
+    # fix: 增加封禁守卫，用于执行对封禁账户的消息响应stop_event()
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=996)
+    async def on_group_message_ban_guard(self, event: AstrMessageEvent) -> None:
+        await GroupEnhanceMixin.enhance_guard_banned(self, event)
+
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=997)
     async def on_group_message_enhance(self, event: AstrMessageEvent) -> None:
         """群聊增强入口：增强格式记录群消息，委托 GroupEnhanceMixin。"""
