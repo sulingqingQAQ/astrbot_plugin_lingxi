@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Plain
 
 # <refuse/> 严格匹配（整条消息必须只有这个 tag）
@@ -754,7 +754,7 @@ class GroupChimeMixin:
             if delay > 0:
                 await asyncio.sleep(delay)
             await self.context.send_message(
-                unified_msg_origin, [Plain(text=text)]
+                unified_msg_origin, MessageChain(chain=[Plain(text=text)])
             )
         except Exception as error:
             logger.warning(f"[群聊接话] [{unified_msg_origin}] 后续段落发送失败: {error}")
