@@ -477,6 +477,10 @@ class GroupEnhanceMixin:
             self._enhance_image_registry: dict[str, dict[str, dict]] = {}
         if not hasattr(self, "_enhance_caption_tasks"):
             self._enhance_caption_tasks: set[asyncio.Task] = set()
+        if not hasattr(self, "_enhance_image_inflight"):
+            # umo -> msg_id -> 正在进行的图片转述任务。
+            # 注入群历史前需要按消息等待它，否则本轮请求只能看到 [Image]。
+            self._enhance_image_inflight: dict[str, dict[str, asyncio.Task]] = {}
         if not hasattr(self, "enhance_ban_store"):
             self.enhance_ban_store: BanStore | None = None
 
@@ -506,6 +510,21 @@ class GroupEnhanceMixin:
     def _enh_normalize_msg_id(raw: Any) -> str:
         value = str(raw or "").strip()
         return value
+
+    @staticmethod
+    def _enh_image_source(comp: Any) -> str:
+        """从 Image 组件里取出可用的图片引用。
+
+        不同平台适配器把图片放在不同字段：有的填 url，有的只填 file 或 path
+        （例如 file:// 本地路径、base64:// 或 file_id）。只取 url/file 会漏掉
+        只填 path 的平台，导致转述任务根本排不上、历史里永远只剩 [Image]。
+        这里按 url → file → path 依次回退，与 AstrBot 内置群聊上下文一致。
+        """
+        for attr in ("url", "file", "path"):
+            value = getattr(comp, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     @staticmethod
     def _enh_extract_msg_id_from_line(line: str) -> str:
@@ -562,7 +581,7 @@ class GroupEnhanceMixin:
             elif isinstance(comp, Plain):
                 parts.append(f" {comp.text}")
             elif isinstance(comp, Image):
-                image_url = str(comp.url or comp.file or "").strip()
+                image_url = self._enh_image_source(comp)
                 if image_url:
                     image_urls.append(image_url)
                 parts.append(" [Image]")
@@ -600,9 +619,60 @@ class GroupEnhanceMixin:
 
     def _enh_schedule_caption(self, umo: str, msg_id: str, history_line: str) -> None:
         """为一条含图消息排一个后台转述任务，完成后回写历史行。"""
+        self._enh_state_init()
         task = asyncio.create_task(self._enh_caption_task(umo, msg_id, history_line))
         self._enhance_caption_tasks.add(task)
         task.add_done_callback(self._enhance_caption_tasks.discard)
+
+        # 记录到 inflight，供 enhance_inject_group_context 在注入历史前等待。
+        inflight = self._enhance_image_inflight.setdefault(umo, {})
+        inflight[msg_id] = task
+
+        def _drop_inflight(finished: asyncio.Task, _umo: str = umo, _msg_id: str = msg_id) -> None:
+            current = self._enhance_image_inflight.get(_umo)
+            if not current:
+                return
+            if current.get(_msg_id) is finished:
+                current.pop(_msg_id, None)
+            if not current:
+                self._enhance_image_inflight.pop(_umo, None)
+
+        task.add_done_callback(_drop_inflight)
+
+    async def _enh_await_pending_captions(self, umo: str) -> None:
+        """注入群历史前，等待仍留在历史里的图片转述任务完成。
+
+        _enh_record_message 只把转述排成后台任务；如果注入历史时不等待，
+        本轮请求写进 system_prompt 的历史行仍然是 [Image]，模型自然"看不到"
+        图片。AstrBot 内置的群聊上下文感知是在格式化消息时同步等待转述的，
+        这里对齐同样的语义：只等本轮真正要用到的、尚未出结果的任务。
+        """
+        self._enh_state_init()
+        inflight = self._enhance_image_inflight.get(umo)
+        if not inflight:
+            return
+
+        chats = self._enhance_chats.get(umo) or []
+        registry = self._enhance_image_registry.get(umo) or {}
+        pending: list[asyncio.Task] = []
+        for msg_id, task in list(inflight.items()):
+            if task.done():
+                continue
+            entry = registry.get(msg_id) or {}
+            urls = entry.get("urls") or []
+            captions = entry.get("captions") or {}
+            # 已经有全部转述结果（或转述已放弃）就不用等
+            if not urls or len(captions) >= len(urls):
+                continue
+            marker = f"#msg{msg_id}:"
+            if any(marker in line and "[Image]" in line for line in chats):
+                pending.append(task)
+
+        if not pending:
+            return
+        # asyncio.wait 不会取消任务：即使本次等待超时，转述仍会在后台写回历史，
+        # 只是本轮请求来不及用上它，不会造成图片永久停留在 [Image]。
+        await asyncio.wait(pending, timeout=self.enh_image_caption_timeout())
 
     def _enh_schedule_voice(self, umo: str, msg_id: str) -> None:
         """为一条语音消息排一个后台转写任务，完成后回写历史行。"""
@@ -755,6 +825,13 @@ class GroupEnhanceMixin:
         if not self.enh_history_enabled():
             return
         umo = event.unified_msg_origin
+        chats = self._enhance_chats.get(umo)
+        if not chats:
+            return
+
+        # 关键数据通路：本轮的图片转述可能还在后台跑，若不等它完成，
+        # 注入进 system_prompt 的历史行就还是 [Image]，模型只能看到字面量。
+        await self._enh_await_pending_captions(umo)
         chats = self._enhance_chats.get(umo)
         if not chats:
             return

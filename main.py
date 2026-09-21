@@ -120,6 +120,8 @@ class ProactiveChatPlugin(
         self._enhance_chats: dict[str, list[str]] = {}
         self._enhance_image_registry: dict[str, dict[str, dict]] = {}
         self._enhance_caption_tasks: set[asyncio.Task[None]] = set()
+        # umo -> msg_id -> 进行中的图片转述任务（注入历史前按消息等待）
+        self._enhance_image_inflight: dict[str, dict[str, asyncio.Task[None]]] = {}
         self.enhance_ban_store = None
 
 

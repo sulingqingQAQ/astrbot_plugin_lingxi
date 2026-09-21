@@ -24,7 +24,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 
 # <refuse/> 严格匹配（整条消息必须只有这个 tag）
 _REFUSE_TAG_RE = re.compile(r"^\s*<refuse/>\s*$")
@@ -255,6 +255,55 @@ class GroupChimeMixin:
                 parts.append(f"[@{at_target}]")
 
         return " ".join(parts) if parts else (event.message_str or "")
+
+    @staticmethod
+    def _chime_collect_image_urls(event: AstrMessageEvent) -> list[str]:
+        """收集当前消息里的图片引用（url → file → path 依次回退）。"""
+        urls: list[str] = []
+        for component in event.get_messages():
+            if not isinstance(component, Image):
+                continue
+            for attr in ("url", "file", "path"):
+                value = getattr(component, attr, None)
+                if isinstance(value, str) and value.strip():
+                    urls.append(value.strip())
+                    break
+        return urls
+
+    def _chime_provider_supports_image(self, unified_msg_origin: str) -> bool:
+        """当前会话的对话模型是否支持图片输入（modalities 未配置时视为支持）。"""
+        try:
+            provider = self.context.get_using_provider(umo=unified_msg_origin)
+        except Exception as error:
+            logger.debug(f"[群聊接话] 读取对话模型失败，按不支持图片处理: {error}")
+            return False
+        if provider is None:
+            return False
+        provider_config = getattr(provider, "provider_config", None) or {}
+        modalities = (
+            provider_config.get("modalities")
+            if isinstance(provider_config, dict)
+            else None
+        )
+        # 与 AstrBot 语义保持一致：None / 空列表都表示未配置，按支持处理
+        if not modalities:
+            return True
+        return isinstance(modalities, list) and "image" in modalities
+
+    def _chime_request_image_urls(
+        self, unified_msg_origin: str, event: AstrMessageEvent
+    ) -> list[str]:
+        """接话请求要显式带上当前消息的图片。
+
+        框架在插件处理器 yield 出 ProviderRequest 后，会跳过自身的附件收集
+        （astr_main_agent.collect_initial_request 只在 req 为空时扫描消息链），
+        所以 request_llm 不传 image_urls 就等于把当前图片丢掉了，模型只能读到
+        历史里的 [Image] 字面量。这里在模型支持图片输入时把原图补回去；
+        不支持图片的模型则依赖群历史里的图片转述结果。
+        """
+        if not self._chime_provider_supports_image(unified_msg_origin):
+            return []
+        return self._chime_collect_image_urls(event)
 
     def chime_append_transcript(self, unified_msg_origin: str, event: AstrMessageEvent) -> None:
         """将一条群消息追加进对应群的环形缓冲。"""
@@ -505,6 +554,7 @@ class GroupChimeMixin:
             event.set_extra(_CHIME_MARK_KEY, True)
             yield event.request_llm(
                 prompt=prompt,
+                image_urls=self._chime_request_image_urls(unified_msg_origin, event),
                 conversation=conv,
                 system_prompt=_CHIME_STYLE_HINT,
             )
@@ -567,6 +617,9 @@ class GroupChimeMixin:
 
                 yield event.request_llm(
                     prompt=prompt,
+                    image_urls=self._chime_request_image_urls(
+                        unified_msg_origin, event
+                    ),
                     conversation=conv,
                     system_prompt=_CHIME_STYLE_HINT,
                 )
