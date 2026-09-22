@@ -466,6 +466,61 @@ class SchedulerMixin:
         if restored_count == 0:
             logger.info("[主动消息] 没有需要恢复的定时任务喵。")
 
+    def _compute_idle_interval(
+        self, session_id: str, session_config: dict, unanswered_count: int
+    ) -> dict:
+        """chatluna 式空闲触发间隔：基础 × 退避^未回复，封顶后 ±抖动。
+
+        群聊用 group_idle_* 参数（基础 = group_idle_trigger_minutes，
+        封顶 = group_idle_max_minutes）；私聊用 schedule_settings
+        （基础 = min_interval_minutes，封顶 = max_interval_minutes，
+        退避/抖动 = private_idle_* 参数）。
+
+        返回 dict：interval_seconds / base_minutes / cap_minutes /
+        backoff_factor / jitter_percent。
+        """
+        parsed = self._parse_session_id(session_id)
+        is_group = parsed and ("Group" in parsed[1] or "Guild" in parsed[1])
+        schedule_conf = session_config.get("schedule_settings", {})
+        if is_group:
+            base_minutes = int(session_config.get("group_idle_trigger_minutes", 30))
+            backoff_factor = max(
+                1.0, float(session_config.get("group_idle_backoff_factor", 2.0))
+            )
+            cap_minutes = max(
+                base_minutes, int(session_config.get("group_idle_max_minutes", 1440))
+            )
+            jitter_percent = max(
+                0, int(session_config.get("group_idle_jitter_percent", 10))
+            )
+        else:
+            base_minutes = int(schedule_conf.get("min_interval_minutes", 30))
+            backoff_factor = max(
+                1.0,
+                float(schedule_conf.get("private_idle_backoff_factor", 2.0)),
+            )
+            cap_minutes = max(
+                base_minutes, int(schedule_conf.get("max_interval_minutes", 900))
+            )
+            jitter_percent = max(
+                0, int(schedule_conf.get("private_idle_jitter_percent", 10))
+            )
+
+        effective_minutes = base_minutes * (
+            backoff_factor ** max(0, unanswered_count)
+        )
+        effective_minutes = min(effective_minutes, cap_minutes)
+        if jitter_percent > 0:
+            jitter_ratio = random.uniform(-jitter_percent, jitter_percent) / 100.0
+            effective_minutes = max(1.0, effective_minutes * (1.0 + jitter_ratio))
+        return {
+            "interval_seconds": int(round(effective_minutes * 60)),
+            "base_minutes": base_minutes,
+            "cap_minutes": cap_minutes,
+            "backoff_factor": backoff_factor,
+            "jitter_percent": jitter_percent,
+        }
+
     async def _schedule_next_chat_and_save(
         self, session_id: str, reset_counter: bool = False
     ) -> None:
@@ -474,8 +529,6 @@ class SchedulerMixin:
         session_config = self._get_session_config(normalized_session_id)
         if not session_config:
             return
-
-        schedule_conf = session_config.get("schedule_settings", {})
 
         async with self.data_lock:
             # 如果存在非规范化的旧键，迁移到规范化键
@@ -499,12 +552,16 @@ class SchedulerMixin:
                     "unanswered_count"
                 ] = 0
 
-            # 计算随机触发时间
-            min_interval = int(schedule_conf.get("min_interval_minutes", 30)) * 60
-            max_interval = max(
-                min_interval, int(schedule_conf.get("max_interval_minutes", 900)) * 60
+            # chatluna 式空闲触发间隔：基础 × 退避^未回复，封顶后 ±抖动
+            unanswered_count = self.session_data.get(normalized_session_id, {}).get(
+                "unanswered_count", 0
             )
-            random_interval = random.randint(min_interval, max_interval)
+            interval_info = self._compute_idle_interval(
+                normalized_session_id, session_config, unanswered_count
+            )
+            random_interval = interval_info["interval_seconds"]
+            min_interval = interval_info["base_minutes"] * 60
+            max_interval = interval_info["cap_minutes"] * 60
             scheduled_at = time.time()
             next_trigger_time = scheduled_at + random_interval
             run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
@@ -553,15 +610,26 @@ class SchedulerMixin:
                 finally:
                     del self.group_timers[timer_key]
 
-        idle_minutes = session_config.get("group_idle_trigger_minutes", 10)
+        # 未回复次数决定退避档位；群里有新发言时计数会被归零，退避随之归位
+        async with self.data_lock:
+            unanswered_count = self.session_data.get(normalized_session_id, {}).get(
+                "unanswered_count", 0
+            )
 
-        # 群聊沉默回调仅负责投递受控协程，
+        # chatluna 式空闲触发间隔：基础 × 退避^未回复，封顶后 ±抖动
+        interval_info = self._compute_idle_interval(
+            normalized_session_id, session_config, unanswered_count
+        )
+        base_minutes = interval_info["base_minutes"]
+        backoff_factor = interval_info["backoff_factor"]
+        jitter_percent = interval_info["jitter_percent"]
+        effective_minutes = interval_info["interval_seconds"] / 60.0        # 群聊沉默回调仅负责投递受控协程，
         # 真正的状态检查与调度写入放到异步上下文中统一处理。
         def _schedule_callback(captured_session_id=normalized_session_id):
             self._track_task(
                 asyncio.create_task(
                     self._handle_group_silence_callback(
-                        captured_session_id, idle_minutes
+                        captured_session_id, effective_minutes
                     )
                 )
             )
@@ -569,8 +637,13 @@ class SchedulerMixin:
         try:
             loop = asyncio.get_running_loop()
             self.group_timers[normalized_session_id] = loop.call_later(
-                idle_minutes * 60, _schedule_callback
+                effective_minutes * 60, _schedule_callback
             )
+            if unanswered_count > 0:
+                logger.info(
+                    f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 沉默计时器已重排喵："
+                    f"基础 {base_minutes} 分钟 × 退避 {backoff_factor}^{unanswered_count} ≈ {effective_minutes:.1f} 分钟后触发。"
+                )
         except Exception as e:
             logger.error(f"[主动消息] 设置沉默倒计时失败喵: {e}")
 
@@ -606,13 +679,16 @@ class SchedulerMixin:
                 ):
                     return
 
-                schedule_conf = current_config.get("schedule_settings", {})
-                min_interval = int(schedule_conf.get("min_interval_minutes", 30)) * 60
-                max_interval = max(
-                    min_interval,
-                    int(schedule_conf.get("max_interval_minutes", 900)) * 60,
+                # chatluna 式空闲触发间隔：播种任务与沉默触发共用同一公式
+                unanswered_count = self.session_data.get(session_id, {}).get(
+                    "unanswered_count", 0
                 )
-                random_interval = random.randint(min_interval, max_interval)
+                interval_info = self._compute_idle_interval(
+                    session_id, current_config, unanswered_count
+                )
+                random_interval = interval_info["interval_seconds"]
+                min_interval = interval_info["base_minutes"] * 60
+                max_interval = interval_info["cap_minutes"] * 60
                 scheduled_at = time.time()
                 next_trigger_time = scheduled_at + random_interval
                 run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
@@ -678,13 +754,12 @@ class SchedulerMixin:
                     "unanswered_count", 0
                 )
 
+            # chatluna 式空闲触发：沉默期满直接触发，不再二次计划未来随机时刻
             self._track_task(
-                asyncio.create_task(
-                    self._schedule_next_chat_and_save(session_id, reset_counter=False)
-                )
+                asyncio.create_task(self.check_and_chat(session_id))
             )
             logger.info(
-                f"[主动消息] {self._get_session_log_str(session_id, current_config)} 已沉默 {idle_minutes} 分钟，开始计划主动消息喵。(当前未回复次数: {current_unanswered})"
+                f"[主动消息] {self._get_session_log_str(session_id, current_config)} 已沉默 {idle_minutes} 分钟，立即触发主动消息喵。(当前未回复次数: {current_unanswered})"
             )
         except Exception as e:
             logger.error(f"[主动消息] 沉默倒计时回调函数执行失败喵: {e}")

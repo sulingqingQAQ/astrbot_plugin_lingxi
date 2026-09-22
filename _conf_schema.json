@@ -100,10 +100,10 @@
                 "type": "object",
                 "items": {
                     "min_interval_minutes": {
-                        "description": "最小触发间隔 (分钟)",
+                        "description": "⏳ 沉默触发基础间隔 (分钟)",
                         "type": "int",
                         "default": 30,
-                        "hint": "主动消息的最小时间间隔，防止过于频繁地打扰用户",
+                        "hint": "chatluna 式空闲触发：距上一条消息沉默 X 分钟后触发一次主动消息（间隔会带随机抖动）。若主动消息未获回应，间隔按下面的退避倍率放大",
                         "slider": {
                             "min": 1,
                             "max": 2880,
@@ -111,14 +111,36 @@
                         }
                     },
                     "max_interval_minutes": {
-                        "description": "最大触发间隔 (分钟)",
+                        "description": "⌛ 沉默触发间隔上限 (分钟)",
                         "type": "int",
                         "default": 600,
-                        "hint": "主动消息的最大时间间隔，确保 Bot 不会太久不主动说话",
+                        "hint": "指数退避后沉默触发间隔的最大值，退避到这个值就不再增长",
                         "slider": {
                             "min": 1,
                             "max": 2880,
                             "step": 30
+                        }
+                    },
+                    "private_idle_backoff_factor": {
+                        "description": "📈 沉默触发指数退避倍率",
+                        "type": "float",
+                        "default": 2.0,
+                        "hint": "chatluna 式空闲触发：每次主动消息发出后对方没回，下一次沉默触发间隔就按此倍率放大（1 = 不退避，2 = 间隔翻倍）。对方回复即归位重算",
+                        "slider": {
+                            "min": 1,
+                            "max": 4,
+                            "step": 0.5
+                        }
+                    },
+                    "private_idle_jitter_percent": {
+                        "description": "🎲 触发抖动幅度 (%)",
+                        "type": "int",
+                        "default": 10,
+                        "hint": "实际触发时刻在计算出的间隔基础上随机偏移 ±N%，避免每次都精确卡点，建议 5~10",
+                        "slider": {
+                            "min": 0,
+                            "max": 30,
+                            "step": 1
                         }
                     },
                     "quiet_hours": {
@@ -353,6 +375,55 @@
             }
         }
     },
+    "followup_settings": {
+        "description": "💬 私聊对话增强（AI 正常回复用户后，概率追发一条消息，仿真人自然接话）。仅私聊生效",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "✅ 启用对话增强",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后，每次 AI 正常回复用户后有一定概率在短时间内追发一条消息"
+            },
+            "probability": {
+                "description": "触发概率（%）",
+                "type": "int",
+                "default": 20,
+                "hint": "0-100，每次 AI 回复后以此概率触发追发。连续触发时概率会按递减系数衰减",
+                "slider": {
+                    "min": 0,
+                    "max": 100,
+                    "step": 1
+                }
+            },
+            "min_delay_seconds": {
+                "description": "最短等待（秒）",
+                "type": "int",
+                "default": 30,
+                "hint": "触发后至少等待多少秒再发送"
+            },
+            "max_delay_seconds": {
+                "description": "最长等待（秒）",
+                "type": "int",
+                "default": 600,
+                "hint": "触发后最多等待多少秒再发送，上限 1800。等待期间用户发来新消息会自动取消"
+            },
+            "decay_rate": {
+                "description": "递减系数",
+                "type": "float",
+                "default": 0.1,
+                "hint": "连续追发时概率的衰减倍率（0~1）。如 0.1 表示第二次概率降为首次的 10%，第三次降至 1%"
+            },
+            "prompt_templates": {
+                "description": "追发提示词模板（列表，触发时随机选一条）",
+                "type": "list",
+                "default": [
+                    "（系统提示：你刚才和用户聊完一轮，过了一会儿还没有新消息。以当前人格自然地补一句简短的后续消息——可以补充刚才的话题、随口一问，或分享一个相关的小想法。保持口语化，只说一两句，不要重复之前说过的内容。这是系统任务，直接输出消息正文即可。）"
+                ],
+                "hint": "支持占位符：{now} 当前时间、{last_user} 用户上一条消息、{last_ai} bot 上一条回复、{time_since_last_chat} 距用户上次发言的时长、{umo} 会话 ID"
+            }
+        }
+    },
     "group_settings": {
         "description": "👥 群聊全局配置",
         "type": "object",
@@ -396,11 +467,44 @@
                 "description": "⏳ 群聊沉默触发时间 (分钟)",
                 "type": "int",
                 "default": 30,
-                "hint": "当群聊中连续 X 分钟没有任何新消息时，才会开始计划一次主动消息",
+                "hint": "当群聊中连续 X 分钟没有任何新消息时，立即触发一次主动消息（chatluna 式空闲触发）。若主动消息未获回应，间隔会按下面的指数退避倍率拉长",
                 "slider": {
                     "min": 1,
                     "max": 1440,
                     "step": 10
+                }
+            },
+            "group_idle_backoff_factor": {
+                "description": "📈 沉默触发指数退避倍率",
+                "type": "float",
+                "default": 2.0,
+                "hint": "chatluna 式空闲触发：每次主动消息发出后没人接话，下一次沉默触发间隔就按此倍率放大（1 = 不退避，2 = 间隔翻倍）。群里有人发言即归位重算",
+                "slider": {
+                    "min": 1,
+                    "max": 4,
+                    "step": 0.5
+                }
+            },
+            "group_idle_max_minutes": {
+                "description": "⌛ 沉默触发间隔上限 (分钟)",
+                "type": "int",
+                "default": 1440,
+                "hint": "指数退避后沉默触发间隔的最大值，退避到这个值就不再增长",
+                "slider": {
+                    "min": 10,
+                    "max": 1440,
+                    "step": 10
+                }
+            },
+            "group_idle_jitter_percent": {
+                "description": "🎲 触发抖动幅度 (%)",
+                "type": "int",
+                "default": 10,
+                "hint": "实际触发时刻在计算出的间隔基础上随机偏移 ±N%，避免每次都精确卡点，建议 5~10",
+                "slider": {
+                    "min": 0,
+                    "max": 30,
+                    "step": 1
                 }
             },
             "proactive_prompt": {
@@ -718,55 +822,6 @@
             }
         }
     },
-    "followup_settings": {
-        "description": "💬 私聊对话增强（AI 正常回复用户后，概率追发一条消息，仿真人自然接话）。仅私聊生效",
-        "type": "object",
-        "items": {
-            "enable": {
-                "description": "✅ 启用对话增强",
-                "type": "bool",
-                "default": false,
-                "hint": "开启后，每次 AI 正常回复用户后有一定概率在短时间内追发一条消息"
-            },
-            "probability": {
-                "description": "触发概率（%）",
-                "type": "int",
-                "default": 20,
-                "hint": "0-100，每次 AI 回复后以此概率触发追发。连续触发时概率会按递减系数衰减",
-                "slider": {
-                    "min": 0,
-                    "max": 100,
-                    "step": 1
-                }
-            },
-            "min_delay_seconds": {
-                "description": "最短等待（秒）",
-                "type": "int",
-                "default": 30,
-                "hint": "触发后至少等待多少秒再发送"
-            },
-            "max_delay_seconds": {
-                "description": "最长等待（秒）",
-                "type": "int",
-                "default": 600,
-                "hint": "触发后最多等待多少秒再发送，上限 1800。等待期间用户发来新消息会自动取消"
-            },
-            "decay_rate": {
-                "description": "递减系数",
-                "type": "float",
-                "default": 0.1,
-                "hint": "连续追发时概率的衰减倍率（0~1）。如 0.1 表示第二次概率降为首次的 10%，第三次降至 1%"
-            },
-            "prompt_templates": {
-                "description": "追发提示词模板（列表，触发时随机选一条）",
-                "type": "list",
-                "default": [
-                    "（系统提示：你刚才和用户聊完一轮，过了一会儿还没有新消息。以当前人格自然地补一句简短的后续消息——可以补充刚才的话题、随口一问，或分享一个相关的小想法。保持口语化，只说一两句，不要重复之前说过的内容。这是系统任务，直接输出消息正文即可。）"
-                ],
-                "hint": "支持占位符：{now} 当前时间、{last_user} 用户上一条消息、{last_ai} bot 上一条回复、{time_since_last_chat} 距用户上次发言的时长、{umo} 会话 ID"
-            }
-        }
-    },
     "group_chime_settings": {
         "description": "🗣️ 群聊接话（原 astrbot_plugin_group_chime 并入）：监听群消息，判定模型决定是否插话，走完整 pipeline 生成",
         "type": "object",
@@ -791,33 +846,15 @@
                 ],
                 "hint": "消息中出现任一词即触发接话，前缀句中句尾都行。如：小苏、灵卿、卿卿"
             },
-            "judge_provider_id": {
-                "description": "🤖 判定模型",
-                "type": "string",
-                "default": "deepseek/deepseek-flash",
-                "hint": "只用来判断要不要接话，建议便宜快速的模型",
-                "_special": "select_provider"
-            },
-            "fallback_probability": {
-                "description": "🎲 判定失败时的随机接话概率",
-                "type": "float",
-                "default": 0.0,
-                "hint": "判定模型失败时以此概率直接接话（不推荐，保持 0 关闭）",
+            "direct_aggregate_seconds": {
+                "description": "⏱️ @/喊话聚合等待秒数",
+                "type": "int",
+                "default": 8,
+                "hint": "@机器人或喊昵称的消息不立即回复，而是进同一个聚合池：第一条直呼消息到达后等待 N 秒，窗口内所有人喊的话（带昵称+用户ID）合并成一次回复。设太小多人连续喊话会拆成多次回复，建议 5~15 秒",
                 "slider": {
-                    "min": 0,
-                    "max": 1,
-                    "step": 0.05
-                }
-            },
-            "min_confidence": {
-                "description": "📊 接话最低置信度",
-                "type": "float",
-                "default": 0.6,
-                "hint": "判定 confidence 低于此值视为不接话",
-                "slider": {
-                    "min": 0,
-                    "max": 1,
-                    "step": 0.05
+                    "min": 1,
+                    "max": 60,
+                    "step": 1
                 }
             },
             "group_whitelist": {
@@ -827,7 +864,7 @@
                 "hint": "为空时对所有群生效。可填群号或完整 unified_msg_origin"
             },
             "context_window": {
-                "description": "📜 判定用的聊天记录条数",
+                "description": "📜 接话参考的聊天记录条数",
                 "type": "int",
                 "default": 20,
                 "hint": "保留最近 N 条群消息供判定模型参考，重启后清零",
@@ -838,10 +875,10 @@
                 }
             },
             "min_messages_since_last": {
-                "description": "📨 两次判定之间最少新消息数",
+                "description": "📨 两次接话之间最少新消息数",
                 "type": "int",
-                "default": 5,
-                "hint": "攒够这么多条新消息才触发一次判定，减少配额消耗",
+                "default": 2,
+                "hint": "距上次接话评估后，群里至少要再冒出这么多条消息才重新评估，防止逐条消息都去算分。默认 2",
                 "slider": {
                     "min": 1,
                     "max": 50,
@@ -849,10 +886,10 @@
                 }
             },
             "judge_cooldown_seconds": {
-                "description": "⏱️ 两次判定之间的最小间隔（秒）",
+                "description": "⏱️ 两次接话评估的最小间隔（秒）",
                 "type": "int",
-                "default": 300,
-                "hint": "与「最少新消息数」同时满足才触发判定",
+                "default": 60,
+                "hint": "距上次接话评估不足这个秒数就不评估（纯计时，零成本）。默认 60",
                 "slider": {
                     "min": 0,
                     "max": 3600,
@@ -860,14 +897,53 @@
                 }
             },
             "reply_cooldown_minutes": {
-                "description": "⏳ 两次接话之间的最小间隔（分钟）",
+                "description": "⏳ 两次接话之间的硬冷却（分钟）",
                 "type": "int",
-                "default": 10,
-                "hint": "上次接话成功后至少等待此时间才能再次接话",
+                "default": 0,
+                "hint": "硬性兜底，按固定时长封死接话。默认 0 表示不启用——改由下面的「活跃度自罚」控制节奏（说得越勤越难再达标），比固定秒数自然得多。想强制压频率时再设一个值",
                 "slider": {
-                    "min": 1,
+                    "min": 0,
                     "max": 1440,
                     "step": 5
+                }
+            },
+            "activity_score_enable": {
+                "description": "📊 启用活跃度分数判定（接话的核心开关）",
+                "type": "bool",
+                "default": true,
+                "hint": "v2.1.0-dev.3 起 LLM 判定模型已移除，活跃度分数是\"该不该说话\"的唯一判定（chatluna 同款纯数学）：分数≥门槛就接话。关闭后只要过了冷却/配额/静音就每条都接，不建议关闭"
+            },
+            "activity_score_skip_threshold": {
+                "description": "📊 活跃度门槛下限",
+                "type": "float",
+                "default": 0.3,
+                "hint": "群安静久了或刚启动时从这个门槛起步。分数低于门槛直接跳过判定，不调模型。越高越惜字如金。实测参考：冷清群 0.00 / 话题凉了 0.06 / 刚说完话 0.12 / 中等活跃 0.89 / 高活跃 1.00",
+                "slider": {
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05
+                }
+            },
+            "activity_score_max_threshold": {
+                "description": "📊 活跃度门槛上限",
+                "type": "float",
+                "default": 0.9,
+                "hint": "自适应门槛的天花板。每接话一次门槛往上抬（上限与下限之差的 10%），连着说几次后门槛会顶到这里，变得很难再开口。群安静 10 分钟后回落到底限",
+                "slider": {
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05
+                }
+            },
+            "activity_cooldown_penalty": {
+                "description": "📉 每次开口的自罚分数",
+                "type": "float",
+                "default": 0.8,
+                "hint": "每接话一次就扣掉这么多活跃度分。它与「门槛上抬」共同构成抑制机制——单靠扣分不够，分数会随群活跃很快回升。设 0 可关闭自罚",
+                "slider": {
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05
                 }
             },
             "max_chimes_per_hour": {
@@ -897,12 +973,6 @@
                 "type": "string",
                 "default": "1-7",
                 "hint": "该小时范围内不接话，如 1-7。支持跨午夜如 23-6。留空不启用"
-            },
-            "persona_brief": {
-                "description": "🎭 机器人身份简介（判定用）",
-                "type": "text",
-                "default": "",
-                "hint": "给判定模型的一句话人设概括。留空则自动从 AstrBot 人格管理器读取"
             },
             "refuse_tag_enable": {
                 "description": "🚫 启用 <refuse/> 放弃机制",
@@ -992,6 +1062,24 @@
                         "type": "bool",
                         "default": false,
                         "hint": "群友发的语音经 AstrBot 的 speech_to_text 提供商转写，历史里的 [Voice] 变为 [Voice: 内容]。需先在 AstrBot「服务提供商」新建一个 speech_to_text 类型提供商（mimo_stt/whisper/sensevoice）"
+                    },
+                    "history_pull_enable": {
+                        "description": "🔄 重启后回拉历史（historyPull）",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "启用后，每个群在本进程启动后的第一条消息时，自动调用协议端 get_group_msg_history API 拉取最近历史回填群聊增强缓冲区，解决重启后回复没有上下文的问题。仅支持 aiocqhttp（NapCat/Lagrange 等）平台，回填的图片不做视觉转述"
+                    },
+                    "history_pull_count": {
+                        "description": "🔄 回拉条数",
+                        "type": "int",
+                        "default": 50,
+                        "hint": "重启后每个群回拉多少条历史（10-200）。建议 50：拉满会拖慢首批注入且太老的上下文对回复帮助有限"
+                    },
+                    "history_pull_chime": {
+                        "description": "🔄 同步回填接话记录",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "回拉时把拉到的消息同步转成接话（chime）参考记录（仅在该群接话记录为空时回填），重启后接话判活也有上下文"
                     }
                 }
             },

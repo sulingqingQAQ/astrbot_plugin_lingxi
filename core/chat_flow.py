@@ -123,14 +123,14 @@ class ProactiveCoreMixin:
                 if not session_config:
                     return
 
-                schedule_conf = session_config.get("schedule_settings", {})
-                min_interval = int(schedule_conf.get("min_interval_minutes", 30)) * 60
-                max_interval = max(
-                    min_interval,
-                    int(schedule_conf.get("max_interval_minutes", 900)) * 60,
+                # chatluna 式空闲触发间隔：基础 × 退避^未回复（未回复次数已 +1，
+                # 退避立即生效），封顶后 ±抖动
+                interval_info = self._compute_idle_interval(
+                    session_id, session_config, new_unanswered_count
                 )
-                # 私聊采用配置区间内随机间隔，减少触发规律性
-                random_interval = random.randint(min_interval, max_interval)
+                random_interval = interval_info["interval_seconds"]
+                min_interval = interval_info["base_minutes"] * 60
+                max_interval = interval_info["cap_minutes"] * 60
                 scheduled_at = time.time()
                 next_trigger_time = scheduled_at + random_interval
                 run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
@@ -149,6 +149,27 @@ class ProactiveCoreMixin:
                 }
 
             await self._save_data_internal()
+
+        # 群聊路径：chatluna 式统一触发系统的两处收尾
+        is_group_session = parsed and (
+            "Group" in parsed[1] or "Guild" in parsed[1]
+        )
+        if is_group_session:
+            # 账本打通（主动消息 → 接话）：主动开口同样记入接话账本
+            # （冷却 / 小时日配额 / 活跃度自罚），让接话闸门感知到
+            # bot 刚主动说过话，避免紧接着又插话刷屏。
+            try:
+                self.chime_mark_sent(session_id)
+                logger.info(
+                    f"[主动消息] 已将 {self._get_session_log_str(session_id)} 的本次主动发言同步进接话账本喵。"
+                )
+            except Exception as e:
+                logger.debug(f"[主动消息] 同步接话账本失败喵: {e}")
+            # chatluna 式空闲触发：用新的未回复次数重排沉默计时器，指数退避生效
+            try:
+                await self._reset_group_silence_timer(session_id)
+            except Exception as e:
+                logger.debug(f"[主动消息] 重排群沉默计时器失败喵: {e}")
 
         if scheduled_job_payload is not None:
             self.scheduler.add_job(
