@@ -381,7 +381,9 @@ class ForwardMsgMixin:
         last_error: Exception | None = None
         for payload in attempts:
             try:
-                result = await bot.call_api("get_forward_msg", **payload)
+                result = await ForwardMsgMixin._fm_call_api(
+                    bot, "get_forward_msg", **payload
+                )
                 break
             except Exception as error:
                 last_error = error
