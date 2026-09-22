@@ -483,6 +483,17 @@ class GroupEnhanceMixin:
             self._enhance_image_inflight: dict[str, dict[str, asyncio.Task]] = {}
         if not hasattr(self, "enhance_ban_store"):
             self.enhance_ban_store: BanStore | None = None
+        if not hasattr(self, "_enhance_history_pulled"):
+            # historyPull：本进程内已完成（或确认无需）拉取的会话
+            self._enhance_history_pulled: set[str] = set()
+        if not hasattr(self, "_enh_pull_inflight"):
+            # historyPull：正在拉取中的会话，防止并发重复请求
+            self._enh_pull_inflight: set[str] = set()
+        if not hasattr(self, "_enh_pull_fail_until"):
+            # historyPull：拉取失败后的冷却截止时间（umo -> 时间戳）
+            self._enh_pull_fail_until: dict[str, float] = {}
+        if not hasattr(self, "_enh_pull_tasks"):
+            self._enh_pull_tasks: set[asyncio.Task] = set()
 
     def _enh_get_ban_store(self) -> BanStore | None:
         self._enh_state_init()
@@ -533,6 +544,213 @@ class GroupEnhanceMixin:
         m = re.search(r"#msg(\S+?):", line)
         return m.group(1) if m else ""
 
+    # ------------------------------------------------------------------ #
+    # 群聊历史：historyPull（重启后从 OneBot API 拉取缺失历史回填缓冲区）
+    # ------------------------------------------------------------------ #
+
+    def enh_history_pull_enabled(self) -> bool:
+        return self._enh_bool("group_history", "history_pull_enable", False)
+
+    def enh_history_pull_count(self) -> int:
+        return max(10, min(200, self._enh_int("group_history", "history_pull_count", 50)))
+
+    def enh_history_pull_chime(self) -> bool:
+        return self._enh_bool("group_history", "history_pull_chime", False)
+
+    def _enh_maybe_schedule_history_pull(self, event: AstrMessageEvent, umo: str) -> None:
+        """懒加载触发：每个群仅在本进程生命周期内尝试一次拉取（失败后 60 秒冷却重试）。
+
+        在 enhance_group_message 记录当前消息之前调度，拉取完成后按消息 ID
+        去重回填，与实时记录的行自然衔接。放首条消息处而非 initialize，
+        是因为插件加载时协议端适配器未必已连接，且只拉活跃群。
+        """
+        if not self.enh_history_enabled() or not self.enh_history_pull_enabled():
+            return
+        self._enh_state_init()
+        if umo in self._enhance_history_pulled:
+            return
+        # 缓冲区已有内容说明本次进程启动后已记录过消息，无需回填
+        if self._enhance_chats.get(umo):
+            self._enhance_history_pulled.add(umo)
+            return
+        now = time.time()
+        if now < self._enh_pull_fail_until.get(umo, 0.0):
+            return
+        if umo in self._enh_pull_inflight:
+            return
+        self._enh_pull_inflight.add(umo)
+        task = asyncio.create_task(self._enh_pull_group_history(event, umo))
+        self._enh_pull_tasks.add(task)
+        task.add_done_callback(self._enh_pull_tasks.discard)
+
+    async def _enh_pull_group_history(self, event: AstrMessageEvent, umo: str) -> None:
+        """调用 aiocqhttp 的 get_group_msg_history 拉取最近消息并去重回填。"""
+        try:
+            bot = getattr(event, "bot", None)
+            if bot is None:
+                logger.debug("[群聊增强] historyPull：当前平台无 bot 客户端，跳过")
+                self._enhance_history_pulled.add(umo)
+                return
+            group_id = event.get_group_id()
+            if not group_id:
+                self._enhance_history_pulled.add(umo)
+                return
+            api_group_id = (
+                int(group_id) if str(group_id).isdigit() else group_id
+            )
+            try:
+                result = await bot.get_group_msg_history(
+                    group_id=api_group_id,
+                    count=self.enh_history_pull_count(),
+                )
+            except Exception as e:
+                # 协议端可能未就绪：不标记已拉取，冷却 60 秒后允许下次消息重试
+                self._enh_pull_fail_until[umo] = time.time() + 60.0
+                logger.warning(f"[群聊增强] historyPull：拉取群 {group_id} 历史失败（60 秒后重试）: {e}")
+                return
+
+            messages = (result or {}).get("messages") or []
+            self._enhance_history_pulled.add(umo)
+            if not messages:
+                return
+            self._enh_apply_pulled_history(umo, event, messages)
+            logger.info(
+                f"[群聊增强] historyPull：群 {group_id} 回填 {len(messages)} 条历史"
+            )
+        except Exception as e:
+            logger.warning(f"[群聊增强] historyPull：执行异常: {e}")
+        finally:
+            self._enh_pull_inflight.discard(umo)
+
+    def _enh_format_history_segment(self, seg: Any) -> str:
+        """把 OneBot 消息段转为增强历史行里的占位文本。"""
+        if isinstance(seg, str):
+            return seg
+        if not isinstance(seg, dict):
+            return ""
+        seg_type = str(seg.get("type") or "")
+        data = seg.get("data") or {}
+        if seg_type == "text":
+            return str(data.get("text") or "")
+        if seg_type == "face":
+            return f"[表情:{data.get('id', '')}]"
+        if seg_type == "image":
+            return " [Image]"
+        if seg_type == "record":
+            return " [Voice]"
+        if seg_type == "video":
+            return " [Video]"
+        if seg_type == "at":
+            target = data.get("qq") or data.get("target") or ""
+            return f" [At: {target}]"
+        if seg_type == "reply":
+            quote_id = self._enh_normalize_msg_id(data.get("id"))
+            quote_text = str(data.get("text") or "").strip() or "..."
+            if quote_id:
+                return f" [Quote #msg{quote_id} Unknown: {quote_text}]"
+            return f" [Quote Unknown: {quote_text}]"
+        return f" [{seg_type}]" if seg_type else ""
+
+    def _enh_apply_pulled_history(
+        self, umo: str, event: AstrMessageEvent, messages: list[Any]
+    ) -> None:
+        """把 API 返回的消息格式化成增强历史行，按消息 ID 去重后合并进缓冲区。"""
+        chats = self._enhance_chats.setdefault(umo, [])
+        registry = self._enhance_image_registry.setdefault(umo, {})
+        existing_ids = set()
+        for line in chats:
+            mid = self._enh_extract_msg_id_from_line(line)
+            if mid:
+                existing_ids.add(mid)
+
+        self_id = event.get_self_id()
+        include_id = self.enh_include_sender_id()
+        include_role = self.enh_include_role_tag()
+        new_lines: list[str] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            msg_id = self._enh_normalize_msg_id(item.get("message_id"))
+            if msg_id and msg_id in existing_ids:
+                continue
+            sender = item.get("sender") or {}
+            sender_id = str(sender.get("user_id") or "")
+            nickname = str(sender.get("nickname") or sender.get("card") or "")
+            raw_time = item.get("time")
+            try:
+                time_str = datetime.fromtimestamp(float(raw_time)).strftime("%H:%M:%S")
+            except (TypeError, ValueError, OSError):
+                time_str = datetime.now().strftime("%H:%M:%S")
+
+            content = item.get("message")
+            parts: list[str] = []
+            if isinstance(content, list):
+                for seg in content:
+                    parts.append(self._enh_format_history_segment(seg))
+            elif isinstance(content, str):
+                parts.append(content)
+            text = "".join(parts).strip()
+            if not text:
+                continue
+
+            if sender_id and self_id and sender_id == str(self_id):
+                new_lines.append(f"[You/{time_str}]: {text}")
+                if msg_id:
+                    existing_ids.add(msg_id)
+                continue
+
+            role_raw = str(sender.get("role") or "member").lower()
+            role_tag = "(admin)" if role_raw in ("owner", "admin") else "(member)"
+            if include_id and include_role:
+                header = f"[{nickname}/{sender_id}/{time_str}]{role_tag} #msg{msg_id}:"
+            elif include_id:
+                header = f"[{nickname}/{sender_id}/{time_str}] #msg{msg_id}:"
+            elif include_role:
+                header = f"[{nickname}/{time_str}]{role_tag} #msg{msg_id}:"
+            else:
+                header = f"[{nickname}/{time_str}] #msg{msg_id}:"
+            new_lines.append(f"{header} {text}")
+            if msg_id:
+                existing_ids.add(msg_id)
+
+        if not new_lines:
+            return
+        # API 返回按时间升序，直接追加到现有行之后，再统一裁到上限
+        chats.extend(new_lines)
+        max_messages = self.enh_history_max()
+        while len(chats) > max_messages:
+            removed = chats.pop(0)
+            removed_id = self._enh_extract_msg_id_from_line(removed)
+            if removed_id:
+                registry.pop(removed_id, None)
+
+        if self.enh_history_pull_chime():
+            self._enh_refill_chime_transcript(umo, new_lines)
+
+    def _enh_refill_chime_transcript(self, umo: str, lines: list[str]) -> None:
+        """可选项：把回填的增强历史行转成接话 transcript 格式补进环形缓冲。"""
+        try:
+            state = self._get_group_state(umo)
+        except Exception as e:
+            logger.debug(f"[群聊增强] historyPull：接话回填跳过: {e}")
+            return
+        # transcript 无消息 ID 可去重，仅在为空时回填，避免重复
+        if state.transcript:
+            return
+        for line in lines:
+            if line.startswith("[You/"):
+                time_str = line[5:].split("]", 1)[0]
+                text = line.split("]: ", 1)[-1]
+                state.transcript.append(f"[{time_str[:5]}] Bot: {text}")
+                continue
+            m = re.match(r"^\[([^/\]]+)/([^/\]]+)/([0-9:]+)\](\((?:admin|member)\))? #msg\S+?: (.*)$", line)
+            if not m:
+                continue
+            nickname, sender_id, time_str, _role, text = m.groups()
+            state.transcript.append(
+                f"[{time_str[:5]}] {(nickname or sender_id or '未知')}({sender_id}): {text}"
+            )
+
     async def enhance_group_message(self, event: AstrMessageEvent) -> None:
         """群消息记录入口（含 @消息；命令与 bot 自身消息在框架层已少见，此处从宽）。"""
         self._enh_state_init()
@@ -541,6 +759,10 @@ class GroupEnhanceMixin:
         umo = event.unified_msg_origin
         if "GroupMessage" not in umo and "GuildMessage" not in umo:
             return
+        try:
+            self._enh_maybe_schedule_history_pull(event, umo)
+        except Exception as e:
+            logger.warning(f"[群聊增强] historyPull 调度失败: {e}")
         try:
             self._enh_record_message(event, umo)
         except Exception as e:

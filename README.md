@@ -16,8 +16,10 @@
 
 Bot 主动给好友发消息，模拟"想起来找你聊聊"的行为：
 
-- **随机间隔触发**：在 `min_interval_minutes` ~ `max_interval_minutes` 区间随机取间隔，
-  到点后由 `core\task_scheduler.py` 调度、`core\chat_flow.py` 执行完整的主动消息流程
+- **随机间隔触发（chatluna 式指数退避）**：到点触发后按「基础间隔 × 退避系数」递增，
+  加 ±抖动、设上限（`*_idle_backoff_factor` / `*_idle_jitter_percent` / `*_idle_max_minutes`），
+  有人回应就归位，冷场越久叫得越稀疏；由 `core\task_scheduler.py` 的
+  `_compute_idle_interval()` 统一计算，群聊沉默触发与私聊定时触发共用同一套公式
 - **免打扰时段**（`quiet_hours`）与**未回复上限**（`max_unanswered_times`，连续不理 Bot 就暂时不打扰）
 - **会话级差异化配置**：`core\session_override_manager.py` 支持对单个 `unified_msg_origin`
   覆盖全局配置（不同的间隔、提示词、开关），由 `core\session_config.py` 与 `core\session_parser.py`
@@ -43,15 +45,26 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 
 - **消息缓冲**：`core\group_chime.py` 把群消息按 `[时间] 昵称(id): 内容` 格式记入环形缓冲
   （`chime_append_transcript()`），白名单群才启用
-- **五道闸门**（`chime_check_all_gates()`）：总开关 → 每小时配额 → 每日配额 →
-  静音时段 → 积压量 + 判定冷却，全部通过才进入判定，成本控制到最低
-- **便宜判定模型决定插不插话**（`chime_run_judge()`）：把聊天记录和机器人身份简介
-  （`persona_brief`）交给一个便宜的小模型，输出 JSON（接不接话、置信度、插话角度）；
-  判定失败可走 `fallback_probability` 随机兜底
-- **喊话必应**：消息中出现唤醒词（`wake_keywords`，默认「小苏」）时无视闸门直接接话，
+- **活跃度数学判定，零 LLM 成本**（v2.1.0，与 chatluna-character 同款）：
+  `core\group_activity.py` 用多时间窗（持续/瞬时/爆发/指数平滑）的消息速率经
+  logistic 软阈值折算出 0~1 的"此刻群里多热闹"分数，再叠加"我上次开口"的自罚；
+  分数 ≥ 自适应门槛就直接接话——门槛会随 Bot 的发言频率自行抬高、群安静久了回落。
+  原 LLM 判定小模型及其配置已移除，粗筛彻底免费
+- **从便宜到贵的闸门**（`chime_check_all_gates()`）：总开关 → 每小时配额 → 每日配额 →
+  静音时段 → 活跃度门槛，全部通过才生成回复
+- **直呼聚合**（v2.1.0-dev.2）：@机器人 / 喊唤醒词的消息不各回各的，而是进同一个聚合池，
+  等 `direct_aggregate_seconds` 秒把窗口内所有直呼（带昵称 + 用户 ID）合并成一次回复；
+  @ 与喊昵称共用一个池子，回复也计入与接话同一份冷却/配额/活跃度记账
+- **唤醒词必应**：消息中出现唤醒词（`wake_keywords`，默认「小苏」）时无视闸门直接接话，
   前缀、句中、句尾都触发
+- **图片转述注入**（v2.1.0-dev.4）：直呼聚合与接话的 prompt 构建前先等群聊增强的
+  图片转述完成，把转述文案按消息 ID 写进 prompt；引用（Reply）链里内嵌的图片也会随请求附上
 - **群会话自动创建**（`_chime_get_group_conversation()`）：没会话的群自动 `/new`，零人工干预
 - **`<refuse/>` 主动放弃**：生成模型如果觉得自己此刻不该说话，输出 `<refuse/>` 即被拦截不发送
+- **主动消息计入同一账本**：Bot 的主动消息、直呼回复与接话共享冷却/配额/活跃度记账
+  （`chime_mark_sent()`），不会刚主动说完又立刻接话
+- **群聊沉默触发**：群冷场超过 `group_idle_trigger_minutes` 也触发主动开口，
+  间隔按指数退避递增（见"私聊主动消息"），沉默期满立即触发不额外等待
 - **回复拆分连发**：接话回复按空行拆成多条消息、带拟人延迟逐条发出；空行拆不开时
   兜底按单个换行拆（`chime_decorating_result()` + `_chime_send_followup_segment()`），
   弥补智能分段插件 `min_length` 门槛导致短回复不分段的缺口
@@ -64,6 +77,11 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 
 - **群聊历史增强**（`group_history`）：群消息以 `[昵称/ID/时间](角色) #msgID:` 格式
   持续记录并注入 system_prompt，Bot 说话时"看得见"群里最近发生了什么
+- **重启后回拉历史**（`history_pull_enable`，v2.1.0-dev.7）：每个群在本进程启动后的
+  第一条消息时，自动调用协议端 `get_group_msg_history` API 拉取最近
+  `history_pull_count` 条历史，按消息 ID 去重后回填缓冲区，
+  解决重启后回复没有上下文的问题；可选 `history_pull_chime` 同步回填接话记录。
+  仅支持 aiocqhttp（NapCat/Lagrange 等）平台
 - **图片转述**（`image_caption`）：群消息中的图片后台调用视觉模型转述，
   历史记录里的 `[Image]` 变成 `[Image: 描述]`，Bot 能"看懂"别人发的图
 - **语音转文字**（`voice_stt`）：群语音经 AstrBot 的 speech_to_text 提供商转写，
@@ -127,8 +145,9 @@ astrbot_plugin_lingxi/
 │   ├── llm_adapter.py          # 上下文获取与 LLM 调用封装
 │   ├── message_sender.py       # 发送与装饰钩子（on_decorating_result 分发）
 │   ├── message_events.py       # 消息事件监听
-│   ├── group_chime.py          # 群聊接话全部逻辑（缓冲/闸门/判定/拆分）
-│   ├── group_enhance.py        # 群聊增强（历史注入/图片转述/语音转写/标签）
+│   ├── group_chime.py          # 群聊接话全部逻辑（缓冲/闸门/直呼聚合/拆分）
+│   ├── group_activity.py       # 群活跃度评分（多时间窗消息速率，纯数学零 LLM）
+│   ├── group_enhance.py        # 群聊增强（历史注入/historyPull/图片转述/语音转写/标签）
 │   ├── enhance_web_search.py   # grok web_search / x_search / x_read 统一封装
 │   ├── web_read.py             # Jina Reader 请求构造
 │   ├── enhance_ban.py          # LLM 封禁工具与拦截
@@ -154,10 +173,11 @@ astrbot_plugin_lingxi/
 | 用途 | 说明 | 默认建议 |
 |---|---|---|
 | 主对话模型 | 群聊接话、私聊主动消息的正常生成 | 任意文本模型 |
-| 接话判定模型 | `group_chime_settings.judge_provider_id`，判断该不该插话的便宜小模型 | deepseek 系小模型 |
 | 分段模型 | `segmented_reply_settings.smart_split`，决定断点；失败自动回退规则分段 | 云端小模型（本地 ollama 亦可，需把 `timeout_seconds` 调大到 15 以上） |
 | 图片转述/描述模型 | `image_caption_provider_id` 与 `image_describe.provider_id` | 任意视觉模型 |
 | X 搜索/读帖/图片视频理解 | `web_search.provider_id` 等 | xAI 的 grok 系提供商（**必须 xAI Key**，xAI 服务端能力） |
+
+> 接话的"该不该插话"判定自 v2.1.0 起改为纯数学的活跃度评分，不再消耗任何模型调用。
 
 ### 外部服务
 
@@ -190,8 +210,8 @@ git clone <本仓库> astrbot_plugin_lingxi
 
 1. **私聊/群聊全局配置**：把目标会话的 `unified_msg_origin` 填进 `session_list`，
    按需开自动触发、免打扰、TTS、分段、记忆召回
-2. **群聊接话**：把群号加进 `group_whitelist`，配置判定模型与配额，
-   唤醒词默认「小苏」（消息里喊一声即触发）
+2. **群聊接话**：把群号加进 `group_whitelist`，配置配额与活跃度门槛
+   （`activity_skip_threshold` 等），唤醒词默认「小苏」（消息里喊一声即触发）
 3. **群聊增强**：开 `group_history.enable` 后 Bot 会自动维护群历史；开 `image_caption` 需指定视觉模型
 4. **搜索工具**：`web_search` / `x_search` / `x_read` 需要先在 AstrBot 里新建一个 xAI 提供商并填 `provider_id`
 
@@ -209,13 +229,13 @@ git clone <本仓库> astrbot_plugin_lingxi
 这套插件的核心问题只有一个：**怎么让一个回合制问答机器人在群聊里表现得像个活人**。
 拆开来是四个设计决定：
 
-### 1. 成本漏斗：便宜模型管决策，贵模型管表达
+### 1. 成本漏斗：数学管决策，模型管表达
 
 群里每条消息如果都丢给主模型，既贵又会频繁插话招人烦。所以接话链路做成
-**五道零成本闸门 → 便宜判定模型 → 贵的生成模型** 三级漏斗：前两级把 99% 的消息挡在门外
-（白名单、配额、静音、积压不足、判定说"不"），只有真正值得说话的时刻才动用主对话模型。
-判定模型输出结构化 JSON（接话与否 + 置信度 + 插话角度），失败时 fail-safe 不接，
-宁可错过也不胡说。
+**多道零成本闸门 → 活跃度数学评分 → 生成模型** 三级漏斗：白名单、配额、静音、
+活跃度门槛把 99% 的消息挡在门外（v2.1.0 起"该不该说"的判定是纯数学的多时间窗
+消息速率评分，不再消耗任何模型调用），只有真正值得说话的时刻才动用主对话模型。
+分数本身就是 fail-safe：群安静、Bot 刚开过口，分数自然被压低，宁可错过也不胡说。
 
 ### 2. 走完整 pipeline，而不是自己偷偷调 LLM
 
@@ -249,6 +269,9 @@ git clone <本仓库> astrbot_plugin_lingxi
 - 移除独立 WebUI 管理端（4100 端口）与遥测上报
 - 新增：私聊追发、群聊智能接话、群聊历史增强、图片转述、语音转文字、
   Mention/Quote 标签、封禁控制、grok 搜索 / X 搜索 / X 读帖 / 网页读取
+- v2.1.0：接话判定改为活跃度数学评分（移植 chatluna-character，移除 LLM 判定模型）、
+  直呼聚合（@ 与喊昵称合并回复）、群聊/私聊空闲触发改用 chatluna 式指数退避 + 抖动 + 上限、
+  主动消息计入接话账本、重启后 historyPull 从协议端回拉缺失群历史
 - 修复：终止流程端口泄漏、分段超时等若干问题
 
 ## License

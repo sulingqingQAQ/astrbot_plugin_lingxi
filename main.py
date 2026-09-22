@@ -1,5 +1,5 @@
 # 文件名: main.py (位于 data/plugins/astrbot_plugin_lingxi/ 目录下)
-# 版本: v2.0.1（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
+# 版本: v2.1.0-dev.7（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
 
 """插件入口与主类定义。"""
 
@@ -123,6 +123,11 @@ class ProactiveChatPlugin(
         # umo -> msg_id -> 进行中的图片转述任务（注入历史前按消息等待）
         self._enhance_image_inflight: dict[str, dict[str, asyncio.Task[None]]] = {}
         self.enhance_ban_store = None
+        # historyPull：拉取标记 / 并发防重 / 失败冷却 / 任务句柄
+        self._enhance_history_pulled: set[str] = set()
+        self._enh_pull_inflight: set[str] = set()
+        self._enh_pull_fail_until: dict[str, float] = {}
+        self._enh_pull_tasks: set[asyncio.Task[None]] = set()
 
 
         logger.info("[主动消息] 插件实例已创建喵。")
