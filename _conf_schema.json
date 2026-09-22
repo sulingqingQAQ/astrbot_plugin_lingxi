@@ -1159,7 +1159,7 @@
                     "image_caption_prompt": {
                         "description": "🖼️ 图片转述提示词",
                         "type": "text",
-                        "default": "Please describe the image using Chinese.",
+                        "default": "请用简体中文简要描述这张图片。如果图片里有文字，请原样转写出来。",
                         "hint": "发送给图片转述模型的提示词"
                     },
                     "voice_stt": {
@@ -1450,7 +1450,7 @@
                     "prompt": {
                         "description": "🖼️ 描述提示词",
                         "type": "text",
-                        "default": "Please describe this image concisely in Chinese."
+                        "default": "请用简体中文简要描述这张图片。"
                     },
                     "max_images": {
                         "description": "🔢 单次最多处理图片数",
