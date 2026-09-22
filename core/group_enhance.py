@@ -104,7 +104,7 @@ class GroupEnhanceMixin:
     def enh_image_caption_prompt(self) -> str:
         return self._enh_str(
             "group_history", "image_caption_prompt"
-        ) or "Please describe the image using Chinese."
+        ) or "请用简体中文简要描述这张图片。如果图片里有文字，请原样转写出来。"
 
     def enh_image_caption_timeout(self) -> float:
         return max(5.0, self._enh_float("timeouts", "image_caption_timeout", 45.0))
@@ -404,7 +404,7 @@ class GroupEnhanceMixin:
 
     def enh_imgdesc_prompt(self) -> str:
         return self._enh_str("image_describe", "prompt") or (
-            "Please describe this image concisely in Chinese."
+            "请用简体中文简要描述这张图片。"
         )
 
     def enh_imgdesc_max_images(self) -> int:
@@ -444,9 +444,10 @@ class GroupEnhanceMixin:
             try:
                 resp = await asyncio.wait_for(
                     provider.text_chat(
-                        prompt=prompt,
+                        prompt="描述这张图片。",
                         session_id=uuid.uuid4().hex,
                         image_urls=[u],
+                        system_prompt=prompt,
                         persist=False,
                     ),
                     timeout=timeout_sec,
@@ -995,9 +996,10 @@ class GroupEnhanceMixin:
                 try:
                     response = await asyncio.wait_for(
                         provider.text_chat(
-                            prompt=prompt,
+                            prompt="描述这张图片。",
                             session_id=uuid.uuid4().hex,
                             image_urls=[image_url],
+                            system_prompt=prompt,
                             persist=False,
                         ),
                         timeout=timeout_sec,

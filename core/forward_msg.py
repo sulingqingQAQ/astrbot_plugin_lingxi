@@ -543,9 +543,10 @@ class ForwardMsgMixin:
                 try:
                     response = await asyncio.wait_for(
                         provider.text_chat(
-                            prompt=self.fm_get_describe_prompt(),
+                            prompt="描述这张图片。",
                             session_id=uuid.uuid4().hex,
                             image_urls=[url],
+                            system_prompt=self.fm_get_describe_prompt(),
                             persist=False,
                         ),
                         timeout=self.fm_get_describe_timeout(),
