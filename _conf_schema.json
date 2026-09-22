@@ -899,7 +899,7 @@
             "describe_prompt": {
                 "description": "🖼️ 图片转述提示词",
                 "type": "string",
-                "default": "Please describe this image concisely in Chinese.",
+                "default": "请用简体中文简要描述这张图片，一两句话即可。如果图片里有文字（截图、聊天记录、梗图等），请把文字原样转写出来；如果是表情包或梗图，说明它的含义或情绪。不要评价图片，只描述内容。",
                 "hint": "发送给图片转述模型的提示词"
             },
             "image_limit_per_record": {
