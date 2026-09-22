@@ -1,5 +1,5 @@
 # 文件名: main.py (位于 data/plugins/astrbot_plugin_lingxi/ 目录下)
-# 版本: v2.1.0-dev.7（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
+# 版本: v2.1.0-dev.8（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
 
 """插件入口与主类定义。"""
 

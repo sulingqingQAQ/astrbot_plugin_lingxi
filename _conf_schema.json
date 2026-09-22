@@ -857,6 +857,34 @@
                     "step": 1
                 }
             },
+            "forward_quote_resolve_enable": {
+                "description": "📖 解析引用的聊天记录",
+                "type": "bool",
+                "default": true,
+                "hint": "直呼（@/喊昵称）时引用了合并转发的聊天记录，自动调协议端 get_msg + get_forward_msg 拆出里面的对话内容注入 prompt，Bot 就能看懂你甩给它看的聊天记录。仅 aiocqhttp（NapCat/Lagrange 等）平台生效"
+            },
+            "forward_quote_max_nodes": {
+                "description": "📖 聊天记录解析节点上限",
+                "type": "int",
+                "default": 20,
+                "hint": "单条聊天记录最多解析多少条消息，超出截断并标注",
+                "slider": {
+                    "min": 3,
+                    "max": 50,
+                    "step": 1
+                }
+            },
+            "forward_quote_max_chars": {
+                "description": "📖 聊天记录解析字数上限",
+                "type": "int",
+                "default": 1500,
+                "hint": "单条聊天记录解析结果的字符数上限，超出截断。聊天记录里的图片只显示 [图片] 占位，不做视觉转述",
+                "slider": {
+                    "min": 200,
+                    "max": 4000,
+                    "step": 100
+                }
+            },
             "group_whitelist": {
                 "description": "📋 群白名单",
                 "type": "list",
