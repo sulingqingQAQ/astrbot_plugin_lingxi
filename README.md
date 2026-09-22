@@ -7,6 +7,11 @@
 > 并吸收了 [astrbot_plugin_astrbot_enhance_mode](https://github.com/Axi404/astrbot_plugin_astrbot_enhance_mode)
 > 与 [chatluna-llm-web-search](https://github.com/CookSleep/chatluna-llm-web-search) 的部分设计思路。
 > 遵循同样的 AGPL-3.0 协议开源。
+>
+> 此外，v2.1.0 的多项核心机制直接移植自 koishi 生态的
+> [chatluna-character](https://github.com/CookSleep/chatluna-character)（同作者开源项目）：
+> 群活跃度评分、直呼聚合、空闲触发的指数退避模型、historyPull 重启回拉历史。
+> 各处源码注释均标明了对应的原始实现位置。
 
 ---
 
@@ -261,6 +266,25 @@ git clone <本仓库> astrbot_plugin_lingxi
 开不开由用户权衡费用，插件不替你做决定。
 
 一句话收束：**判定用便宜的，表达走完整的，拆分用机制的，计费用开关的。**
+
+---
+
+## 移植自 chatluna-character 的功能
+
+[chatluna-character](https://github.com/CookSleep/chatluna-character) 是 koishi 生态里
+"让 LLM 角色主动混进群聊"的成熟实现。v2.1.0 起本插件把其中四块经过验证的机制
+逐一移植到了 AstrBot 上（并非照搬代码，而是按 Python / AstrBot 习惯重写）：
+
+| 移植功能 | chatluna-character 原始位置 | 本插件位置 | 说明 |
+|---|---|---|---|
+| 群活跃度评分 | `src/utils/activity.ts` + `src/plugins/filter.ts`（markTriggered 自罚） | `core/group_activity.py` | 多时间窗（持续 90s / 瞬时 20s / 爆发 30s）消息速率经 logistic 软阈值折算 0~1 分数，叠加发言自罚；原版毫秒时间戳统一改为秒 |
+| 直呼聚合 | 直呼消息聚合窗口回复 | `core/group_chime.py`（`_chime_build_direct_entry` 等） | @机器人与喊唤醒词进同一个池子，窗口内合并成一次回复 |
+| 空闲触发指数退避 | 空闲触发间隔的 backoff / jitter / cap 模型 | `core/task_scheduler.py`（`_compute_idle_interval`） | 群聊沉默触发与私聊定时触发共用；沉默期满立即触发，有人回应归位 |
+| historyPull | 从聊天平台 API 拉取缺失历史回填内存 | `core/group_enhance.py`（`_enh_pull_group_history`） | 重启后首条消息触发，按消息 ID 去重回填，可同步回填接话记录 |
+
+移植时同步参考了它的配置语义：内存历史条数上限（对应本插件的 `group_history.max_messages`）
+等配置项命名与含义保持对齐，方便两边用户互相迁移；输入 token 预算
+（chatluna 的 `maxTokens`）暂未移植。
 
 ---
 
