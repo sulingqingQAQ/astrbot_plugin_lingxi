@@ -822,6 +822,111 @@
             }
         }
     },
+    "forward_msg_settings": {
+        "description": "📖 合并转发（聊天记录）解析：私聊直带/引用、群聊引用的聊天记录自动拆节点注入请求，图片可选视觉转述。独立配置，私聊群聊均可用",
+        "type": "object",
+        "items": {
+            "enable": {
+                "description": "✅ 启用",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后自动解析合并转发（聊天记录）并注入 LLM 请求：私聊解析直接发送和被引用的聊天记录，群聊解析被引用的聊天记录（含直呼 @/喊昵称时）。仅 aiocqhttp（NapCat/Lagrange 等）平台生效"
+            },
+            "resolve_private_direct": {
+                "description": "💬 私聊：解析直接发送的聊天记录",
+                "type": "bool",
+                "default": true,
+                "hint": "私聊消息里直接带了合并转发（聊天记录）时，拆出里面的对话内容注入请求，Bot 就能看懂你甩给它的聊天记录"
+            },
+            "resolve_private_quote": {
+                "description": "💬 私聊：解析被引用的聊天记录",
+                "type": "bool",
+                "default": true,
+                "hint": "私聊时引用一条合并转发（聊天记录）再说话，自动解析其内容注入请求"
+            },
+            "resolve_group_quote": {
+                "description": "👥 群聊：解析被引用的聊天记录",
+                "type": "bool",
+                "default": true,
+                "hint": "群里引用一条合并转发（聊天记录）再 @Bot/喊唤醒词（或触发普通回复）时，自动解析其内容注入请求。直呼聚合（@/喊话聚合回复）路径也走这里"
+            },
+            "max_nodes": {
+                "description": "📜 聊天记录解析节点上限",
+                "type": "int",
+                "default": 20,
+                "hint": "单条聊天记录最多解析多少条消息，超出截断并标注",
+                "slider": {
+                    "min": 3,
+                    "max": 200,
+                    "step": 5
+                }
+            },
+            "max_chars": {
+                "description": "📜 聊天记录解析字数上限",
+                "type": "int",
+                "default": 1500,
+                "hint": "单条聊天记录解析结果的字符数上限，超出截断",
+                "slider": {
+                    "min": 200,
+                    "max": 20000,
+                    "step": 100
+                }
+            },
+            "max_depth": {
+                "description": "📜 嵌套聊天记录解析层数",
+                "type": "int",
+                "default": 2,
+                "hint": "聊天记录里套聊天记录时最多往下解析几层（含记录本身）。每层都是一次协议端 API 调用，设太深会拖慢回复",
+                "slider": {
+                    "min": 1,
+                    "max": 4,
+                    "step": 1
+                }
+            },
+            "describe_image_enable": {
+                "description": "🖼️ 图片视觉转述",
+                "type": "bool",
+                "default": true,
+                "hint": "开启后聊天记录里的图片会调用下方选的视觉模型生成描述，注入文本从 [图片] 占位变为 [图片: 描述]，Bot 能看懂聊天记录里的图。同一张图（按 URL）的描述会缓存，不重复调用"
+            },
+            "describe_provider_id": {
+                "description": "🖼️ 图片转述模型",
+                "type": "string",
+                "default": "",
+                "hint": "用于聊天记录图片转述的 LLM 提供商 ID，留空使用当前会话默认提供商（推荐选一个免费的视觉模型）",
+                "_special": "select_provider"
+            },
+            "describe_prompt": {
+                "description": "🖼️ 图片转述提示词",
+                "type": "string",
+                "default": "Please describe this image concisely in Chinese.",
+                "hint": "发送给图片转述模型的提示词"
+            },
+            "image_limit_per_record": {
+                "description": "🔢 单条聊天记录图片转述上限",
+                "type": "int",
+                "default": 50,
+                "hint": "单条聊天记录最多转述多少张图片，超出只留 [图片] 占位。表情包（mface）不转述不计数",
+                "slider": {
+                    "min": 1,
+                    "max": 50,
+                    "step": 1
+                }
+            },
+            "describe_timeout": {
+                "description": "⏱️ 图片转述超时（秒）",
+                "type": "int",
+                "default": 45,
+                "hint": "单张图片转述调用视觉模型的超时时间，超时该图退回 [图片] 占位"
+            },
+            "cache_ttl_minutes": {
+                "description": "⏱️ 解析结果缓存时长（分钟）",
+                "type": "int",
+                "default": 1440,
+                "hint": "同一条聊天记录（按 resId）的解析结果和同一张图的描述缓存这么久，期间重复解析直接用缓存，不打协议端 API。默认 1440 = 1 天"
+            }
+        }
+    },
     "group_chime_settings": {
         "description": "🗣️ 群聊接话（原 astrbot_plugin_group_chime 并入）：监听群消息，判定模型决定是否插话，走完整 pipeline 生成",
         "type": "object",
@@ -855,34 +960,6 @@
                     "min": 1,
                     "max": 60,
                     "step": 1
-                }
-            },
-            "forward_quote_resolve_enable": {
-                "description": "📖 解析引用的聊天记录",
-                "type": "bool",
-                "default": true,
-                "hint": "直呼（@/喊昵称）时引用了合并转发的聊天记录，自动调协议端 get_msg + get_forward_msg 拆出里面的对话内容注入 prompt，Bot 就能看懂你甩给它看的聊天记录。仅 aiocqhttp（NapCat/Lagrange 等）平台生效"
-            },
-            "forward_quote_max_nodes": {
-                "description": "📖 聊天记录解析节点上限",
-                "type": "int",
-                "default": 20,
-                "hint": "单条聊天记录最多解析多少条消息，超出截断并标注",
-                "slider": {
-                    "min": 3,
-                    "max": 50,
-                    "step": 1
-                }
-            },
-            "forward_quote_max_chars": {
-                "description": "📖 聊天记录解析字数上限",
-                "type": "int",
-                "default": 1500,
-                "hint": "单条聊天记录解析结果的字符数上限，超出截断。聊天记录里的图片只显示 [图片] 占位，不做视觉转述",
-                "slider": {
-                    "min": 200,
-                    "max": 4000,
-                    "step": 100
                 }
             },
             "group_whitelist": {

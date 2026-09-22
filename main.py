@@ -1,5 +1,5 @@
 # 文件名: main.py (位于 data/plugins/astrbot_plugin_lingxi/ 目录下)
-# 版本: v2.1.0-dev.8（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
+# 版本: v2.1.0-dev.9（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
 
 """插件入口与主类定义。"""
 
@@ -18,6 +18,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from .core.chat_flow import ProactiveCoreMixin
 from .core.data_storage import StorageMixin
 from .core.followup import FollowupMixin
+from .core.forward_msg import ForwardMsgMixin
 from .core.group_chime import GroupChimeMixin
 from .core.group_enhance import GroupEnhanceMixin
 from .core.llm_adapter import LlmMixin
@@ -44,6 +45,7 @@ class ProactiveChatPlugin(
     FollowupMixin,  # 私聊对话增强（AI 回复后概率追发一条消息）
     GroupChimeMixin,  # 群聊接话（判定模型决定是否插话，原 astrbot_plugin_group_chime）
     GroupEnhanceMixin,  # 群聊增强（历史注入/图片转述/标签解析/封禁/联网搜索）
+    ForwardMsgMixin,  # 合并转发解析（私聊直带/引用、群聊引用，图片视觉转述）
     LifecycleMixin,  # initialize/terminate 生命周期管理
     ProactiveCoreMixin,  # 主动消息主流程编排
     star.Star,
@@ -128,6 +130,11 @@ class ProactiveChatPlugin(
         self._enh_pull_inflight: set[str] = set()
         self._enh_pull_fail_until: dict[str, float] = {}
         self._enh_pull_tasks: set[asyncio.Task[None]] = set()
+
+        # 合并转发解析：解析结果缓存 / 图片描述缓存 / 防重入
+        self._fm_record_cache: dict[str, tuple[float, str]] = {}
+        self._fm_image_cache: dict[str, tuple[float, str]] = {}
+        self._fm_inflight: set[str] = set()
 
 
         logger.info("[主动消息] 插件实例已创建喵。")
@@ -314,6 +321,15 @@ class ProactiveChatPlugin(
         """群聊增强注入：群聊历史 + 标签说明追加到 system_prompt（不动 prompt/contexts）。"""
         await GroupEnhanceMixin.enhance_inject_group_context(self, event, req)
         await GroupEnhanceMixin.enhance_inject_role(self, event, req)
+
+    @filter.on_llm_request()
+    async def on_llm_request_forward(self, event: AstrMessageEvent, req) -> None:
+        """合并转发解析注入：私聊直带/引用、群聊引用的聊天记录 → 请求内容。
+
+        具体逻辑由 ForwardMsgMixin 实现；直呼聚合路径已自行解析，
+        钩子内部按 chime 标记跳过。
+        """
+        await ForwardMsgMixin.forward_resolve_on_llm_request(self, event, req)
 
     @filter.on_decorating_result()
     async def on_decorating_result_enhance(self, event: AstrMessageEvent) -> None:

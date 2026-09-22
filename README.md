@@ -60,10 +60,6 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 - **直呼聚合**（v2.1.0-dev.2）：@机器人 / 喊唤醒词的消息不各回各的，而是进同一个聚合池，
   等 `direct_aggregate_seconds` 秒把窗口内所有直呼（带昵称 + 用户 ID）合并成一次回复；
   @ 与喊昵称共用一个池子，回复也计入与接话同一份冷却/配额/活跃度记账
-- **引用聊天记录看得懂**（v2.1.0-dev.8）：直呼时引用了合并转发的聊天记录，
-  自动调协议端 `get_msg` + `get_forward_msg` 拆出里面的对话内容注入 prompt
-  （`forward_quote_resolve_enable`，节点数与字数可配上限）；聊天记录里的图片
-  只显示占位符，不做视觉转述
 - **唤醒词必应**：消息中出现唤醒词（`wake_keywords`，默认「小苏」）时无视闸门直接接话，
   前缀、句中、句尾都触发
 - **图片转述注入**（v2.1.0-dev.4）：直呼聚合与接话的 prompt 构建前先等群聊增强的
@@ -99,6 +95,28 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
   `<quote id/>` 时自动转成 At / Reply 消息组件，实现精准回复与 @ 某人
 - **封禁控制**（`enhance_ban.py`）：给 LLM 提供封禁/解封/查询名单的工具，
   被封禁用户的消息直接拦截，管理员豁免可配、最长封禁时长可配
+
+### 📖 合并转发（聊天记录）解析
+
+独立配置节 `forward_msg_settings`（v2.1.0-dev.9 起从群聊接话配置迁出，
+私聊群聊通用），实现在 `core\forward_msg.py`。当聊天记录出现在以下场景时，
+自动调协议端 `get_msg` + `get_forward_msg` 拆出节点内容注入本轮 LLM 请求：
+
+- **私聊直接发送**：用户私聊消息里直接带了合并转发（`resolve_private_direct`）
+- **私聊引用**：私聊时引用一条聊天记录再说话（`resolve_private_quote`）
+- **群聊引用**：群里引用一条聊天记录再 @Bot / 喊唤醒词或触发普通回复
+  （`resolve_group_quote`）；直呼聚合路径与普通回复路径共用
+- **群聊历史回拉**（historyPull）里的聊天记录**不解析**，只留占位
+
+实现细节（参考 koishi 插件 chatluna-forward-msg 的读取思路移植）：
+
+- 递归解析嵌套聊天记录（`max_depth`，默认 2 层），带防环与防重入
+- 节点数（`max_nodes`）与字数（`max_chars`）双上限，超出截断并标注
+- **图片视觉转述**（`describe_image_enable`）：记录里的图片调用视觉模型生成描述，
+  注入文本从 `[图片]` 占位变为 `[图片: 描述]`，Bot 能看懂聊天记录里的图；
+  表情包（mface）不转述只留占位；同一张图按 URL 缓存不重复调用
+- 单条记录图片转述上限 `image_limit_per_record`（默认 50），超出的图留占位
+- 解析结果按 resId 缓存（`cache_ttl_minutes`，默认 1 天），重复解析零 API 调用
 
 ### 🌐 grok 搜索工具（明示才调用）
 
