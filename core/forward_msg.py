@@ -121,7 +121,9 @@ class ForwardMsgMixin:
 
     def fm_get_describe_prompt(self) -> str:
         return self._fm_str("describe_prompt") or (
-            "Please describe this image concisely in Chinese."
+            "请用简体中文简要描述这张图片，一两句话即可。"
+            "如果图片里有文字（截图、聊天记录、梗图等），请把文字原样转写出来；"
+            "如果是表情包或梗图，说明它的含义或情绪。不要评价图片，只描述内容。"
         )
 
     def fm_get_describe_timeout(self) -> float:
