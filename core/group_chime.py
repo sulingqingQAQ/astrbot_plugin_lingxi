@@ -238,6 +238,18 @@ class GroupChimeMixin:
         """@ / 喊昵称消息的聚合窗口（秒）：窗口内的直呼合并成一次回复。"""
         return max(1, min(120, self._chime_int("direct_aggregate_seconds", 8)))
 
+    def chime_get_forward_quote_enable(self) -> bool:
+        """直呼消息引用了合并转发（聊天记录）时，是否解析其内容注入 prompt。"""
+        return self._chime_bool("forward_quote_resolve_enable", True)
+
+    def chime_get_forward_quote_max_nodes(self) -> int:
+        """单条聊天记录最多解析多少个节点，超出截断。"""
+        return max(3, min(50, self._chime_int("forward_quote_max_nodes", 20)))
+
+    def chime_get_forward_quote_max_chars(self) -> int:
+        """单条聊天记录解析结果的字符数上限，超出截断。"""
+        return max(200, min(8000, self._chime_int("forward_quote_max_chars", 1500)))
+
     # ------------------------------------------------------------------ #
     # 群状态与消息缓冲
     # ------------------------------------------------------------------ #
@@ -394,6 +406,181 @@ class GroupChimeMixin:
             await waiter(unified_msg_origin)
         except Exception as error:
             logger.debug(f"[群聊接话] 等待图片转述异常（忽略）: {error}")
+
+    # ------------------------------------------------------------------ #
+    # 直呼引用合并转发（聊天记录）解析
+    # ------------------------------------------------------------------ #
+
+    async def _chime_resolve_forward_notes(
+        self, unified_msg_origin: str, messages: list[dict]
+    ) -> None:
+        """解析聚合消息里引用的合并转发（聊天记录），生成可读摘要写进条目。
+
+        在聚合窗口结束、构建 prompt 之前调用。逐条引用调协议端
+        get_msg → get_forward_msg 拆节点，图片只记占位（聊天记录里的图
+        不进转述队列，避免按次计费的视觉调用被大量历史图撑爆）。
+        """
+        if not self.chime_get_forward_quote_enable():
+            return
+        for message in messages:
+            quote_ids = message.get("quote_ids") or []
+            bot = message.get("bot")
+            if not quote_ids or bot is None:
+                continue
+            digests: list[str] = []
+            for quote_id in quote_ids[:2]:
+                try:
+                    digest = await self._chime_fetch_forward_digest(bot, quote_id)
+                except Exception as error:
+                    logger.debug(
+                        f"[群聊接话] 引用聊天记录解析失败 id={quote_id}: {error}"
+                    )
+                    continue
+                if digest:
+                    digests.append(digest)
+            if digests:
+                message["forward_note"] = (
+                    "（你被引用的聊天记录内容如下：\n" + "\n――――\n".join(digests) + "\n）"
+                )
+                logger.info(
+                    f"[群聊接话] [{unified_msg_origin}] 已解析引用的聊天记录，"
+                    f"{len(digests)} 条将注入直呼 prompt"
+                )
+
+    async def _chime_fetch_forward_digest(self, bot: Any, quote_id: str) -> str:
+        """按引用消息 ID 判断是否合并转发，是则拆出节点内容返回可读文本。
+
+        非合并转发（普通消息引用）返回空串，prompt 里维持原有引用展示。
+        """
+        detail = await bot.call_api("get_msg", message_id=quote_id)
+        if not isinstance(detail, dict):
+            return ""
+        res_id = self._chime_extract_res_id(detail.get("message"))
+        if not res_id:
+            return ""
+        try:
+            # NapCat 优先 res_id；兼容 OneBot 标准的 message_id 传法
+            result = await bot.call_api(
+                "get_forward_msg", res_id=res_id, message_id=quote_id
+            )
+        except Exception:
+            result = await bot.call_api("get_forward_msg", message_id=quote_id)
+        if isinstance(result, dict):
+            nodes = result.get("messages") or []
+        elif isinstance(result, list):
+            nodes = result
+        else:
+            nodes = []
+        return self._chime_format_forward_nodes(nodes)
+
+    @staticmethod
+    def _chime_extract_res_id(message_array: Any) -> str:
+        """从消息段数组里找合并转发的 resId（forward 段或 Json 卡片）。
+
+        NapCat 把合并转发表示为 forward 段（data.id = resId）；
+        部分 SDK 表示为 Json 卡片，resId 藏在卡片 JSON 的 meta.multimsg 里，
+        这里两者都兜住。
+        """
+        if not isinstance(message_array, list):
+            return ""
+        for seg in message_array:
+            if not isinstance(seg, dict):
+                continue
+            seg_type = str(seg.get("type") or "")
+            data = seg.get("data") or {}
+            if seg_type == "forward":
+                for key in ("resId", "res_id", "id"):
+                    value = str(data.get(key) or "").strip()
+                    if value:
+                        return value
+            elif seg_type in ("json", "xml"):
+                import json as _json
+                import re as _re
+
+                raw = str(data.get("data") or "")
+                try:
+                    card = _json.loads(raw)
+                    res_id = str(
+                        ((card.get("meta") or {}).get("multimsg") or {}).get(
+                            "resid"
+                        )
+                        or ""
+                    )
+                    if res_id:
+                        return res_id
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                match = _re.search(r'"resid"\s*:\s*"([^"]+)"', raw, _re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        return ""
+
+    def _chime_format_forward_nodes(self, nodes: Any) -> str:
+        """把 get_forward_msg 返回的节点列表格式化成给模型看的聊天记录。"""
+        if not isinstance(nodes, list):
+            return ""
+        max_nodes = self.chime_get_forward_quote_max_nodes()
+        max_chars = self.chime_get_forward_quote_max_chars()
+        lines: list[str] = []
+        total_chars = 0
+        truncated = False
+        for index, node in enumerate(nodes):
+            if index >= max_nodes:
+                truncated = True
+                break
+            if not isinstance(node, dict):
+                continue
+            data = node.get("data") if isinstance(node.get("data"), dict) else node
+            sender = (data.get("sender") or {}) if isinstance(data, dict) else {}
+            nickname = str(
+                sender.get("nickname") or sender.get("card") or "未知"
+            ).replace("\n", " ")
+            raw_time = data.get("time")
+            try:
+                time_str = datetime.fromtimestamp(float(raw_time)).strftime("%H:%M")
+            except (TypeError, ValueError, OSError):
+                time_str = ""
+
+            content = data.get("content") if isinstance(data, dict) else None
+            parts: list[str] = []
+            if isinstance(content, list):
+                for seg in content:
+                    if not isinstance(seg, dict):
+                        continue
+                    seg_type = str(seg.get("type") or "")
+                    seg_data = seg.get("data") or {}
+                    if seg_type == "text":
+                        parts.append(str(seg_data.get("text") or ""))
+                    elif seg_type == "image":
+                        parts.append(" [图片]")
+                    elif seg_type == "record":
+                        parts.append(" [语音]")
+                    elif seg_type == "video":
+                        parts.append(" [视频]")
+                    elif seg_type == "face":
+                        parts.append(f"[表情:{seg_data.get('id', '')}]")
+                    elif seg_type == "forward":
+                        parts.append(" [嵌套聊天记录]")
+            elif isinstance(content, str):
+                parts.append(content)
+            text = "".join(parts).replace("\n", " ").strip()
+            if not text:
+                continue
+            prefix = f"[{time_str}] " if time_str else ""
+            line = f"{prefix}{nickname}: {text}"
+            if total_chars + len(line) > max_chars:
+                truncated = True
+                break
+            lines.append(line)
+            total_chars += len(line)
+
+        if not lines:
+            return ""
+        head = "（聊天记录，共 {} 条）\n".format(len(nodes))
+        body = "\n".join(lines)
+        if truncated:
+            body += "\n…（后续内容已截断）"
+        return head + body
 
     def _chime_provider_supports_image(self, unified_msg_origin: str) -> bool:
         """当前会话的对话模型是否支持图片输入（modalities 未配置时视为支持）。"""
@@ -616,7 +803,9 @@ class GroupChimeMixin:
 1. 可逐条回应，也可合并回应共同的话题；谁的问题相关就回应谁。
 2. 称呼群友时用他们的昵称；想点名回应某个人，直接用昵称即可。
 3. 不要罗列/复述消息原文，不要说"我收到了几条消息"这类系统腔，直接像真人一样回复。
-4. 保持你的人格与口语风格，回复要像在群里连着发几条短消息。\
+4. 保持你的人格与口语风格，回复要像在群里连着发几条短消息。
+5. 如果某条消息附有「你被引用的聊天记录内容」，说明对方是想让你看这段记录再回答——\
+基于其中的内容回应对方的提问或调侃，聊天记录里的图片你只能看到占位符，无需装作看过。\
 """
 
     @staticmethod
@@ -642,6 +831,10 @@ class GroupChimeMixin:
             "message_id": message_id,
             "quote_ids": GroupChimeMixin._chime_collect_quote_ids(event),
             "image_note": "",
+            # 引用合并转发的解析结果（聚合触发时回填）；bot 客户端留作
+            # 解析用（get_msg / get_forward_msg）
+            "bot": getattr(event, "bot", None),
+            "forward_note": "",
         }
 
     @staticmethod
@@ -652,7 +845,12 @@ class GroupChimeMixin:
             how = "直接@你" if message["trigger"] == "at" else "喊了你的昵称"
             text = message["text"] or "[图片/无文本]"
             note = message.get("image_note") or ""
+            forward_note = message.get("forward_note") or ""
             lines.append(
+                f"{index}. [{message['time_str']}] {message['nickname']}"
+                f"(id:{message['sender_id']}) {how}：{text}{note}\n{forward_note}"
+                if forward_note
+                else
                 f"{index}. [{message['time_str']}] {message['nickname']}"
                 f"(id:{message['sender_id']}) {how}：{text}{note}"
             )
@@ -723,6 +921,15 @@ class GroupChimeMixin:
                 logger.info(
                     f"[群聊接话] [{unified_msg_origin}] 聚合消息图片转述备注"
                     f"已注入 {caption_count}/{len(messages)} 条喵。"
+                )
+
+            # 引用了合并转发（聊天记录）的直呼消息：解析内容注入 prompt，
+            # 让模型"看得见"被引用的聊天记录在聊什么
+            try:
+                await self._chime_resolve_forward_notes(unified_msg_origin, messages)
+            except Exception as error:
+                logger.warning(
+                    f"[群聊接话] [{unified_msg_origin}] 引用聊天记录解析异常（忽略）: {error}"
                 )
 
             conv = await self._chime_get_group_conversation(unified_msg_origin)
