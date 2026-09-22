@@ -301,6 +301,29 @@ class ForwardMsgMixin:
     # 拉取与格式化
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    async def _fm_call_api(bot: Any, action: str, **params: Any) -> Any:
+        """调平台 API，兼容不同客户端暴露方式。
+
+        aiocqhttp 的 bot 对象没有 call_api 方法：NapCat/Lagrange 走
+        bot.api.call_action；个别实现把 call_action 挂在 bot 本体上。
+        都没有时退回 call_api（若存在）。
+        """
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        if callable(call_action):
+            return await call_action(action, **params)
+        call_action = getattr(bot, "call_action", None)
+        if callable(call_action):
+            return await call_action(action, **params)
+        call_api = getattr(bot, "call_api", None)
+        if callable(call_api):
+            return await call_api(action, **params)
+        raise AttributeError(
+            f"bot 对象无可用 API 调用通道（api.call_action/call_action/call_api 均缺失），"
+            f"无法执行 {action}"
+        )
+
     async def _fm_fetch_forward_digest(
         self, bot: Any, quote_id: str, umo: str = ""
     ) -> str:
@@ -308,7 +331,7 @@ class ForwardMsgMixin:
 
         非合并转发（普通消息引用）返回空串，prompt 里维持原有引用展示。
         """
-        detail = await bot.call_api("get_msg", message_id=quote_id)
+        detail = await self._fm_call_api(bot, "get_msg", message_id=quote_id)
         if not isinstance(detail, dict):
             return ""
         res_id = self._fm_extract_res_id(detail.get("message"))
@@ -460,7 +483,11 @@ class ForwardMsgMixin:
                     elif seg_type == "json":
                         parts.append(" [卡片消息]")
                     elif seg_type == "forward":
-                        nested_id = str(seg_data.get("id") or "").strip()
+                        nested_id = ""
+                        for key in ("id", "resId", "res_id"):
+                            nested_id = str(seg_data.get(key) or "").strip()
+                            if nested_id:
+                                break
                         if depth > 1 and nested_id:
                             try:
                                 nested_text = await self._fm_render_res_id(
