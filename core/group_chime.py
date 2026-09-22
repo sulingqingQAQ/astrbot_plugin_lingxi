@@ -42,6 +42,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Plain, Reply
 
 from .enhance_tag_utils import normalize_quote_id
+from .forward_msg import ForwardMsgMixin
 from .group_activity import (
     THRESHOLD_RESET_TIME,
     THRESHOLD_STEP_RATIO,
@@ -410,29 +411,54 @@ class GroupChimeMixin:
     ) -> None:
         """解析聚合消息里引用的合并转发（聊天记录），生成可读摘要写进条目。
 
-        在聚合窗口结束、构建 prompt 之前调用。逐条引用走 ForwardMsgMixin
-        的独立解析管线（get_msg → get_forward_msg 拆节点，图片可视觉转述）。
+        在聚合窗口结束、构建 prompt 之前调用。优先用引用链内嵌的 resId
+        （适配器转换 Reply 时已 get_msg 过，零开销）；没有再走 get_msg 兜底。
         """
         if not self.fm_get_enable() or not self.fm_get_group_quote():
             return
         for message in messages:
             quote_ids = message.get("quote_ids") or []
+            chain_res_ids = message.get("quote_res_ids") or []
             bot = message.get("bot")
-            if not quote_ids or bot is None:
+            if quote_ids and bot is None:
+                logger.info(
+                    f"[群聊接话] [{unified_msg_origin}] 引用了消息但 bot 为空，"
+                    "跳过聊天记录解析"
+                )
+                continue
+            if (not quote_ids and not chain_res_ids) or bot is None:
                 continue
             digests: list[str] = []
-            for quote_id in quote_ids[:2]:
+            # 1) 引用链内嵌 resId 快路径
+            for res_id in chain_res_ids[:2]:
                 try:
-                    digest = await self._fm_fetch_forward_digest(
-                        bot, quote_id, unified_msg_origin
+                    digest = await self._fm_render_res_id(
+                        bot, res_id, "", unified_msg_origin,
+                        self.fm_get_max_depth(),
                     )
                 except Exception as error:
-                    logger.debug(
-                        f"[群聊接话] 引用聊天记录解析失败 id={quote_id}: {error}"
+                    logger.info(
+                        f"[群聊接话] [{unified_msg_origin}] 引用聊天记录"
+                        f"（内嵌）解析失败 id={res_id}: {error}"
                     )
                     continue
                 if digest:
                     digests.append(digest)
+            # 2) get_msg 兜底（链里没有转发段时）
+            if not digests:
+                for quote_id in quote_ids[:2]:
+                    try:
+                        digest = await self._fm_fetch_forward_digest(
+                            bot, quote_id, unified_msg_origin
+                        )
+                    except Exception as error:
+                        logger.info(
+                            f"[群聊接话] [{unified_msg_origin}] 引用聊天记录"
+                            f"解析失败 id={quote_id}: {error}"
+                        )
+                        continue
+                    if digest:
+                        digests.append(digest)
             if digests:
                 message["forward_note"] = (
                     "（你被引用的聊天记录内容如下：\n" + "\n――――\n".join(digests) + "\n）"
@@ -440,6 +466,11 @@ class GroupChimeMixin:
                 logger.info(
                     f"[群聊接话] [{unified_msg_origin}] 已解析引用的聊天记录，"
                     f"{len(digests)} 条将注入直呼 prompt"
+                )
+            elif quote_ids or chain_res_ids:
+                logger.info(
+                    f"[群聊接话] [{unified_msg_origin}] 引用消息未解析出聊天记录"
+                    f"（quote_ids={quote_ids} chain_res_ids={chain_res_ids}）"
                 )
 
     def _chime_provider_supports_image(self, unified_msg_origin: str) -> bool:
@@ -691,6 +722,8 @@ class GroupChimeMixin:
             # 图片转述备注在聚合触发时回填（转述可能在窗口期间才完成）
             "message_id": message_id,
             "quote_ids": GroupChimeMixin._chime_collect_quote_ids(event),
+            # 引用链内嵌的聊天记录 resId（适配器转换 Reply 时已 get_msg 过）
+            "quote_res_ids": ForwardMsgMixin._fm_collect_quote_chain_res_ids(event),
             "image_note": "",
             # 引用合并转发的解析结果（聚合触发时回填）；bot 客户端留作
             # 解析用（get_msg / get_forward_msg）

@@ -276,6 +276,23 @@ class ForwardMsgMixin:
         return ids
 
     @staticmethod
+    def _fm_collect_quote_chain_res_ids(event: AstrMessageEvent) -> list[str]:
+        """从 Reply.chain 内嵌组件里提取被引用聊天记录的 resId。
+
+        aiocqhttp 适配器在转换引用消息时已经 get_msg 过被引用消息，聊天记录
+        在 Reply.chain 里就是 Forward/Json 组件——直接用，省一次 get_msg。
+        """
+        ids: list[str] = []
+        for comp in event.get_messages():
+            if not isinstance(comp, Reply):
+                continue
+            for reply_comp in getattr(comp, "chain", None) or []:
+                res_id = ForwardMsgMixin._fm_res_id_from_component(reply_comp)
+                if res_id and res_id not in ids:
+                    ids.append(res_id)
+        return ids
+
+    @staticmethod
     def _fm_extract_res_id(message_array: Any) -> str:
         """从 get_msg 返回的消息段数组里找合并转发的 resId。"""
         if not isinstance(message_array, list):
@@ -331,11 +348,27 @@ class ForwardMsgMixin:
 
         非合并转发（普通消息引用）返回空串，prompt 里维持原有引用展示。
         """
-        detail = await self._fm_call_api(bot, "get_msg", message_id=quote_id)
+        # 部分协议端要求 message_id 为整数，字符串形态传参可能被拒绝
+        msg_param = int(quote_id) if str(quote_id).isdigit() else quote_id
+        detail = await self._fm_call_api(bot, "get_msg", message_id=msg_param)
         if not isinstance(detail, dict):
+            logger.info(
+                f"[合并转发][诊断] get_msg 返回非 dict（quote_id={quote_id}）："
+                f"{type(detail).__name__}"
+            )
             return ""
         res_id = self._fm_extract_res_id(detail.get("message"))
         if not res_id:
+            # 诊断：看被引用消息里到底有哪些段类型（帮助定位协议端差异）
+            seg_types = [
+                str(seg.get("type"))
+                for seg in (detail.get("message") or [])
+                if isinstance(seg, dict)
+            ]
+            logger.info(
+                f"[合并转发][诊断] 引用消息不含转发段（quote_id={quote_id}）"
+                f"段类型={seg_types or '空'}"
+            )
             return ""
         return await self._fm_render_res_id(
             bot, res_id, quote_id, umo, self.fm_get_max_depth()
@@ -369,34 +402,49 @@ class ForwardMsgMixin:
 
     @staticmethod
     async def _fm_fetch_nodes(bot: Any, res_id: str, message_id: str) -> list:
-        """调用 get_forward_msg 拉节点，多载荷兜底兼容 NapCat/LLBot 等差异。"""
+        """调用 get_forward_msg 拉节点，多载荷兜底兼容 NapCat/LLBot 等差异。
+
+        某个载荷调用成功但返回空节点时继续尝试下一载荷——不同协议端对
+        res_id / message_id / id 的接受度不同，空结果往往意味着参数没被认。
+        """
         attempts: list[dict] = []
         if res_id and message_id:
             attempts.append({"res_id": res_id, "message_id": message_id})
+        if message_id and str(message_id).isdigit():
+            attempts.append({"message_id": int(message_id)})
         if res_id:
             attempts.append({"res_id": res_id})
+            attempts.append({"id": res_id})
         if message_id:
             attempts.append({"message_id": message_id})
-        result: Any = None
+        nodes: list = []
         last_error: Exception | None = None
         for payload in attempts:
             try:
                 result = await ForwardMsgMixin._fm_call_api(
                     bot, "get_forward_msg", **payload
                 )
-                break
             except Exception as error:
                 last_error = error
-        if result is None:
-            if last_error is not None:
-                raise last_error
-            return []
-        if isinstance(result, dict):
-            nodes = result.get("messages") or []
-        elif isinstance(result, list):
-            nodes = result
-        else:
-            nodes = []
+                continue
+            if isinstance(result, dict):
+                candidate = result.get("messages") or []
+            elif isinstance(result, list):
+                candidate = result
+            else:
+                candidate = []
+            if isinstance(candidate, list) and candidate:
+                nodes = candidate
+                break
+            # 调用成功但为空：记下结果继续试下一载荷，全空时返回空列表
+            if not nodes and isinstance(candidate, list):
+                nodes = candidate
+        if not nodes and last_error is not None:
+            raise last_error
+        logger.info(
+            f"[合并转发][诊断] get_forward_msg 返回 {len(nodes)} 个节点"
+            f"（res_id={res_id}）"
+        )
         return nodes if isinstance(nodes, list) else []
 
     async def _fm_format_nodes(
