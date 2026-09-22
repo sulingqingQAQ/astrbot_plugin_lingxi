@@ -1158,7 +1158,7 @@
                     },
                     "image_caption_prompt": {
                         "description": "🖼️ 图片转述提示词",
-                        "type": "string",
+                        "type": "text",
                         "default": "Please describe the image using Chinese.",
                         "hint": "发送给图片转述模型的提示词"
                     },
@@ -1243,7 +1243,7 @@
                     },
                     "system_prompt": {
                         "description": "🌐 搜索系统提示词",
-                        "type": "string",
+                        "type": "text",
                         "default": "You are a web research assistant. Summarize findings concisely.",
                         "hint": "用于约束搜索结果输出格式"
                     },
@@ -1334,7 +1334,7 @@
                     },
                     "system_prompt": {
                         "description": "🐦 结果约束提示词",
-                        "type": "string",
+                        "type": "text",
                         "default": "You are an X (Twitter) research assistant. Search posts and summarize findings concisely, noting authors and dates.",
                         "hint": "约束搜索结果的输出格式"
                     },
@@ -1400,7 +1400,7 @@
                     },
                     "system_prompt": {
                         "description": "📌 读取约束提示词",
-                        "type": "string",
+                        "type": "text",
                         "default": "Read the given X/Twitter post or thread and summarize it concisely, noting the author, date and key replies.",
                         "hint": "约束输出格式"
                     },
@@ -1449,7 +1449,7 @@
                     },
                     "prompt": {
                         "description": "🖼️ 描述提示词",
-                        "type": "string",
+                        "type": "text",
                         "default": "Please describe this image concisely in Chinese."
                     },
                     "max_images": {
