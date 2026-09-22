@@ -447,6 +447,23 @@ class ForwardMsgMixin:
         )
         return nodes if isinstance(nodes, list) else []
 
+    @staticmethod
+    def _fm_node_content(data: dict) -> Any:
+        """取节点内容数组，兼容不同协议端字段名。
+
+        OneBot v11 标准节点内容字段为 message；NapCat 部分版本（如
+        2.6.10 一带）曾错用 content 字段名。个别实现还可能直接给字符串。
+        """
+        content = data.get("content")
+        if not isinstance(content, list):
+            content = data.get("message")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except (ValueError, TypeError):
+                return content  # 非法 JSON，按纯文本处理（调用方兜底）
+        return content if isinstance(content, list) else None
+
     async def _fm_format_nodes(
         self, bot: Any, nodes: list, umo: str, depth: int
     ) -> str:
@@ -465,7 +482,9 @@ class ForwardMsgMixin:
         image_urls: list[str] = []
         for node in nodes:
             data = node.get("data") if isinstance(node.get("data"), dict) else node
-            content = data.get("content") if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                continue
+            content = ForwardMsgMixin._fm_node_content(data)
             if not isinstance(content, list):
                 continue
             for seg in content:
@@ -495,8 +514,12 @@ class ForwardMsgMixin:
                 continue
             data = node.get("data") if isinstance(node.get("data"), dict) else node
             sender = (data.get("sender") or {}) if isinstance(data, dict) else {}
+            # 节点直接带 nickname（Node 形态）时兜底
             nickname = str(
-                sender.get("nickname") or sender.get("card") or "未知"
+                sender.get("nickname")
+                or sender.get("card")
+                or (data.get("nickname") if isinstance(data, dict) else "")
+                or "未知"
             ).replace("\n", " ")
             raw_time = data.get("time")
             try:
@@ -506,7 +529,7 @@ class ForwardMsgMixin:
             except (TypeError, ValueError, OSError, ImportError):
                 time_str = ""
 
-            content = data.get("content") if isinstance(data, dict) else None
+            content = ForwardMsgMixin._fm_node_content(data) if isinstance(data, dict) else None
             parts: list[str] = []
             if isinstance(content, list):
                 for seg in content:
@@ -572,6 +595,18 @@ class ForwardMsgMixin:
             total_chars += len(line)
 
         if not lines:
+            # 诊断：节点在手却一行都产不出来 → 打首个节点原始结构，定位字段差异
+            if nodes:
+                try:
+                    first = json.dumps(
+                        nodes[0], ensure_ascii=False, default=str
+                    )[:400]
+                except (TypeError, ValueError):
+                    first = repr(nodes[0])[:400]
+                logger.info(
+                    f"[合并转发][诊断] {len(nodes)} 个节点均未解析出行，"
+                    f"首个节点结构：{first}"
+                )
             return ""
         head = "（聊天记录，共 {} 条）\n".format(len(nodes))
         if skipped_images > 0:
