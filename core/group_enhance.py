@@ -2,9 +2,11 @@
 
 包含四块能力：
 1. 群聊历史增强：以增强格式记录群消息（昵称/ID/时间/角色/#msgID），
-   在群聊 LLM 请求时把最近历史注入 system_prompt（**只追加 system_prompt，
-   不碰 req.prompt / req.contexts** —— 这是与原插件 React 模式的关键差异，
-   避免污染记忆插件的检索词）。
+   在群聊 LLM 请求时把静态指令追加进 system_prompt，最近历史则注入
+   用户输入侧（req.extra_user_content_parts，mark_as_temp 不持久化，
+   **不碰 req.prompt / req.contexts** —— 这是与原插件 React 模式的关键差异，
+   避免污染记忆插件的检索词；注入侧分离是为了让 system_prompt 保持
+   稳定前缀以命中 provider 提示词缓存）。
 2. 图片转述：群消息含图片时，后台调用配置的视觉模型自动转述，
    把历史行里的 [Image] 替换为 [Image: 描述]。
 3. 群聊功能增强：Mention/Quote 标签解析（<mention id>/<quote id> → At/Reply 组件）、
@@ -37,8 +39,8 @@ from .enhance_tag_utils import (
     transform_result_chain,
 )
 
-# 接话标记（与 group_chime 共用语义，避免循环导入此处重复定义）
-_ENHANCE_HISTORY_DEFAULT_MAX = 200
+# （历史遗留清理：_ENHANCE_HISTORY_DEFAULT_MAX 全库零引用，已删除。
+#  接话历史上限由 group_history.max_messages 配置 + inject 双预算控制。）
 
 
 class GroupEnhanceMixin:
@@ -88,6 +90,14 @@ class GroupEnhanceMixin:
 
     def enh_history_max(self) -> int:
         return max(10, min(1000, self._enh_int("group_history", "max_messages", 200)))
+
+    def enh_history_inject_max_messages(self) -> int:
+        """chatluna 式「存储/发送分离」：每轮实际注入 prompt 的条数上限（0 = 不限）。"""
+        return max(0, min(1000, self._enh_int("group_history", "inject_max_messages", 80)))
+
+    def enh_history_inject_max_chars(self) -> int:
+        """每轮注入历史文本的字符硬预算（0 = 不限）。中文 1 字约 1 token。"""
+        return max(0, min(200000, self._enh_int("group_history", "inject_max_chars", 8000)))
 
     def enh_include_sender_id(self) -> bool:
         return self._enh_bool("group_history", "include_sender_id", True)
@@ -158,20 +168,8 @@ class GroupEnhanceMixin:
     def enh_search_max_sources(self) -> int:
         return max(0, self._enh_int("web_search", "max_sources", 5))
 
-    def enh_search_image_understanding(self) -> bool:
-        return self._enh_bool("web_search", "enable_image_understanding", False)
-
-    def enh_search_image_search(self) -> bool:
-        return self._enh_bool("web_search", "enable_image_search", False)
-
-    def _enh_websearch_tools(self) -> list[dict]:
-        """构造 xAI /v1/responses 的 web_search 服务端工具声明。"""
-        tool: dict = {"type": "web_search"}
-        if self.enh_search_image_understanding():
-            tool["enable_image_understanding"] = True
-        if self.enh_search_image_search():
-            tool["enable_image_search"] = True
-        return [tool]
+    # （历史遗留：这三个方法曾在此处重复定义两次，内容相同，
+    # 前一组被后一组覆盖 —— F811 死代码，已删除前一组。）
 
     def enh_search_image_understanding(self) -> bool:
         return self._enh_bool("web_search", "enable_image_understanding", False)
@@ -440,7 +438,11 @@ class GroupEnhanceMixin:
         prompt = self.enh_imgdesc_prompt()
         timeout_sec = self.enh_imgdesc_timeout()
         captions: dict[str, str] = {}
-        for u in urls:
+
+        # 并发化：原实现串行 await，最坏 N 张 × timeout_sec 全部阻塞在
+        # 工具调用里（如 3×45s=135s）。改为 gather 并发，并给整批加
+        # 一个总超时兜底（单张超时不拖累整批，整批超时返回已完成部分）。
+        async def _describe_one(u: str) -> tuple[str, str | None]:
             try:
                 resp = await asyncio.wait_for(
                     provider.text_chat(
@@ -453,10 +455,23 @@ class GroupEnhanceMixin:
                     timeout=timeout_sec,
                 )
                 cap = (getattr(resp, "completion_text", "") or "").strip()
-                if cap:
-                    captions[u] = cap
+                return u, cap or None
             except Exception as e:
                 logger.debug(f"[群聊增强] 结果图片描述失败（跳过）: {e}")
+                return u, None
+
+        try:
+            gather_results = await asyncio.wait_for(
+                asyncio.gather(*(_describe_one(u) for u in urls)),
+                timeout=timeout_sec + 5.0,  # 整批总超时 = 单张超时 + 汇聚余量
+            )
+        except Exception as e:
+            # 整批超时/失败不算致命：跳过全部描述，保留原文返回
+            logger.debug(f"[群聊增强] 结果图片描述整批失败（跳过）: {e}")
+            gather_results = []
+        for u, cap in gather_results:
+            if cap:
+                captions[u] = cap
 
         if not captions:
             return text
@@ -495,6 +510,52 @@ class GroupEnhanceMixin:
             self._enh_pull_fail_until: dict[str, float] = {}
         if not hasattr(self, "_enh_pull_tasks"):
             self._enh_pull_tasks: set[asyncio.Task] = set()
+        if not hasattr(self, "_group_state_last_seen"):
+            # umo -> 最近一次群消息的 monotonic 时间戳（增强 + 接话共同维护），
+            # 供空闲淘汰使用：超过 2 小时无消息的群整体清出各状态字典。
+            self._group_state_last_seen: dict[str, float] = {}
+
+    def _touch_group_state(self, umo: str) -> None:
+        """记录群最近活跃时间（群状态空闲淘汰的依据）。"""
+        self._enh_state_init()
+        self._group_state_last_seen[umo] = time.monotonic()
+
+    def _evict_idle_group_states(self, max_idle_seconds: float = 7200.0) -> None:
+        """淘汰长时间无消息的群状态，防止按群索引的字典随历史群数单调增长。
+
+        淘汰安全：正在运行的接话/转述协程持有 state/lock/task 的对象引用，
+        删除字典条目不会打断它们；群再来消息时会重新按需创建。
+        """
+        self._enh_state_init()
+        last_seen = self._group_state_last_seen
+        if not last_seen:
+            return
+        now_mono = time.monotonic()
+        idle_umos = [
+            umo for umo, ts in last_seen.items() if now_mono - ts >= max_idle_seconds
+        ]
+        if not idle_umos:
+            return
+        for umo in idle_umos:
+            last_seen.pop(umo, None)
+            self._enhance_chats.pop(umo, None)
+            self._enhance_image_registry.pop(umo, None)
+            self._chime_group_states.pop(umo, None)
+            self._chime_judging_locks.pop(umo, None)
+        logger.debug(
+            f"[群聊增强] 空闲淘汰群状态 {len(idle_umos)} 个（超 {int(max_idle_seconds / 60)} 分钟无消息）"
+        )
+
+    def _enh_now(self) -> datetime:
+        """统一取「配置时区」的当前时间（群历史时间戳共用）。
+
+        与 group_chime._chime_now 同理：服务器 TZ 与配置 timezone 不一致时，
+        旧版 datetime.now()（服务器本地时区）写入历史的时间戳与模型的时间
+        认知不一致（例如服务器 UTC、配置 Asia/Shanghai，历史时间会差 8 小时）。
+        self.timezone 为 None 时兜底回系统本地时区，行为与旧版一致。
+        """
+        tz = getattr(self, "timezone", None)
+        return datetime.now(tz) if tz is not None else datetime.now()
 
     def _enh_get_ban_store(self) -> BanStore | None:
         self._enh_state_init()
@@ -554,9 +615,6 @@ class GroupEnhanceMixin:
 
     def enh_history_pull_count(self) -> int:
         return max(10, min(200, self._enh_int("group_history", "history_pull_count", 50)))
-
-    def enh_history_pull_chime(self) -> bool:
-        return self._enh_bool("group_history", "history_pull_chime", False)
 
     def _enh_maybe_schedule_history_pull(self, event: AstrMessageEvent, umo: str) -> None:
         """懒加载触发：每个群仅在本进程生命周期内尝试一次拉取（失败后 60 秒冷却重试）。
@@ -681,7 +739,7 @@ class GroupEnhanceMixin:
             try:
                 time_str = datetime.fromtimestamp(float(raw_time)).strftime("%H:%M:%S")
             except (TypeError, ValueError, OSError):
-                time_str = datetime.now().strftime("%H:%M:%S")
+                time_str = self._enh_now().strftime("%H:%M:%S")
 
             content = item.get("message")
             parts: list[str] = []
@@ -725,33 +783,6 @@ class GroupEnhanceMixin:
             if removed_id:
                 registry.pop(removed_id, None)
 
-        if self.enh_history_pull_chime():
-            self._enh_refill_chime_transcript(umo, new_lines)
-
-    def _enh_refill_chime_transcript(self, umo: str, lines: list[str]) -> None:
-        """可选项：把回填的增强历史行转成接话 transcript 格式补进环形缓冲。"""
-        try:
-            state = self._get_group_state(umo)
-        except Exception as e:
-            logger.debug(f"[群聊增强] historyPull：接话回填跳过: {e}")
-            return
-        # transcript 无消息 ID 可去重，仅在为空时回填，避免重复
-        if state.transcript:
-            return
-        for line in lines:
-            if line.startswith("[You/"):
-                time_str = line[5:].split("]", 1)[0]
-                text = line.split("]: ", 1)[-1]
-                state.transcript.append(f"[{time_str[:5]}] Bot: {text}")
-                continue
-            m = re.match(r"^\[([^/\]]+)/([^/\]]+)/([0-9:]+)\](\((?:admin|member)\))? #msg\S+?: (.*)$", line)
-            if not m:
-                continue
-            nickname, sender_id, time_str, _role, text = m.groups()
-            state.transcript.append(
-                f"[{time_str[:5]}] {(nickname or sender_id or '未知')}({sender_id}): {text}"
-            )
-
     async def enhance_group_message(self, event: AstrMessageEvent) -> None:
         """群消息记录入口（含 @消息；命令与 bot 自身消息在框架层已少见，此处从宽）。"""
         self._enh_state_init()
@@ -770,7 +801,8 @@ class GroupEnhanceMixin:
             logger.warning(f"[群聊增强] 记录群消息失败: {e}")
 
     def _enh_record_message(self, event: AstrMessageEvent, umo: str) -> None:
-        datetime_str = datetime.now().strftime("%H:%M:%S")
+        self._touch_group_state(umo)
+        datetime_str = self._enh_now().strftime("%H:%M:%S")
         nickname = getattr(event.message_obj.sender, "nickname", "") or ""
         msg_id = self._enh_normalize_msg_id(
             getattr(event.message_obj, "message_id", "")
@@ -866,7 +898,7 @@ class GroupEnhanceMixin:
         """注入群历史前，等待仍留在历史里的图片转述任务完成。
 
         _enh_record_message 只把转述排成后台任务；如果注入历史时不等待，
-        本轮请求写进 system_prompt 的历史行仍然是 [Image]，模型自然"看不到"
+        本轮请求注入的历史行仍然是 [Image]，模型自然"看不到"
         图片。AstrBot 内置的群聊上下文感知是在格式化消息时同步等待转述的，
         这里对齐同样的语义：只等本轮真正要用到的、尚未出结果的任务。
         """
@@ -1041,7 +1073,8 @@ class GroupEnhanceMixin:
             return
 
     # ------------------------------------------------------------------ #
-    # 群聊历史：注入（只追加 system_prompt，绝不动 prompt/contexts）
+    # 群聊历史：注入（静态指令→system_prompt；动态历史→用户输入侧
+    # extra_user_content_parts，mark_as_temp 不持久化；绝不动 prompt/contexts）
     # ------------------------------------------------------------------ #
 
     async def enhance_inject_group_context(self, event: AstrMessageEvent, req) -> None:
@@ -1054,13 +1087,17 @@ class GroupEnhanceMixin:
             return
 
         # 关键数据通路：本轮的图片转述可能还在后台跑，若不等它完成，
-        # 注入进 system_prompt 的历史行就还是 [Image]，模型只能看到字面量。
+        # 注入用户输入侧的历史行就还是 [Image]，模型只能看到字面量。
         await self._enh_await_pending_captions(umo)
         chats = self._enhance_chats.get(umo)
         if not chats:
             return
 
-        history_text = bounded_chat_history_text(chats)
+        history_text = bounded_chat_history_text(
+            chats,
+            max_messages=self.enh_history_inject_max_messages(),
+            max_chars=self.enh_history_inject_max_chars(),
+        )
         instructions = build_interaction_instructions(
             self.enh_mention_parse(),
             self.enh_include_sender_id(),
@@ -1071,14 +1108,39 @@ class GroupEnhanceMixin:
                 "you may call `enhance_web_search(query)`."
             )
 
+        # 静态指令进 system_prompt：逐轮逐字不变，provider 的提示词缓存
+        # （prompt caching）可以命中这段稳定前缀，缓存价远低于全价 token。
         append = (
-            "\n\nYou are now in a chatroom. The chat history is as follows:\n"
-            f"{history_text}"
+            "\n\nYou are now chatting inside a group chatroom. Recent group "
+            "messages are attached to the end of the user message in a "
+            "【群聊最近消息】block — use them as context to understand the "
+            "conversation, not as questions directed at you."
             f"{instructions}"
         )
         if req.system_prompt and not req.system_prompt.endswith("\n"):
             req.system_prompt += "\n"
         req.system_prompt += append
+
+        # 群聊历史每轮都在变，若塞 system_prompt 会把稳定前缀打碎（缓存全miss）。
+        # 改注入用户输入侧（本轮生效），并用 mark_as_temp() 标记不随对话历史
+        # 持久化进 contexts —— 否则下一轮旧块还留在上下文里，与新块重复叠加。
+        note = (
+            "【群聊最近消息（实时参考，非发言）】\n"
+            f"{history_text}"
+        )
+        try:
+            from astrbot.core.agent.message import TextPart
+
+            part = TextPart(text=note).mark_as_temp()
+            if getattr(req, "extra_user_content_parts", None) is None:
+                req.extra_user_content_parts = []
+            req.extra_user_content_parts.append(part)
+        except Exception as error:
+            # 兜底：通道不可用时退回 system_prompt（旧行为）
+            logger.debug(f"[群聊增强] 用户输入侧注入失败，退回 system_prompt: {error}")
+            if req.system_prompt and not req.system_prompt.endswith("\n"):
+                req.system_prompt += "\n"
+            req.system_prompt += f"\n\nThe chat history is as follows:\n{history_text}"
 
     async def enhance_record_bot_response(self, event: AstrMessageEvent, resp) -> None:
         """把 bot 的回复记入历史（[You/时间] 行）。主动消息虚拟事件也会被记录。"""
@@ -1101,7 +1163,7 @@ class GroupEnhanceMixin:
         if not cleaned:
             return
 
-        datetime_str = datetime.now().strftime("%H:%M:%S")
+        datetime_str = self._enh_now().strftime("%H:%M:%S")
         chats = self._enhance_chats.setdefault(umo, [])
         registry = self._enhance_image_registry.setdefault(umo, {})
         chats.append(f"[You/{datetime_str}]: {cleaned}")
@@ -1182,9 +1244,15 @@ class GroupEnhanceMixin:
             return
 
         scope_id = self._enh_ban_scope(event)
-        released = store.cleanup_expired(scope_id=scope_id)
-        if released > 0:
-            logger.info(f"[群聊增强] 自动解封过期封禁 {released} 条喵 (scope={scope_id})")
+        # 过期清理降频：原实现每条群消息都做一次 DELETE 扫描，改为
+        # 每 10 分钟最多一次（过期记录的拦截由 get_active_ban 的
+        # expires_at 判断兜住，不影响正确性，只是缓存条目清理变慢）。
+        now_mono = time.monotonic()
+        if now_mono - getattr(self, "_enh_ban_last_cleanup_mono", 0.0) >= 600.0:
+            self._enh_ban_last_cleanup_mono = now_mono
+            released = store.cleanup_expired(scope_id=scope_id)
+            if released > 0:
+                logger.info(f"[群聊增强] 自动解封过期封禁 {released} 条喵 (scope={scope_id})")
 
         sender_id = str(event.get_sender_id() or "").strip()
         if not sender_id:

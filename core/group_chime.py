@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -68,10 +67,15 @@ _CHIME_STYLE_HINT = (
 
 @dataclass
 class ChimeGroupState:
-    """每个群的接话运行状态，键为 unified_msg_origin。"""
+    """每个群的接话运行状态，键为 unified_msg_origin。
 
-    # 消息缓冲（格式化后的字符串列表）
-    transcript: deque = field(default_factory=lambda: deque(maxlen=20))
+    接话参考的聊天记录不再自建缓冲（v2.1.0-dev.10 起），直接复用
+    群聊历史增强的 `group_history.max_messages` 缓冲——它经由
+    `enhance_inject_group_context()` 注入每次 LLM 请求的用户输入侧
+    （extra_user_content_parts，mark_as_temp 不持久化），接话与直呼
+    聚合请求走 pipeline 时同样可见。
+    """
+
     # 上次接话的单调时间戳（time.monotonic()）
     last_reply_monotonic: float = 0.0
     # 上次触发判定的单调时间戳
@@ -164,9 +168,6 @@ class GroupChimeMixin:
     def chime_get_whitelist(self) -> list[str]:
         return self._chime_str_list(self._chime_conf().get("group_whitelist", []))
 
-    def chime_get_context_window(self) -> int:
-        return max(5, min(200, self._chime_int("context_window", 20)))
-
     def chime_get_min_messages(self) -> int:
         return max(1, self._chime_int("min_messages_since_last", 5))
 
@@ -244,55 +245,28 @@ class GroupChimeMixin:
 
     # 合并转发（聊天记录）解析已独立为 forward_msg_settings 配置节 +
     # ForwardMsgMixin（v2.1.0-dev.9），私聊/群聊共用，本模块仅委托调用。
+    # context_window 配置已删除（v2.1.0-dev.10）：自建 transcript 从未被
+    # 判定/生成读取（死代码），接话参考的聊天记录条数改由群聊历史增强的
+    # group_history.max_messages 统一承担。
 
     # ------------------------------------------------------------------ #
     # 群状态与消息缓冲
     # ------------------------------------------------------------------ #
 
     def _get_group_state(self, unified_msg_origin: str) -> ChimeGroupState:
-        """获取（或懒创建）指定群的状态对象。配置修改后重建 deque 保留内容。"""
+        """获取（或懒创建）指定群的状态对象。"""
         if not hasattr(self, "_chime_group_states"):
             self._chime_group_states: dict[str, ChimeGroupState] = {}
         if not hasattr(self, "_chime_judging_locks"):
             self._chime_judging_locks: dict[str, asyncio.Lock] = {}
-        context_window = self.chime_get_context_window()
         if unified_msg_origin not in self._chime_group_states:
-            state = ChimeGroupState()
-            state.transcript = deque(maxlen=context_window)
-            self._chime_group_states[unified_msg_origin] = state
-        else:
-            state = self._chime_group_states[unified_msg_origin]
-            if state.transcript.maxlen != context_window:
-                state.transcript = deque(state.transcript, maxlen=context_window)
+            self._chime_group_states[unified_msg_origin] = ChimeGroupState()
         return self._chime_group_states[unified_msg_origin]
 
     def _get_chime_judging_lock(self, unified_msg_origin: str) -> asyncio.Lock:
         if unified_msg_origin not in self._chime_judging_locks:
             self._chime_judging_locks[unified_msg_origin] = asyncio.Lock()
         return self._chime_judging_locks[unified_msg_origin]
-
-    @staticmethod
-    def _chime_extract_text(event: AstrMessageEvent) -> str:
-        """从消息事件提取纯文本，非文本组件用占位符替代。"""
-        try:
-            components = event.message_obj.message
-        except AttributeError:
-            return event.message_str or ""
-
-        parts: list[str] = []
-        for component in components:
-            component_type = type(component).__name__
-            if component_type == "Plain":
-                text = getattr(component, "text", "")
-                if text.strip():
-                    parts.append(text.strip())
-            elif component_type in ("Image", "Record", "Video"):
-                parts.append(f"[{component_type}]")
-            elif component_type == "At":
-                at_target = getattr(component, "qq", "") or getattr(component, "target", "")
-                parts.append(f"[@{at_target}]")
-
-        return " ".join(parts) if parts else (event.message_str or "")
 
     @staticmethod
     def _chime_collect_image_urls(event: AstrMessageEvent) -> list[str]:
@@ -508,21 +482,16 @@ class GroupChimeMixin:
             return []
         return self._chime_collect_image_urls(event)
 
-    def chime_append_transcript(self, unified_msg_origin: str, event: AstrMessageEvent) -> None:
-        """将一条群消息追加进对应群的环形缓冲。"""
+    def chime_record_incoming_message(self, unified_msg_origin: str, event: AstrMessageEvent) -> None:
+        """每条群消息的接话侧记账：判定间隔计数 + 活跃度时间戳。
+
+        聊天记录本身不在这里存——统一由群聊历史增强的缓冲区承担
+        （见 ChimeGroupState 文档注释）。
+        """
+        # 接话侧也维护最近活跃时间（群状态空闲淘汰依据，见 group_enhance）：
+        # 覆盖「接话启用但历史增强关闭」的群。
+        self._touch_group_state(unified_msg_origin)
         state = self._get_group_state(unified_msg_origin)
-
-        text = self._chime_extract_text(event) or "[图片]"
-        try:
-            nickname = event.message_obj.sender.nickname or ""
-        except AttributeError:
-            nickname = ""
-
-        hour_min = time.strftime("%H:%M")
-        safe_nick = (nickname or event.get_sender_id() or "未知").replace("\n", " ")
-        safe_text = text.replace("\n", " ").strip()
-        sender_id = event.get_sender_id() or "unknown"
-        state.transcript.append(f"[{hour_min}] {safe_nick}({sender_id}): {safe_text}")
         state.messages_since_last_judge += 1
 
         # 记录消息到达时刻，供活跃度评分使用（保持升序，超容量裁掉最旧的）
@@ -567,21 +536,26 @@ class GroupChimeMixin:
         state.score_updated_at = updated_at
         return score
 
-    def chime_get_transcript_text(self, unified_msg_origin: str) -> str:
-        state = self._get_group_state(unified_msg_origin)
-        return "\n".join(state.transcript)
-
     # ------------------------------------------------------------------ #
     # 频率闸门（从便宜到贵短路求值）
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _chime_hour_key() -> str:
-        return datetime.now().strftime("%Y-%m-%dT%H")
+    def _chime_now(self) -> datetime:
+        """统一取「配置时区」的当前时间（接话配额/静音/时间戳共用）。
 
-    @staticmethod
-    def _chime_day_key() -> str:
-        return datetime.now().strftime("%Y-%m-%d")
+        原实现全部用 datetime.now()（服务器本地时区）：服务器 TZ 与配置
+        timezone 不一致时，配额重置点与静音时段整体偏移、历史时间戳与
+        模型的时间认知不一致。这里统一走 self.timezone（主动消息同款），
+        为 None（配置未加载）时兜底回系统本地时区，行为与旧版一致。
+        """
+        tz = getattr(self, "timezone", None)
+        return datetime.now(tz) if tz is not None else datetime.now()
+
+    def _chime_hour_key(self) -> str:
+        return self._chime_now().strftime("%Y-%m-%dT%H")
+
+    def _chime_day_key(self) -> str:
+        return self._chime_now().strftime("%Y-%m-%d")
 
     def chime_check_all_gates(self, unified_msg_origin: str) -> tuple[bool, str]:
         """按顺序检查全部闸门，返回 (是否通过, 未通过原因日志)。"""
@@ -605,7 +579,7 @@ class GroupChimeMixin:
         quiet = self.chime_get_quiet_hours()
         if quiet is not None:
             start, end = quiet
-            current_hour = datetime.now().hour
+            current_hour = self._chime_now().hour
             in_quiet = (
                 start <= current_hour < end
                 if start <= end
@@ -700,8 +674,8 @@ class GroupChimeMixin:
 描述文字就是图片的内容，请当作你看过这张图。\
 """
 
-    @staticmethod
-    def _chime_build_direct_entry(event: AstrMessageEvent, trigger: str) -> dict:
+    # 实例方法（非 @staticmethod）：需要 self._chime_now() 取配置时区时间。
+    def _chime_build_direct_entry(self, event: AstrMessageEvent, trigger: str) -> dict:
         """把一条直呼消息（@ 或喊唤醒词）打包成聚合池条目。"""
         sender_id = str(event.get_sender_id() or "unknown")
         try:
@@ -717,7 +691,7 @@ class GroupChimeMixin:
             "nickname": (nickname or sender_id).replace("\n", " ").strip(),
             "text": (event.message_str or "").strip().replace("\n", " "),
             "trigger": trigger,  # at=直接@ / keyword=喊昵称
-            "time_str": time.strftime("%H:%M:%S"),
+            "time_str": self._chime_now().strftime("%H:%M:%S"),
             "image_urls": GroupChimeMixin._chime_collect_image_urls(event),
             # 图片转述备注在聚合触发时回填（转述可能在窗口期间才完成）
             "message_id": message_id,
@@ -892,8 +866,8 @@ class GroupChimeMixin:
         hit_keyword = next((kw for kw in wake_keywords if kw in message_text), None)
 
         if is_at or hit_keyword:
-            # 直呼消息也要进聊天记录缓冲，供本次和后续判定/生成参考
-            self.chime_append_transcript(unified_msg_origin, event)
+            # 直呼消息同样计入判定间隔与活跃度（聊天记录由群聊历史增强缓冲统一记录）
+            self.chime_record_incoming_message(unified_msg_origin, event)
 
             # 接话总开关关闭时：@ 交回框架默认回复，唤醒词不触发，行为同改造前
             if not self.chime_get_enable():
@@ -915,8 +889,8 @@ class GroupChimeMixin:
                 yield item
             return
 
-        # 4. 普通群消息入缓冲（无论是否接话都记录）
-        self.chime_append_transcript(unified_msg_origin, event)
+        # 4. 普通群消息：计入判定间隔与活跃度（聊天记录由群聊历史增强缓冲统一记录）
+        self.chime_record_incoming_message(unified_msg_origin, event)
 
         # 5. 总开关
         if not self.chime_get_enable():

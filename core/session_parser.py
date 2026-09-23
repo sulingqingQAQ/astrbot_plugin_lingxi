@@ -73,16 +73,11 @@ class SessionMixin:
         if name:
             return name
 
-        # 2) 再尝试读取当前生效配置
-        try:
-            resolved_config = self._get_session_config(normalized_session_id)
-            name = _pick_name(resolved_config)
-            if name:
-                return name
-        except Exception:
-            pass
-
-        # 3) 读取会话覆写记录（兼容仅保存在 override 中的备注名）
+        # 2) 读取会话覆写记录（兼容仅保存在 override 中的备注名）。
+        #    顺序调整备注：override 是个小字典（get_override 深拷贝成本可忽略），
+        #    而 _get_session_config 要走完整的基础配置+合并链（多次 deepcopy），
+        #    且这条函数在 71 处日志调用里被高频执行 —— 命中 override 的会话
+        #    不必再付一次全量配置拷贝。
         manager = getattr(self, "session_override_manager", None)
         if manager:
             try:
@@ -92,6 +87,15 @@ class SessionMixin:
                     return name
             except Exception:
                 pass
+
+        # 3) 再尝试读取当前生效配置
+        try:
+            resolved_config = self._get_session_config(normalized_session_id)
+            name = _pick_name(resolved_config)
+            if name:
+                return name
+        except Exception:
+            pass
 
         # 4) 兼容历史运行态数据中的备注名
         data = getattr(self, "session_data", {})

@@ -1,7 +1,7 @@
 name: "astrbot_plugin_lingxi"
 display_name: "灵犀 (Lingxi)"
 author: "DBJD-CR"
-version: "v2.1.0-dev.9"
+version: "v2.1.0-dev.10"
 desc: "让 Bot 像活人一样社交：私聊定时主动消息、回复后概率追发、群聊智能接话（活跃度数学判定 + 直呼聚合）、合并转发（聊天记录）解析（私聊直带/引用 + 群聊引用，图片视觉转述）、群聊历史增强与图片转述（转述结果注入接话/聚合 prompt）、Mention/Quote 标签、封禁控制与联网搜索。"
 repo: ""
 astrbot_version: ">=4.8.0"

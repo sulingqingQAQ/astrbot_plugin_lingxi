@@ -56,10 +56,11 @@ async def read_web_page(
     except Exception as e:
         return f"Web read error: {e}"
 
-    import logging
+    # 统一日志器（上架规范要求）：logger 一律从 astrbot.api 导入，
+    # 不得使用 Python 内置 logging 模块。
+    from astrbot.api import logger as _astrbot_logger
 
-    logger = logging.getLogger("proactive_chat.enhance")
-    logger.info(f"[Web Read] 开始读取喵 url={url[:120]}")
+    _astrbot_logger.info(f"[Web Read] 开始读取喵 url={url[:120]}")
 
     timeout = aiohttp.ClientTimeout(total=max(5.0, float(timeout_sec)))
     try:
@@ -69,7 +70,7 @@ async def read_web_page(
             ) as resp:
                 raw = await resp.text()
                 if resp.status != 200:
-                    logger.warning(f"[Web Read] HTTP {resp.status}: {raw[:200]}")
+                    _astrbot_logger.warning(f"[Web Read] HTTP {resp.status}: {raw[:200]}")
                     return f"Web read error: HTTP {resp.status} from Jina Reader."
     except asyncio.TimeoutError:
         return "Web read error: timeout."

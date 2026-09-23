@@ -74,21 +74,41 @@ def format_duration(seconds: int) -> str:
 
 
 class BanStore:
-    """SQLite 封禁存储。scope_id 一般用群 unified_msg_origin。"""
+    """SQLite 封禁存储。scope_id 一般用群 unified_msg_origin。
+
+    连接策略：复用单个长连接（check_same_thread=False + threading.Lock 串行化），
+    而非每次操作新建连接 —— 守卫链路每条群消息都会查询一次，
+    sqlite3.connect 的文件句柄/内存初始化在热路径上不可忽略。
+    """
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_conn(self) -> sqlite3.Connection:
+        """取长连接，意外关闭时自动重建（线程安全性由 self._lock 保证）。"""
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                self.db_path, check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def _init_db(self) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_bans (
@@ -123,7 +143,8 @@ class BanStore:
 
         now_ts = int(time.time())
         expires_at = now_ts + max(1, int(duration_seconds))
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.execute(
                 """
                 INSERT INTO user_bans (
@@ -146,7 +167,8 @@ class BanStore:
         if not scope_id or not user_id:
             return False
 
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             cursor = conn.execute(
                 "DELETE FROM user_bans WHERE scope_id = ? AND user_id = ?",
                 (scope_id, user_id),
@@ -157,7 +179,8 @@ class BanStore:
     def cleanup_expired(self, scope_id: str | None = None) -> int:
         now_ts = int(time.time())
         scope_id = str(scope_id or "").strip()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             if scope_id:
                 cursor = conn.execute(
                     "DELETE FROM user_bans WHERE scope_id = ? AND expires_at <= ?",
@@ -177,7 +200,8 @@ class BanStore:
             return None
 
         now_ts = int(time.time())
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             row = conn.execute(
                 """
                 SELECT scope_id, user_id, banned_at, expires_at
@@ -210,7 +234,8 @@ class BanStore:
 
         now_ts = int(time.time())
         limit = max(1, min(int(limit), 500))
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._get_conn()
             rows = conn.execute(
                 """
                 SELECT scope_id, user_id, banned_at, expires_at

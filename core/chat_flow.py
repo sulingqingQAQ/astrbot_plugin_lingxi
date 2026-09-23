@@ -121,6 +121,9 @@ class ProactiveCoreMixin:
             if is_private_session:
                 session_config = self._get_session_config(session_id)
                 if not session_config:
+                    # 配置缺失时提前返回：先把已自增的 unanswered_count 落盘，
+                    # 否则增量只停留在内存，进程重启后计数回退。
+                    await self._save_data_internal()
                     return
 
                 # chatluna 式空闲触发间隔：基础 × 退避^未回复（未回复次数已 +1，

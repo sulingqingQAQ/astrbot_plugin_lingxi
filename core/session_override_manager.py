@@ -111,9 +111,31 @@ class SessionOverrideManager:
     def get_effective(
         self, session_id: str, base_config: dict[str, Any] | None
     ) -> dict[str, Any]:
-        base = copy.deepcopy(base_config or {})
         override = self._overrides.get(session_id, {})
+        if not override:
+            # 热路径（绝大多数会话无会话级覆写）：原实现在这里
+            # deepcopy(base_config) + deep_merge 内再 deepcopy(base) 共两次，
+            # 其中 session_list 可能很大且从不被修改，是配置热路径的主要成本
+            #（随会话数线性增长）。改为共享 session_list 引用、只拷贝其余字段，
+            # 并直接返回合并结果（无 override 时 merge 是恒等操作）。
+            return self._copy_config_preserving_session_list(base_config or {})
+        # 有覆写：走原有完整深拷贝合并路径（低频路径，正确性优先）
+        base = copy.deepcopy(base_config or {})
         return self.deep_merge(base, override)
+
+    @staticmethod
+    def _copy_config_preserving_session_list(config: Any) -> Any:
+        """深拷贝配置但共享 session_list 引用（调用方约定不修改它）。"""
+        if not isinstance(config, dict):
+            return copy.deepcopy(config)
+        session_list = config.get("session_list")
+        if isinstance(session_list, list):
+            copied = copy.deepcopy(
+                {k: v for k, v in config.items() if k != "session_list"}
+            )
+            copied["session_list"] = session_list
+            return copied
+        return copy.deepcopy(config)
 
     async def update_session_from_effective(
         self,

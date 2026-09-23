@@ -92,9 +92,10 @@ class EventsMixin:
         # 未启用或配置无效则跳过
         session_config = self._get_session_config(normalized_session_id)
         if not session_config or not session_config.get("enable", False):
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
+                )
             return
 
         # 取消旧的调度任务并重新安排
@@ -156,15 +157,17 @@ class EventsMixin:
                     event, "sender_id", None
                 )
         except Exception as e:
-            logger.debug(f"[主动消息] 获取群聊发送者ID失败喵: {e}")
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(f"[主动消息] 获取群聊发送者ID失败喵: {e}")
 
         self_id = event.get_self_id() or self.session_data.get(session_id, {}).get(
             "self_id"
         )
         if self_id and sender_id and str(sender_id) == str(self_id):
-            logger.debug(
-                f"[主动消息] 检测到 {self._get_session_log_str(session_id)} 的 Bot 自身消息，跳过用户逻辑喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] 检测到 {self._get_session_log_str(session_id)} 的 Bot 自身消息，跳过用户逻辑喵。"
+                )
             return
 
         # 记录群聊最近用户活跃时间（用于临时态超时清理）
@@ -172,9 +175,10 @@ class EventsMixin:
         self.session_temp_state[normalized_session_id] = {
             "last_user_time": current_time
         }
-        logger.debug(
-            f"[主动消息] 记录 {self._get_session_log_str(session_id)} 的消息时间戳喵: {current_time}"
-        )
+        if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+            logger.debug(
+                f"[主动消息] 记录 {self._get_session_log_str(session_id)} 的消息时间戳喵: {current_time}"
+            )
 
         # 更新消息时间（仅插件启动后用于自动触发）
         self.last_message_times[normalized_session_id] = current_time
@@ -191,13 +195,15 @@ class EventsMixin:
                 self.session_data.setdefault(normalized_session_id, {})[
                     "last_message_time"
                 ] = current_time
-                logger.debug(
-                    f"[主动消息] 已记录插件启动后 {self._get_session_log_str(session_id)} 的消息时间喵 -> {current_time}"
-                )
+                if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                    logger.debug(
+                        f"[主动消息] 已记录插件启动后 {self._get_session_log_str(session_id)} 的消息时间喵 -> {current_time}"
+                    )
             else:
-                logger.debug(
-                    f"[主动消息] 忽略插件启动前 {self._get_session_log_str(session_id)} 的旧消息用于自动主动消息任务喵 -> {current_time}"
-                )
+                if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                    logger.debug(
+                        f"[主动消息] 忽略插件启动前 {self._get_session_log_str(session_id)} 的旧消息用于自动主动消息任务喵 -> {current_time}"
+                    )
 
         # 取消自动触发
         auto_trigger_cancelled = await self._cancel_all_related_auto_triggers(
@@ -226,9 +232,10 @@ class EventsMixin:
 
         # 未启用或配置无效则跳过
         if not session_config or not session_config.get("enable", False):
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
+                )
             return
 
         # 取消群聊中的既有调度任务（含“已持久化但未入调度器”的兜底判断）
@@ -287,9 +294,10 @@ class EventsMixin:
                 self.session_data[normalized_session_id]["unanswered_count"] = 0
                 changed = True
                 if current_unanswered > 0:
-                    logger.debug(
-                        f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的用户已回复， 未回复计数器已重置喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的用户已回复， 未回复计数器已重置喵。"
+                        )
 
                 if "group" in normalized_session_id.lower():
                     changed = (
@@ -314,13 +322,15 @@ class EventsMixin:
             self.scheduler.remove_job(normalized_session_id)
             if normalized_session_id != session_id:
                 self.scheduler.remove_job(session_id)
-            logger.debug(
-                f"[主动消息] Bot已发言，已取消 {self._get_session_log_str(normalized_session_id)} 的主动消息任务喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] Bot已发言，已取消 {self._get_session_log_str(normalized_session_id)} 的主动消息任务喵。"
+                )
         except Exception as e:
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(normalized_session_id)} 没有待取消的调度任务喵: {e}"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(normalized_session_id)} 没有待取消的调度任务喵: {e}"
+                )
 
         # 兜底清理同目标任务
         self._purge_related_jobs(normalized_session_id)
@@ -348,6 +358,12 @@ class EventsMixin:
         # 周期性清理过期会话状态
         if self._cleanup_counter % 10 == 0:
             self._cleanup_expired_session_states(current_time)
+            try:
+                # 群状态空闲淘汰：防止 _enhance_chats/_chime_group_states 等
+                # 按群索引的字典随历史群数单调增长
+                self._evict_idle_group_states()
+            except Exception as e:
+                logger.debug(f"[主动消息] 群状态空闲淘汰失败喵: {e}")
 
         try:
             await self._reset_group_silence_timer(normalized_session_id)

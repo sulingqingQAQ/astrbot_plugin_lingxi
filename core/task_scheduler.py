@@ -34,27 +34,30 @@ class SchedulerMixin:
         # 读取自动触发配置
         auto_trigger_settings = session_config.get("auto_trigger_settings", {})
         if not auto_trigger_settings.get("enable_auto_trigger", False):
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用自动主动消息功能喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用自动主动消息功能喵。"
+                )
             return
 
         auto_trigger_minutes = auto_trigger_settings.get(
             "auto_trigger_after_minutes", 5
         )
         if auto_trigger_minutes <= 0:
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的自动触发时间设置为0，禁用自动触发喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的自动触发时间设置为0，禁用自动触发喵。"
+                )
             return
 
         # 取消旧的自动触发计时器（避免重复）
         if session_id in self.auto_trigger_timers:
             try:
                 self.auto_trigger_timers[session_id].cancel()
-                logger.debug(
-                    f"[主动消息] 已取消 {self._get_session_log_str(session_id, session_config)} 现有的自动触发计时器喵。"
-                )
+                if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                    logger.debug(
+                        f"[主动消息] 已取消 {self._get_session_log_str(session_id, session_config)} 现有的自动触发计时器喵。"
+                    )
             except Exception as e:
                 logger.warning(f"[主动消息] 取消自动触发计时器时出错喵: {e}")
             finally:
@@ -62,11 +65,17 @@ class SchedulerMixin:
 
         # 闭包回调仅负责把真正逻辑投递回事件循环中的受控协程，
         # 避免在 call_later 回调里直接读写共享状态。
+        # timer_holder：call_later 返回的句柄要等注册完才拿得到，
+        # 用一个小容器把句柄带给回调，供「条件删除」做身份比对。
+        timer_holder: dict[str, Any] = {}
+
         def _auto_trigger_callback(captured_session_id=session_id):
             self._track_task(
                 asyncio.create_task(
                     self._handle_auto_trigger_callback(
-                        captured_session_id, auto_trigger_minutes
+                        captured_session_id,
+                        auto_trigger_minutes,
+                        timer_handle=timer_holder.get("handle"),
                     )
                 )
             )
@@ -74,9 +83,10 @@ class SchedulerMixin:
         try:
             loop = asyncio.get_running_loop()
             delay_seconds = auto_trigger_minutes * 60
-            self.auto_trigger_timers[session_id] = loop.call_later(
+            timer_holder["handle"] = loop.call_later(
                 delay_seconds, _auto_trigger_callback
             )
+            self.auto_trigger_timers[session_id] = timer_holder["handle"]
             if not silent:
                 # silent=True 用于批量初始化时避免重复日志
                 logger.info(
@@ -119,15 +129,19 @@ class SchedulerMixin:
         if not isinstance(session_info, dict):
             return False
 
+        # 便宜判断前置：next_trigger_time 缺失或已过期可直接判无效，
+        # 不必为它做一次完整的会话配置深拷贝+合并（启动路径 O(N×S) 的主因）。
+        next_trigger = session_info.get("next_trigger_time")
+        if not isinstance(next_trigger, (int, float)):
+            return False
+        check_time = current_time if current_time is not None else time.time()
+        if check_time >= (next_trigger + 60):
+            return False
+
         session_config = self._get_session_config(session_id)
         if not session_config or not session_config.get("enable", False):
             return False
 
-        next_trigger = session_info.get("next_trigger_time")
-        if not isinstance(next_trigger, (int, float)):
-            return False
-
-        check_time = current_time if current_time is not None else time.time()
         # 与 APScheduler misfire_grace_time 保持一致，允许 60 秒轻微抖动
         return check_time < (next_trigger + 60)
 
@@ -331,9 +345,10 @@ class SchedulerMixin:
 
         auto_trigger_settings = session_config.get("auto_trigger_settings", {})
         if not auto_trigger_settings.get("enable_auto_trigger", False):
-            logger.debug(
-                f"[主动消息] {self._get_session_log_str(resolved_session_id)} 未启用自动主动消息功能喵。"
-            )
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(
+                    f"[主动消息] {self._get_session_log_str(resolved_session_id)} 未启用自动主动消息功能喵。"
+                )
             return "disabled"
 
         # 检查是否已有有效的持久化任务（同一目标）
@@ -356,9 +371,10 @@ class SchedulerMixin:
             )
             return "max_unanswered"
 
-        logger.debug(
-            f"[主动消息] 正在为 {self._get_session_log_str(resolved_session_id)} 设置自动触发器喵。"
-        )
+        if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+            logger.debug(
+                f"[主动消息] 正在为 {self._get_session_log_str(resolved_session_id)} 设置自动触发器喵。"
+            )
         auto_trigger_minutes = auto_trigger_settings.get(
             "auto_trigger_after_minutes", 5
         )
@@ -386,7 +402,8 @@ class SchedulerMixin:
             async with self.data_lock:
                 await self._save_data_internal()
 
-        logger.debug(f"[主动消息] 会话数据条目数: {len(self.session_data)}")
+        if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+            logger.debug(f"[主动消息] 会话数据条目数: {len(self.session_data)}")
 
         # 遍历持久化任务并恢复调度器
         for session_id, session_info in list(self.session_data.items()):
@@ -402,9 +419,10 @@ class SchedulerMixin:
             # 仅恢复存在 next_trigger_time 的持久化任务
             next_trigger = session_info.get("next_trigger_time")
             if not next_trigger:
-                logger.debug(
-                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 没有next_trigger_time，跳过喵"
-                )
+                if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                    logger.debug(
+                        f"[主动消息] {self._get_session_log_str(session_id, session_config)} 没有next_trigger_time，跳过喵"
+                    )
                 continue
 
             if not self._is_persisted_task_still_valid(
@@ -415,18 +433,20 @@ class SchedulerMixin:
                 )
                 if self._clear_session_schedule_state(session_id):
                     cleaned_runtime_state += 1
-                    logger.debug(
-                        f"[主动消息] 已清理 {self._get_session_log_str(session_id, session_config)} 的过期持久化状态喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] 已清理 {self._get_session_log_str(session_id, session_config)} 的过期持久化状态喵。"
+                        )
                 continue
 
             try:
                 run_date = datetime.fromtimestamp(next_trigger, tz=self.timezone)
                 existing_job = self.scheduler.get_job(session_id)
                 if existing_job:
-                    logger.debug(
-                        f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的任务已存在，跳过恢复喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的任务已存在，跳过恢复喵。"
+                        )
                     continue
 
                 self.scheduler.add_job(
@@ -655,9 +675,10 @@ class SchedulerMixin:
             async with self.data_lock:
                 # 计时器已被取消则直接跳过
                 if session_id not in self.auto_trigger_timers:
-                    logger.debug(
-                        f"[主动消息] {self._get_session_log_str(session_id)} 的自动触发已被取消，跳过喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] {self._get_session_log_str(session_id)} 的自动触发已被取消，跳过喵。"
+                        )
                     return
 
                 # 确认配置仍然启用
@@ -719,9 +740,14 @@ class SchedulerMixin:
         except Exception as e:
             logger.error(f"[主动消息] 自动触发任务创建失败喵: {e}")
         finally:
-            # 触发一次后移除计时器
-            if session_id in self.auto_trigger_timers:
-                del self.auto_trigger_timers[session_id]
+            # 触发一次后移除计时器。
+            # 条件删除：仅当字典里的句柄仍是「本回调对应的句柄」时才删；
+            # 若回调执行期间该键被重设（新句柄写入），无条件 del 会让新句柄
+            # 失去引用、再也无法取消。当前 _setup_auto_trigger 只在启动阶段
+            # 调用（不可达），属于防雷。
+            if timer_handle is not None:
+                if self.auto_trigger_timers.get(session_id) is timer_handle:
+                    del self.auto_trigger_timers[session_id]
 
     async def _handle_group_silence_callback(
         self, session_id: str, idle_minutes: int | float

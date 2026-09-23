@@ -28,7 +28,9 @@ Bot 主动给好友发消息，模拟"想起来找你聊聊"的行为：
 - **免打扰时段**（`quiet_hours`）与**未回复上限**（`max_unanswered_times`，连续不理 Bot 就暂时不打扰）
 - **会话级差异化配置**：`core\session_override_manager.py` 支持对单个 `unified_msg_origin`
   覆盖全局配置（不同的间隔、提示词、开关），由 `core\session_config.py` 与 `core\session_parser.py`
-  负责解析与校验
+  负责解析与校验。⚠️ 目前仅覆盖**主动消息**（私聊/群聊 settings 及其子段）；
+  群聊接话（`group_chime_settings`）、群聊增强（`group_enhance_settings`）、
+  私聊追发（`followup_settings`）三段暂不支持会话级覆写，直接读全局配置
 - **记忆召回**：生成主动消息前，可调用 `astrbot_plugin_livingmemory` 等记忆插件检索长期记忆
   （`memory_recall_settings`，支持"最近历史做检索词"或"固定文本做检索词"两种模式），
   让 Bot 主动提起上次聊过的话题
@@ -48,15 +50,20 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 
 让 Bot 像一个真实的群友一样"插话"，而不是永远被动等 @：
 
-- **消息缓冲**：`core\group_chime.py` 把群消息按 `[时间] 昵称(id): 内容` 格式记入环形缓冲
-  （`chime_append_transcript()`），白名单群才启用
+- **消息缓冲与接话共用**（v2.1.0-dev.10 合并）：接话参考的聊天记录不再自建缓冲，
+  统一复用「群聊历史增强」的 `group_history.max_messages` 缓冲——它每次 LLM 请求
+  （含接话与直呼聚合）经 `enhance_inject_group_context()` 注入用户输入侧
+  （不写进持久化上下文）；每轮实际注入量由 `inject_max_messages` /
+  `inject_max_chars` 双预算控制（chatluna 式「存储/发送分离」，
+  从最新往回取，超额旧消息标注省略）
 - **活跃度数学判定，零 LLM 成本**（v2.1.0，与 chatluna-character 同款）：
   `core\group_activity.py` 用多时间窗（持续/瞬时/爆发/指数平滑）的消息速率经
   logistic 软阈值折算出 0~1 的"此刻群里多热闹"分数，再叠加"我上次开口"的自罚；
   分数 ≥ 自适应门槛就直接接话——门槛会随 Bot 的发言频率自行抬高、群安静久了回落。
   原 LLM 判定小模型及其配置已移除，粗筛彻底免费
-- **从便宜到贵的闸门**（`chime_check_all_gates()`）：总开关 → 每小时配额 → 每日配额 →
-  静音时段 → 活跃度门槛，全部通过才生成回复
+- **从便宜到贵的闸门**（`chime_check_all_gates()`）：接话冷却 → 每小时配额 →
+  每日配额 → 静音时段 → 消息积压+判定间隔 → 活跃度门槛，全部通过才生成回复
+  （总开关在外层 `chime_group_message` 中，不在此函数内）
 - **直呼聚合**（v2.1.0-dev.2）：@机器人 / 喊唤醒词的消息不各回各的，而是进同一个聚合池，
   等 `direct_aggregate_seconds` 秒把窗口内所有直呼（带昵称 + 用户 ID）合并成一次回复；
   @ 与喊昵称共用一个池子，回复也计入与接话同一份冷却/配额/活跃度记账
@@ -81,12 +88,15 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 移植自 `astrbot_plugin_astrbot_enhance_mode` 并扩展，核心在 `core\group_enhance.py`：
 
 - **群聊历史增强**（`group_history`）：群消息以 `[昵称/ID/时间](角色) #msgID:` 格式
-  持续记录并注入 system_prompt，Bot 说话时"看得见"群里最近发生了什么
+  持续记录并注入 LLM 请求的用户输入侧（v2.1.0-dev.10 起不再注入 system_prompt，
+  稳定的系统提示可命中 provider 提示词缓存，动态历史 mark_as_temp 不持久化），
+  Bot 说话时"看得见"群里最近发生了什么。存储（`max_messages`）与每轮实际注入
+  （`inject_max_messages` / `inject_max_chars` 双预算，v2.1.0-dev.10）分离，
+  从最新往回取，控制 token 成本
 - **重启后回拉历史**（`history_pull_enable`，v2.1.0-dev.7）：每个群在本进程启动后的
   第一条消息时，自动调用协议端 `get_group_msg_history` API 拉取最近
   `history_pull_count` 条历史，按消息 ID 去重后回填缓冲区，
-  解决重启后回复没有上下文的问题；可选 `history_pull_chime` 同步回填接话记录。
-  仅支持 aiocqhttp（NapCat/Lagrange 等）平台
+  解决重启后回复没有上下文的问题。仅支持 aiocqhttp（NapCat/Lagrange 等）平台
 - **图片转述**（`image_caption`）：群消息中的图片后台调用视觉模型转述，
   历史记录里的 `[Image]` 变成 `[Image: 描述]`，Bot 能"看懂"别人发的图
 - **语音转文字**（`voice_stt`）：群语音经 AstrBot 的 speech_to_text 提供商转写，
@@ -147,11 +157,6 @@ AI 正常回复用户之后，按概率（`followup_settings.probability`）在�
 | `enhance_unban_user` | 解封用户 |
 | `enhance_get_ban_list_status` | 查询当前封禁名单 |
 
-### 🔔 通知系统
-
-`core\notification_center.py`：轮询式通知中心，可挂定时任务与提醒，
-配合 `core\data_storage.py` 做会话持久化与数据清理。
-
 ### 📊 遥测与生命周期
 
 - `core\telemetry_manager.py`：主动消息行为的统计遥测（触发次数、回复率等），仅本地记录
@@ -180,7 +185,6 @@ astrbot_plugin_lingxi/
 │   ├── enhance_ban.py          # LLM 封禁工具与拦截
 │   ├── enhance_tag_utils.py    # Mention/Quote 标签解析
 │   ├── followup.py             # 私聊追发
-│   ├── notification_center.py  # 通知中心
 │   ├── session_override_manager.py / session_config.py / session_parser.py
 │   │                           # 会话级差异配置三件套
 │   ├── data_storage.py         # 会话持久化

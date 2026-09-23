@@ -285,10 +285,19 @@ def build_web_search_http_requests(
     provider_cfg = (
         provider.provider_config if isinstance(provider.provider_config, dict) else {}
     )
+    # provider.meta 是方法（返回元数据对象）而非属性：原写法
+    # getattr(provider.meta, "id", "") 恒为空串，回退标签永远落在 "provider"。
+    meta_id = ""
+    meta = getattr(provider, "meta", None)
+    if callable(meta):
+        try:
+            meta_id = str(getattr(meta(), "id", "") or "")
+        except Exception:
+            meta_id = ""
     provider_label = str(
         provider.get_model()
         or provider_cfg.get("model")
-        or getattr(provider, "meta", None) and getattr(provider.meta, "id", "")
+        or meta_id
         or "provider"
     )
 
@@ -405,10 +414,11 @@ async def run_web_search(
     if not request_specs:
         return "Web search error: no request spec could be built."
 
-    import logging
+    # 统一日志器（上架规范要求）：logger 一律从 astrbot.api 导入，
+    # 不得使用 Python 内置 logging 模块。
+    from astrbot.api import logger as _astrbot_logger
 
-    logger = logging.getLogger("proactive_chat.enhance")
-    logger.info(
+    _astrbot_logger.info(
         f"[联网搜索] 开始查询喵 provider={provider_label} query_len={len(query)}"
     )
 
@@ -432,7 +442,7 @@ async def run_web_search(
                 ) as resp:
                     raw_text = await resp.text()
                     if resp.status != 200:
-                        logger.warning(
+                        _astrbot_logger.warning(
                             f"[联网搜索] HTTP {resp.status} ({mode}): {raw_text[:300]}"
                         )
                         last_error = f"Web search HTTP {resp.status} ({mode})"

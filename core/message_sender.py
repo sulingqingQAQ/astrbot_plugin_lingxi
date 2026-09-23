@@ -177,7 +177,16 @@ class SenderMixin:
 
         # 对数间隔模式（模拟打字速度）
         if interval_method == "log":
-            log_base = float(settings.get("log_base", 1.8))
+            # log_base 来自自由文本配置，用户可能填 1 / 1.0 / 0.5 / 非数字：
+            # math.log(x, 1) 会除零、b<=0 无意义，异常会一路冒泡到
+            # check_and_chat 的兜底 except，被误判为致命错误并重排任务。
+            # 因此这里必须校验并兜底，不能让非法值进入 math.log。
+            try:
+                log_base = float(settings.get("log_base", 1.8))
+            except (TypeError, ValueError):
+                log_base = 1.8
+            if log_base <= 1.0:
+                log_base = 1.8
             if all(ord(c) < 128 for c in text):
                 word_count = len(text.split())
             else:
@@ -342,8 +351,10 @@ class SenderMixin:
             "style": str(raw.get("style") or "natural").strip().lower(),
             "min_length": max(0, self._parse_int(raw.get("min_length", 15), 15)),
             "max_segments": max(1, self._parse_int(raw.get("max_segments", 5), 5)),
-            "temperature": self._parse_float(raw.get("temperature", 0.3), 0.3),
-            "max_tokens": max(1, self._parse_int(raw.get("max_tokens", 600), 600)),
+            # temperature / max_tokens 配置项已删除：llm_generate 的 **kwargs
+            # 经 text_chat 传到 _prepare_chat_payload 后从不被使用（已核
+            # openai / openai_responses / gemini / anthropic 四个 provider 源），
+            # 面板上调节无效。要控参请用 provider 的 custom_extra_body。
             "timeout_seconds": max(
                 1.0, self._parse_float(raw.get("timeout_seconds", 12.0), 12.0)
             ),
@@ -533,13 +544,11 @@ class SenderMixin:
                     # 下游对 None 的处理更稳。
                     contexts=[],
                     system_prompt="",
-                    # 注意：temperature / max_tokens 实际到不了模型 ——
+                    # 注意：temperature / max_tokens 传了也到不了模型 ——
                     # llm_generate 的 **kwargs 经 text_chat 传到 _prepare_chat_payload
                     # 后从不被使用（已核 openai_source / openai_responses_source /
-                    # gemini_source / anthropic_source 四个源）。这两行保留只是为了让
-                    # 意图可见，真正生效需要走 provider 的 custom_extra_body。
-                    temperature=conf["temperature"],
-                    max_tokens=conf["max_tokens"],
+                    # gemini_source / anthropic_source 四个源）。要真正控参需走
+                    # provider 的 custom_extra_body，故此处不再传这两个参数。
                 ),
                 timeout=conf["timeout_seconds"],
             )

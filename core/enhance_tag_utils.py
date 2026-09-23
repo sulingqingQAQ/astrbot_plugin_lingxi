@@ -137,8 +137,43 @@ def build_interaction_instructions(
     return instructions
 
 
-def bounded_chat_history_text(messages: list[str]) -> str:
-    chats_str = "\n---\n".join(messages)
+def bounded_chat_history_text(
+    messages: list[str],
+    max_messages: int = 0,
+    max_chars: int = 0,
+) -> str:
+    """chatluna 式「存储/发送分离」渲染历史文本。
+
+    缓冲区（group_history.max_messages）里可以存很多条供接话/上下文参考，
+    但真正注入 prompt 的部分受两个预算约束，从最新往回取：
+
+    - max_messages: 最多注入条数（0 = 不限，注入全部）
+    - max_chars:    注入文本的字符硬预算（0 = 不限）。最后一条消息始终保留，
+                    即使它单独超预算（对应 chatluna 的 focusMessage 保底）
+
+    被预算挤掉的旧消息不会静默消失，开头用一行省略说明标注。
+    """
+    if max_messages <= 0 and max_chars <= 0:
+        chats_str = "\n---\n".join(messages)
+        return f"=== CHAT_HISTORY_BEGIN ===\n{chats_str}\n=== CHAT_HISTORY_END ==="
+
+    selected = messages if max_messages <= 0 else messages[-max_messages:]
+    if max_chars > 0:
+        kept: list[str] = []
+        used = 0
+        for line in reversed(selected):
+            cost = len(line) + (5 if kept else 0)  # "\n---\n" 的连接成本
+            if kept and used + cost > max_chars:
+                break
+            kept.append(line)
+            used += cost
+        kept.reverse()
+        selected = kept
+
+    omitted = len(messages) - len(selected)
+    chats_str = "\n---\n".join(selected)
+    if omitted > 0:
+        chats_str = f"（更早的 {omitted} 条消息已按注入预算省略）\n---\n" + chats_str
     return f"=== CHAT_HISTORY_BEGIN ===\n{chats_str}\n=== CHAT_HISTORY_END ==="
 
 

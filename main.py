@@ -1,5 +1,5 @@
 # 文件名: main.py (位于 data/plugins/astrbot_plugin_lingxi/ 目录下)
-# 版本: v2.1.0-dev.9（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
+# 版本: v2.1.0-dev.10（版本号唯一来源为 metadata.yaml，此处仅作人工提示）
 
 """插件入口与主类定义。"""
 
@@ -24,7 +24,6 @@ from .core.group_enhance import GroupEnhanceMixin
 from .core.llm_adapter import LlmMixin
 from .core.message_events import EventsMixin
 from .core.message_sender import SenderMixin
-from .core.notification_center import NotificationCenter
 from .core.plugin_lifecycle import LifecycleMixin
 from .core.session_config import ConfigMixin
 from .core.session_override_manager import SessionOverrideManager
@@ -73,12 +72,13 @@ class ProactiveChatPlugin(
         # 记录当前正在执行“立即触发”的会话，防止重复点击导致并发主动消息。
         self.manual_trigger_sessions: set[str] = set()
 
-        # 会话差异配置管理器、通知中心与 Web 管理端
+        # 会话差异配置管理器（通知中心已移除：消费方 Web 管理端已删除，
+        # 只剩每 5 分钟外联 plugincenter.aloys23.link + 只写不读缓存，
+        # 与插件「避免额外网络请求」的隐私立场冲突）
         self.session_override_manager = SessionOverrideManager(self.data_dir)
-        self.notification_center = NotificationCenter(self)
         # Web 管理端（4100 独立 WebUI）已移除。
         self.web_admin_server = None
-        # 插件版本统一通过版本工具读取，供遥测、通知系统、状态接口等多个模块复用。
+        # 插件版本统一通过版本工具读取，供遥测、状态接口等多个模块复用。
         self.version = get_plugin_version()
         # 遥测管理器在插件实例创建阶段即初始化，但真正发请求仍由生命周期阶段控制。
         self.telemetry = TelemetryManager(
@@ -318,7 +318,7 @@ class ProactiveChatPlugin(
 
     @filter.on_llm_request()
     async def on_llm_request_enhance(self, event: AstrMessageEvent, req) -> None:
-        """群聊增强注入：群聊历史 + 标签说明追加到 system_prompt（不动 prompt/contexts）。"""
+        """群聊增强注入：静态指令追加 system_prompt，聊天历史走用户输入侧（不动 prompt/contexts）。"""
         await GroupEnhanceMixin.enhance_inject_group_context(self, event, req)
         await GroupEnhanceMixin.enhance_inject_role(self, event, req)
 

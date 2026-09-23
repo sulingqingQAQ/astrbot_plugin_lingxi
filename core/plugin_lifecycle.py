@@ -29,7 +29,6 @@ class LifecycleMixin:
     data_dir: Any
     session_data_file: Any
     web_admin_server: Any
-    notification_center: Any
     telemetry: Any
     _heartbeat_task: asyncio.Task[None] | None
     _original_exception_handler: Any
@@ -69,13 +68,15 @@ class LifecycleMixin:
                     if last_time >= self.plugin_start_time:
                         self.last_message_times[session_id] = last_time
                         restored_count += 1
-                        logger.debug(
-                            f"[主动消息] 已恢复 {self._get_session_log_str(session_id)} 在插件启动后的消息时间喵 -> {last_time}"
-                        )
+                        if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                            logger.debug(
+                                f"[主动消息] 已恢复 {self._get_session_log_str(session_id)} 在插件启动后的消息时间喵 -> {last_time}"
+                            )
                     else:
-                        logger.debug(
-                            f"[主动消息] 忽略插件启动前的历史消息时间用于自动主动消息任务喵: {self._get_session_log_str(session_id)} -> {last_time}"
-                        )
+                        if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                            logger.debug(
+                                f"[主动消息] 忽略插件启动前的历史消息时间用于自动主动消息任务喵: {self._get_session_log_str(session_id)} -> {last_time}"
+                            )
 
         if restored_count > 0:
             logger.info(
@@ -102,7 +103,8 @@ class LifecycleMixin:
             self._track_task(asyncio.create_task(self._deferred_startup_telemetry()))
             # 心跳任务用于长期运行实例的活跃度统计，与启动事件互补。
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-            logger.debug("[主动消息] 已启动遥测心跳任务喵。")
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug("[主动消息] 已启动遥测心跳任务喵。")
 
         # 启动调度器
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
@@ -114,23 +116,6 @@ class LifecycleMixin:
 
         await self._setup_auto_triggers_for_enabled_sessions()
         logger.info("[主动消息] 自动主动消息触发器初始化完成喵。")
-
-        # 启动通知系统
-        try:
-            if self.notification_center:
-                await self.notification_center.start()
-        except Exception as e:
-            logger.error(f"[主动消息] 通知系统启动失败喵: {e}")
-            if self.telemetry and self.telemetry.enabled:
-                # 这里单独标记模块来源，便于区分“通知系统不可用”与主流程异常。
-                self._track_task(
-                    asyncio.create_task(
-                        self.telemetry.track_error(
-                            e,
-                            module="core.plugin_lifecycle.initialize.notification_center",
-                        )
-                    )
-                )
 
 
     async def terminate(self) -> None:
@@ -153,7 +138,8 @@ class LifecycleMixin:
                         exit_code=0, runtime_seconds=runtime_seconds
                     )
                 except Exception as e:
-                    logger.debug(f"[主动消息] shutdown 遥测上报失败喵: {e}")
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(f"[主动消息] shutdown 遥测上报失败喵: {e}")
                 # 再清理其余挂起的 telemetry tasks，避免遗留后台任务。
                 await self._cleanup_telemetry_tasks()
 
@@ -170,9 +156,10 @@ class LifecycleMixin:
             for session_id, timer in self.group_timers.items():
                 try:
                     timer.cancel()
-                    logger.debug(
-                        f"[主动消息] 已取消 {self._get_session_log_str(session_id)} 的沉默计时器喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] 已取消 {self._get_session_log_str(session_id)} 的沉默计时器喵。"
+                        )
                 except Exception as e:
                     logger.warning(f"[主动消息] 取消计时器时出错喵: {e}")
 
@@ -186,9 +173,10 @@ class LifecycleMixin:
             for session_id, timer in list(self.auto_trigger_timers.items()):
                 try:
                     timer.cancel()
-                    logger.debug(
-                        f"[主动消息] 已取消 {self._get_session_log_str(session_id)} 的自动触发计时器喵。"
-                    )
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(
+                            f"[主动消息] 已取消 {self._get_session_log_str(session_id)} 的自动触发计时器喵。"
+                        )
                 except Exception as e:
                     logger.warning(f"[主动消息] 取消自动触发计时器时出错喵: {e}")
 
@@ -203,7 +191,8 @@ class LifecycleMixin:
                     for job in jobs:
                         try:
                             self.scheduler.remove_job(job.id)
-                            logger.debug(f"[主动消息] 已移除调度器任务喵: {job.id}")
+                            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                                logger.debug(f"[主动消息] 已移除调度器任务喵: {job.id}")
                         except Exception as e:
                             logger.warning(f"[主动消息] 移除调度器任务时出错喵: {e}")
 
@@ -227,13 +216,6 @@ class LifecycleMixin:
                     await self.web_admin_server.stop()
                 except Exception as e:
                     logger.warning(f"[主动消息] 停止 Web 管理端时出错喵: {e}")
-
-            # 停止通知系统
-            if self.notification_center:
-                try:
-                    await self.notification_center.stop()
-                except Exception as e:
-                    logger.warning(f"[主动消息] 停止通知系统时出错喵: {e}")
         except Exception as e:
             logger.error(f"[主动消息] 生命周期终止阶段发生异常喵: {e}")
             if self.telemetry and self.telemetry.enabled:
@@ -249,7 +231,8 @@ class LifecycleMixin:
                 try:
                     await self.telemetry.close()
                 except Exception as e:
-                    logger.debug(f"[主动消息] 遥测会话关闭失败喵: {e}")
+                    if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                        logger.debug(f"[主动消息] 遥测会话关闭失败喵: {e}")
 
             # 确保终止日志一定输出
             logger.info("[主动消息] 主动消息插件已终止喵。")

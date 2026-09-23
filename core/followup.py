@@ -28,12 +28,8 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-# 对话增强待发任务在 followup_tasks 中的最长存在时间（秒）。
-# 取框架追发延迟上限 1800 再加生成余量，超时任务由自身 finally 兜底清理。
-_FOLLOWUP_MAX_LIFETIME = 1800 + 300
-
-# 追发提示词占位符（与 Conversa 的模板变量保持同名，便于迁移）
-_FOLLOWUP_PLACEHOLDERS = ("{now}", "{last_user}", "{last_ai}", "{time_since_last_chat}", "{umo}")
+# （历史遗留清理：_FOLLOWUP_MAX_LIFETIME 与 _FOLLOWUP_PLACEHOLDERS 全库零引用，
+#  已删除。任务超时由自身 finally 兜底；占位符由硬编码元组接管。）
 
 # 单条占位文本注入模板时的最大长度，防止超长历史撑爆提示词
 _FOLLOWUP_TEXT_MAX_CHARS = 200
@@ -122,10 +118,11 @@ class FollowupMixin:
             effective_prob = max(0.0, base_prob * (decay_rate**chain))
             roll = random.random() * 100
             if roll >= effective_prob:
-                logger.debug(
-                    f"[对话增强] {self._get_session_log_str(session_id)} 未触发喵 "
-                    f"(有效概率={effective_prob:.2f}%，链={chain}，掷点={roll:.2f})"
-                )
+                if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                    logger.debug(
+                        f"[对话增强] {self._get_session_log_str(session_id)} 未触发喵 "
+                        f"(有效概率={effective_prob:.2f}%，链={chain}，掷点={roll:.2f})"
+                    )
                 return
 
             # 随机延迟
@@ -144,7 +141,8 @@ class FollowupMixin:
                 f"{delay} 秒后追发喵。"
             )
         except Exception as e:
-            logger.debug(f"[对话增强] 触发检查异常喵（不影响主流程）: {e}")
+            if logger.isEnabledFor(10):  # DEBUG 级日志惰性化：级别不够时不求值 f-string（含 _get_session_log_str 配置链）
+                logger.debug(f"[对话增强] 触发检查异常喵（不影响主流程）: {e}")
 
     # ------------------------------------------------------------------ #
     # 延迟执行与生成
