@@ -101,6 +101,20 @@ class ConfigResolver:
         """从插件配置（新 schema：顶层 `private` / `group`）直接构造；顶层别的键（旧分节、schema_version）无视。"""
         return cls(private=conf.get("private"), group=conf.get("group"), overrides=overrides)
 
+    def reload(
+        self,
+        private: Optional[Mapping[str, Any]] = None,
+        group: Optional[Mapping[str, Any]] = None,
+        overrides: Optional[Mapping[Any, Any]] = None,
+        whitelist: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """原地热加载（UI-1b）：等价于对 self 再调一次 __init__。
+
+        warnings 清空重算、缓存清空。Brain / 闸门 / Ticker 持有同一个对象，
+        reload 后它们 resolve() 立刻拿到新值。坏数据不抛（沿用 __init__ 的容错）。
+        """
+        self.__init__(private, group, overrides, whitelist)  # noqa: PLC2801
+
     def _warn(self, msg: str) -> None:
         self.warnings.append(msg)
 
@@ -227,6 +241,15 @@ class ConfigResolver:
     def _listed(self, key: SessionKey) -> bool:
         ids = self._wl[key.scope]["ids"]
         return key.id in ids or (key.scope == Scope.GROUP and strip_isolation(key.id) in ids)
+
+    def is_listed(self, key: SessionKey) -> bool:
+        """该会话在不在本范围白名单里（UI-1b 公开 `_listed`；群聊 `发送者_群号` 按真群号匹配）。"""
+        return self._listed(key)
+
+    def override_paths(self, key: SessionKey) -> frozenset:
+        """该会话被分会话覆盖设过的 `块.键` 集合（UI-1b；没有覆盖 = 空集，群聊按真群号归一）。"""
+        flat = self._overrides.get((key.scope, self._ident(key)))
+        return frozenset(flat) if flat else frozenset()
 
     def whitelist_ids(self, scope: Scope) -> frozenset:
         """该范围白名单里的裸 ID 集合（只读拷贝；启动播种用它 × 平台 id 拼 SessionKey）。"""
