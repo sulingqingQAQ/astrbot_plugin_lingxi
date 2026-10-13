@@ -276,5 +276,85 @@ class TestHelpers(unittest.TestCase):
                          "合成名")
 
 
+class TestWebuiWiring(unittest.TestCase):
+    """UI-3：_setup_webui 缺模块不抛、_webui_reload 调 resolver.reload。"""
+
+    def _make_plugin(self, ctx=None, conf=None):
+        import astrbot.api.star as star
+        tmp = tempfile.mkdtemp(prefix="lx_pm_webui_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real_get_data_dir = star.StarTools.get_data_dir
+        star.StarTools.get_data_dir = classmethod(
+            lambda cls, name=None: __import__("pathlib").Path(tmp))
+        self.addCleanup(setattr, star.StarTools, "get_data_dir",
+                        real_get_data_dir)
+        plugin = _plugin_mod.LingxiPlugin(ctx or make_ctx(), dict(conf or {}))
+        return plugin
+
+    def test_setup_webui_missing_modules_no_raise(self):
+        # 本分支 lx.webui.* 还不存在（UI-1a/1b 未合入）：构造不抛，服务为 None。
+        plugin = self._make_plugin()
+        self.assertIsNone(plugin._webui_service)
+        self.assertIsNone(plugin._webui_api)
+        try:
+            plugin._setup_webui()
+        except Exception as e:
+            self.fail("_setup_webui 抛了：%r" % (e,))
+
+    def test_webui_reload_calls_resolver_reload(self):
+        plugin = self._make_plugin()
+        recorded = {}
+
+        class FakeResolved:
+            def get(self, path, default=None):
+                return 50 if path == "wake.max_tasks" else default
+
+        class FakeResolver:
+            def reload(self, private, group, overrides, whitelist=None):
+                recorded.update(private=private, group=group,
+                                overrides=overrides, whitelist=whitelist)
+
+            def resolve(self, key):
+                return FakeResolved()
+
+        plugin._c.resolver = FakeResolver()
+        plugin._c.store = types.SimpleNamespace(_wake_max=100)
+        conf = {"private": {"base": {}}, "group": {},
+                "session_overrides": "[1, 2"}
+        notes = plugin._webui_reload(conf)
+        self.assertIsInstance(notes, list)
+        # 覆盖表 "[1, 2" 形状不对 → 有"会话覆盖表："前缀的提示
+        self.assertTrue(any(str(n).startswith("会话覆盖表：") for n in notes),
+                        "缺覆盖表提示：%r" % (notes,))
+        # resolver.reload 被调，且拿到解析后的覆盖表
+        self.assertIn("overrides", recorded)
+        self.assertIsInstance(recorded["overrides"], dict)
+        # 构造时缓存的 _wake_max 被活刷（50 来自 FakeResolved）
+        self.assertEqual(plugin._c.store._wake_max, 50)
+
+    def test_webui_choices_empty_when_no_managers(self):
+        plugin = self._make_plugin()
+        out = plugin._webui_choices()
+        self.assertEqual(out, {"providers": [], "personas": []})
+
+    def test_webui_choices_from_managers(self):
+        class FakeProv:
+            def meta(self):
+                return types.SimpleNamespace(id="合成提供商")
+
+        class FakeCtx:
+            def get_all_providers(self):
+                return [FakeProv()]
+
+            persona_manager = types.SimpleNamespace(
+                personas_v3=[{"name": "合成人格"}])
+
+        plugin = self._make_plugin(ctx=make_ctx())
+        plugin._context = FakeCtx()
+        out = plugin._webui_choices()
+        self.assertEqual(out, {"providers": ["合成提供商"],
+                               "personas": ["合成人格"]})
+
+
 if __name__ == "__main__":
     unittest.main()

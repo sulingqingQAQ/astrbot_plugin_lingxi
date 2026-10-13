@@ -107,6 +107,63 @@ class BuildRigPluginTest(unittest.TestCase):
         with open(os.path.join(plug, "_conf_schema.json"), encoding="utf-8") as f:
             self.assertEqual(f.read(), want)
 
+    # UI-3：pages/ 打包
+    def _make_repo_with_pages(self):
+        repo = self._make_repo()
+        pagedir = os.path.join(repo, "pages", "lingxi")
+        os.makedirs(pagedir)
+        with open(os.path.join(pagedir, "index.html"), "w",
+                  encoding="utf-8", newline="") as f:
+            f.write("<html>\r\n<body>合成页</body>\r\n</html>\r\n")
+        with open(os.path.join(pagedir, "app.js"), "w",
+                  encoding="utf-8", newline="") as f:
+            f.write("var x = 1;\r\n")
+        with open(os.path.join(pagedir, "junk.pyc"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write("合成字节码")
+        with open(os.path.join(pagedir, "app.js.map"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write("{}")
+        cache = os.path.join(pagedir, "__pycache__")
+        os.makedirs(cache)
+        with open(os.path.join(cache, "c.pyc"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write("合成字节码")
+        with open(os.path.join(pagedir, "logo.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + "合成二进制".encode("utf-8") + b"\xff\x00")
+        return repo
+
+    def test_build_copies_pages_lf_no_pyc(self):
+        repo = self._make_repo_with_pages()
+        out = tempfile.mkdtemp(prefix="合成输出")
+        self.addCleanup(lambda: __import__("shutil").rmtree(out, ignore_errors=True))
+        plug = build(repo, out)
+        pages = os.path.join(plug, "pages", "lingxi")
+        self.assertTrue(os.path.isfile(os.path.join(pages, "index.html")))
+        self.assertTrue(os.path.isfile(os.path.join(pages, "app.js")))
+        with open(os.path.join(pages, "index.html"), "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\r", raw)
+        self.assertIn("合成页".encode("utf-8"), raw)
+        with open(os.path.join(pages, "app.js"), "rb") as f:
+            self.assertNotIn(b"\r", f.read())
+        # 二进制原样
+        with open(os.path.join(pages, "logo.png"), "rb") as f:
+            self.assertEqual(f.read(), b"\x89PNG\r\n\x1a\n" + "合成二进制".encode("utf-8") + b"\xff\x00")
+        # 排除项不在
+        for dirpath, dirnames, filenames in os.walk(os.path.join(plug, "pages")):
+            self.assertNotIn("__pycache__", dirnames)
+            for fn in filenames:
+                self.assertFalse(fn.endswith(".pyc"), fn)
+                self.assertFalse(fn.endswith(".map"), fn)
+
+    def test_build_without_pages_ok(self):
+        repo = self._make_repo()
+        out = tempfile.mkdtemp(prefix="合成输出")
+        self.addCleanup(lambda: __import__("shutil").rmtree(out, ignore_errors=True))
+        plug = build(repo, out)
+        self.assertFalse(os.path.exists(os.path.join(plug, "pages")))
+
 
 if __name__ == "__main__":
     unittest.main()
