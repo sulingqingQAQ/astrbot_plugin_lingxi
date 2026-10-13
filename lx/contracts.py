@@ -1,9 +1,19 @@
 """lx 契约（B1 接口草案的代码化）。只有协调者改这个文件。
 
-状态：**v0 临时版**。等 A-0 / B-0 探针回来后冻结成 v1。冻结之前，各线可以按这里的签名开工，
+状态：**v0.2 临时版**（A-0 探针后修订；B-0 探针回来后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
 但不要把实现绑死在细节上；契约改了，协调者会通知并合并进各线分支。
 
 只放：数据类、枚举、Protocol 签名、时钟类型。**不放任何业务逻辑，不 import astrbot。**
+
+给 adapters 层的硬约束（A-0 探针结论，AstrBot 4.28.1，证据见 探针报告）：
+1. `on_llm_request` / `on_decorating_result` 等钩子必须是普通 `async def`，**不能 yield**；钩子里的异常会被框架吞掉，
+   所以每个钩子自己 try/except + 记日志。
+2. `on_llm_request` 钩子在 AstrBot 的按会话锁**里面**（`internal.py:220`），所以"等待聚合"这类要等的逻辑不能放这里，
+   要放在锁外：`event_message_type` 处理器（先判命令不等）或 `on_waiting_llm_request`。
+3. 闸门要 DROP 的，尽早在锁外的处理函数里 `stop_event()`；`on_llm_request` 里只做拼装。
+4. E 路径不改 `req.prompt`（会污染记忆插件的检索词、还会落盘）；注入内容走 `extra_user_content_parts` +
+   `mark_as_temp()`，system 部分用 `req.system_prompt +=` 追加到末尾。
+5. 裁剪 `req.contexts` 会连带截断落盘的 AstrBot 对话（`internal.py:518` 整体替换写回），不是只影响本次请求。
 """
 from __future__ import annotations
 
@@ -11,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
-CONTRACT_VERSION = "0-provisional"
+CONTRACT_VERSION = "0.2-provisional"
 
 # 注入时钟：所有带时间的逻辑都接收一个 Clock，测试里用假时钟。返回秒级 Unix 时间戳。
 Clock = Callable[[], float]
@@ -106,9 +116,19 @@ class Trigger:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+class WaitAggregator(Protocol):
+    """`wait`（发言等待聚合，"最新者胜"）的纯状态部分。真正的 await 在 adapters 层的**锁外**做：
+        seq = agg.bump(key); await asyncio.sleep(cfg.get("wait.seconds")); if not agg.is_latest(key, seq): event.stop_event()
+    被丢弃的消息也要先 HistoryBuffer.record，再靠缓冲并进放行那条的提示词。"""
+
+    def bump(self, key: SessionKey) -> int: ...
+    def is_latest(self, key: SessionKey, seq: int) -> bool: ...
+
+
 class TriggerSource(Protocol):
     id: Source
 
+    # 同步、纯判断；不在里面 await（等待由 adapters 层按 WaitAggregator 完成）
     def on_message(self, key: SessionKey, msg: Msg, cfg: ResolvedConfig, event: Any) -> Optional[Trigger]: ...  # 事件驱动源实现
     def due(self, now: float) -> Sequence[tuple[SessionKey, Trigger]]: ...  # 定时驱动源实现，统一 tick 调用
     def on_user_message(self, key: SessionKey) -> None: ...  # 用户发言：重置 / 取消
@@ -138,7 +158,11 @@ class Gates(Protocol):
 class Assembled:
     system_tail: str  # 追加在 system prompt 末尾的部分（保前缀缓存）
     user_text: str  # 本轮用户侧文本：时间、触发原因、历史、焦点消息、状态……
-    contexts: Optional[list[Any]] = None  # 按 model_rounds 裁剪后的真实历史；None = 不动
+    # E 路径：adapters 把 user_text 作为 extra_user_content_parts（mark_as_temp）注入，不改 req.prompt；
+    # T 路径：作为请求的用户文本。
+    model_rounds: Optional[int] = None  # 声明式：给模型保留几轮真实历史；None = 不动（跟随 AstrBot 自己的设置）。
+    # 由 adapters 的钩子调用纯函数 trim_rounds 执行（保留 _no_save 头部、按 user 边界切、清孤儿 tool 消息）。
+    # 注意：执行即落盘截断，见模块文档第 5 条。默认 None，用户明确要求才启用。
 
 
 class PromptAssembler(Protocol):

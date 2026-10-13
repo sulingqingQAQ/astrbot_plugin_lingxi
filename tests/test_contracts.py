@@ -32,6 +32,14 @@ class ContractsTest(unittest.TestCase):
         self.assertTrue(o.silent)
         self.assertFalse(c.DeliveryReport(sent=False).sent)
 
+    def test_v02_changes_from_a0_probes(self):
+        # wait 的纯状态部分有协议；Assembled 用声明式 model_rounds，不再带 contexts
+        self.assertTrue(hasattr(c, "WaitAggregator"))
+        a = c.Assembled(system_tail="", user_text="")
+        self.assertIsNone(a.model_rounds)
+        self.assertFalse(hasattr(a, "contexts"))
+        self.assertIn("0.2", c.CONTRACT_VERSION)
+
     def test_mutable_defaults_not_shared(self):
         a, b = c.SessionState(), c.SessionState()
         a.status["x"] = 1
