@@ -70,7 +70,7 @@ def _check_no_errors(browser, where):
 
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
-    harness = Harness(page_dir=PAGE_DIR, service=StubService())
+    harness = Harness(page_dir=PAGE_DIR)
     base = harness.start()
     print("harness:", base)
     print("page_dir:", PAGE_DIR)
@@ -120,7 +120,7 @@ async def _run(out_dir):
         item_text = await browser.text(".diff-item")
         print("diff-item:", item_text)
         assert "30" in item_text and "45" in item_text, "diff 内容不对：%r" % item_text
-        assert "合成间隔" in item_text, "diff 缺项标题：%r" % item_text
+        assert "基础间隔" in item_text, "diff 缺项标题：%r" % item_text
         scope = await browser.eval(
             "document.querySelector('.diff-item').getAttribute('data-scope')")
         path = await browser.eval(
@@ -141,7 +141,7 @@ async def _run(out_dir):
         await browser.wait_for(
             "document.querySelector('#dirty-count').innerText.indexOf('未保存')>=0")
         st = _get_json(base + "/__harness/state")["data"]
-        res = harness.service.config_save({
+        res = harness.service.save_config({
             "revision": st["revision"],
             "changes": [{"scope": "group", "path": "idle.base_minutes", "value": 99}]})
         assert res.get("saved"), "服务侧改动没落下：%r" % res
