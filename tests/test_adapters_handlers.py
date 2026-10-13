@@ -302,5 +302,170 @@ class TestOnMessageEarlyExit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ev.stop_calls, 0)
 
 
+# -- on_message 后半：闸门与 yield 参数 ----------------------------------------
+
+class TestOnMessageGateAndYield(unittest.IsolatedAsyncioTestCase):
+    def _allowed(self, trigger=None, asm=None):
+        brain = FakeBrain()
+        brain.prepare_result = _prepared(
+            allowed=True, asm=asm if asm is not None else _asm())
+        c = _components(router=FakeRouter(trigger=trigger or _trigger()),
+                        brain=brain)
+        return c, brain
+
+    async def test_gate_deny_stops_without_yield(self):
+        brain = FakeBrain()
+        brain.prepare_result = _prepared(allowed=False)
+        c = _components(router=FakeRouter(trigger=_trigger()), brain=brain)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(out, [])
+        self.assertEqual(ev.stop_calls, 1)
+        self.assertIsNone(ev.get_extra("lingxi.turn"))
+
+    async def test_allowed_yields_original_prompt_and_sets_turn(self):
+        asm = _asm(system_tail="尾", user_text="用户文本")
+        c, _brain = self._allowed(asm=asm)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event(text="原样prompt")
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(len(out), 1)
+        marker, kw = out[0]
+        self.assertEqual(marker, "LLM-MARKER")
+        self.assertEqual(kw.get("prompt"), "原样prompt")
+        self.assertNotIn("system_prompt", kw)
+        self.assertNotIn("contexts", kw)
+        turn = ev.get_extra("lingxi.turn")
+        self.assertIsNotNone(turn)
+        self.assertIs(turn["asm"], asm)
+        self.assertEqual(ev.stop_calls, 0)
+
+    async def test_image_urls_limited_by_budget(self):
+        chain = [Image(url=f"https://img/x{i}") for i in range(6)]
+        cfg = FakeCfg({"context.image_budget_count": 2})
+        c, _brain = self._allowed()
+        c.resolver = FakeResolver(cfg=cfg)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event(text="看图", chain=chain)
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(len(out), 1)
+        _marker, kw = out[0]
+        self.assertEqual(kw.get("image_urls"),
+                         ["https://img/x0", "https://img/x1"])
+
+    async def test_busy_added_on_allow(self):
+        busy: set = set()
+        c, _brain = self._allowed()
+        c.busy = busy
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        await _collect(h.on_message(ev))
+        self.assertEqual(len(busy), 1)
+
+
+# -- on_message 等待聚合 ------------------------------------------------------
+
+class TestOnMessageWait(unittest.IsolatedAsyncioTestCase):
+    def _allowed_components(self, meta, brain=None, wait=None):
+        brain = brain or FakeBrain()
+        brain.prepare_result = _prepared(allowed=True, asm=_asm())
+        c = _components(router=FakeRouter(trigger=_trigger(meta=meta)),
+                        brain=brain, wait=wait or FakeWait())
+        return c, brain
+
+    async def test_no_wait_without_meta(self):
+        c, _brain = self._allowed_components(meta={})
+        slept = []
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      sleep=lambda s: slept.append(s) or asyncio.sleep(0))
+        ev = _group_event()
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(slept, [])
+
+    async def test_latest_only_last_passes(self):
+        meta = {"wait": {"seconds": 0.02, "mode": "latest"}}
+        c, _brain = self._allowed_components(meta=meta)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev1 = _group_event(text="第一条")
+        ev2 = _group_event(text="第二条")
+        t1 = asyncio.create_task(_collect(h.on_message(ev1)))
+        await asyncio.sleep(0.005)
+        t2 = asyncio.create_task(_collect(h.on_message(ev2)))
+        out1 = await t1
+        out2 = await t2
+        self.assertEqual(out1, [])
+        self.assertEqual(ev1.stop_calls, 1)
+        self.assertEqual(len(out2), 1)
+        self.assertEqual(ev2.stop_calls, 0)
+
+    async def test_merge_second_is_blocked_and_set_cleaned(self):
+        release = asyncio.Event()
+        sleeps = []
+
+        async def _sleep(s):
+            sleeps.append(s)
+            await release.wait()
+
+        meta = {"wait": {"seconds": 30, "mode": "merge"}}
+        c, _brain = self._allowed_components(meta=meta)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      sleep=_sleep)
+        ev1 = _group_event(text="首条")
+        ev2 = _group_event(text="并入条")
+        t1 = asyncio.create_task(_collect(h.on_message(ev1)))
+        await asyncio.sleep(0.02)
+        out2 = await _collect(h.on_message(ev2))
+        self.assertEqual(out2, [])
+        self.assertEqual(ev2.stop_calls, 1)
+        release.set()
+        out1 = await t1
+        self.assertEqual(len(out1), 1)
+        self.assertEqual(h._merging, set())
+
+    async def test_merge_sleep_error_cleans_set(self):
+        async def _boom(s):
+            raise RuntimeError("合成睡眠失败")
+
+        meta = {"wait": {"seconds": 5, "mode": "merge"}}
+        c, _brain = self._allowed_components(meta=meta)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      sleep=_boom)
+        ev = _group_event()
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(out, [])
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertEqual(h._merging, set())
+
+    async def test_wait_reresolves_config(self):
+        meta = {"wait": {"seconds": 0.001, "mode": "latest"}}
+        resolves = []
+
+        class CountingResolver(FakeResolver):
+            def resolve(self, key):
+                resolves.append(key)
+                return super().resolve(key)
+
+        brain = FakeBrain()
+        brain.prepare_result = _prepared(allowed=True, asm=_asm())
+        c = _components(resolver=CountingResolver(),
+                        router=FakeRouter(trigger=_trigger(meta=meta)),
+                        brain=brain)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        await _collect(h.on_message(ev))
+        self.assertGreaterEqual(len(resolves), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

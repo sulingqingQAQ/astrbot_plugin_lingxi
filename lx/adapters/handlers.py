@@ -104,7 +104,51 @@ class EHandlers:
                     except Exception as e:
                         _safe_log(self._log, "[handlers] stop_event 失败：%r" % (e,))
                 return
-            # 等待聚合（AD-4b 第二步实现；这里先直通）
+            # 等待聚合（锁外等，不堵 AstrBot 会话锁；等完重取配置）
+            wait_cfg = None
+            try:
+                meta = getattr(trigger, "meta", None) or {}
+                wait_cfg = meta.get("wait") if isinstance(meta, dict) else None
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 读 wait 配置失败：%r" % (e,))
+                wait_cfg = None
+            seconds = 0.0
+            mode = None
+            if isinstance(wait_cfg, dict):
+                try:
+                    seconds = float(wait_cfg.get("seconds", 0))
+                except (TypeError, ValueError):
+                    seconds = 0.0
+                mode = wait_cfg.get("mode")
+            if seconds > 0 and mode == "latest":
+                seq = self._c.wait.bump(key)
+                await self._sleep(seconds)
+                try:
+                    latest = self._c.wait.is_latest(key, seq)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] is_latest 失败：%r" % (e,))
+                    return
+                if not latest:
+                    try:
+                        event.stop_event()
+                    except Exception as e:
+                        _safe_log(self._log, "[handlers] stop_event 失败：%r" % (e,))
+                    return
+            elif seconds > 0 and mode == "merge":
+                if key in self._merging:
+                    try:
+                        event.stop_event()
+                    except Exception as e:
+                        _safe_log(self._log, "[handlers] stop_event 失败：%r" % (e,))
+                    return
+                self._merging.add(key)
+                try:
+                    await self._sleep(seconds)
+                finally:
+                    try:
+                        self._merging.discard(key)
+                    except Exception:
+                        pass
             try:
                 cfg = self._c.resolver.resolve(key)
             except Exception as e:
