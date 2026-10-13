@@ -143,6 +143,17 @@ class IdleDueTest(unittest.TestCase):
         store.get(key).unanswered = 100  # 已到上限
         self.assertEqual(src.due(clock() + 3600 * 100), [])
 
+    def test_stop_at_max_first_fire_exempt_when_base_ge_max(self):
+        # base>=max 时 retry==0 本来就在上限上；stop_at_max 不能让它永远发不出去，首次豁免
+        src, store, clock = make_source({"idle.stop_at_max": True, "idle.base_minutes": 600, "idle.max_minutes": 600,
+                                         "idle.jitter_percent": 0})
+        key = make_key()
+        src.on_user_message(key)
+        self.assertEqual(len(src.due(clock() + 600 * 60 + 1)), 1)
+        store.get(key).unanswered = 1  # 发过一次没人回：这回才真停
+        src.on_user_message(key)
+        self.assertEqual(src.due(clock() + 3600 * 100), [])
+
     def test_jitter_same_round_stable(self):
         src, _, clock = make_source({"idle.jitter_percent": 10})
         key = make_key()
@@ -249,8 +260,9 @@ class IdleRepliedTest(unittest.TestCase):
         key = make_key()
         src.on_user_message(key)
         store.get(key).unanswered = 5
-        src.on_user_message(key)  # 新消息：退避清零
-        self.assertEqual(store.get(key).unanswered, 0)
+        src.on_user_message(key)  # 新消息：重置锚点和本轮等待；unanswered 归 Ticker 管，这里不碰
+        self.assertEqual(store.get(key).unanswered, 5)
+        store.get(key).unanswered = 0  # Ticker.notify_user_message 做的事
         # 抖动 ±10%：等待在 27~33 分钟之间
         self.assertEqual(src.due(clock() + 26 * 60), [])
         self.assertEqual(len(src.due(clock() + 34 * 60)), 1)

@@ -153,10 +153,7 @@ class IdleSource:
             return
         self._anchors[key] = now
         self._waits.pop(key, None)
-        try:
-            self._store.get(key).unanswered = 0
-        except Exception as e:
-            self._log(f"[idle] on_user_message 清退避失败 {key}: {e}")
+        # unanswered 的增减由 Ticker 独占（用户发言时它先清零再通知各源），这里不碰。
 
     def _cfg_value(self, cfg: ResolvedConfig, path: str) -> Any:
         try:
@@ -207,7 +204,9 @@ class IdleSource:
                 factor = _safe_float(self._cfg_value(cfg, "idle.backoff_factor"), 2.0)
                 cap = _safe_float(self._cfg_value(cfg, "idle.max_minutes"), 600.0)
                 _, at_cap = _raw_minutes(base, factor, cap, retry)
-                if self._cfg_value(cfg, "idle.stop_at_max") and at_cap:
+                # stop_at_max：等待时长到上限就彻底停；但 base>=max 时第一次（retry==0）照发，
+                # 否则永远发不出去（chatluna 的做法）
+                if self._cfg_value(cfg, "idle.stop_at_max") and at_cap and retry > 0:
                     continue
                 wait = self._wait_for(key, cfg, retry)
             except Exception as e:
