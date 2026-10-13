@@ -516,6 +516,15 @@ class VersionAndPartialTest(unittest.TestCase):
         self.assertEqual(new["schema_version"], spec.SCHEMA_VERSION)
         self.assertEqual(len(report.results), 188)
 
+    def test_none_value_treated_as_absent(self):
+        old = legacy_defaults()
+        old["followup_settings"]["probability"] = None
+        new, report = mg.migrate_legacy(old)
+        self.assertEqual(new["private"]["followup"]["probability"], 20)
+        r = report.result("followup_settings.probability")
+        self.assertFalse(r.present)
+        self.assertFalse(r.applied)
+
     def test_non_dict_sections_tolerated(self):
         old = legacy_defaults()
         old["friend_settings"] = "坏了"

@@ -304,7 +304,7 @@ def migrate_legacy(old_conf: Mapping[str, Any]) -> tuple[dict, MigrationReport]:
     for e in lm.ENTRIES:
         res = LegacyResult(legacy=e.legacy, status=e.status, moved_to=[f"{d.scope.value}:{d.path}" for d in e.dests])
         raw = _get(old, e.legacy)
-        res.present = raw is not _MISSING
+        res.present = raw is not _MISSING and raw is not None  # None = AstrBot 也当"没填"（加载时换成默认值）
         if res.present:
             res.old_value = raw
             res.changed_from_default = raw != spec.legacy_default(e.legacy)
