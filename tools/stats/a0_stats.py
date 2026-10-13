@@ -203,7 +203,7 @@ def _ts_from_iso(s):
 _RE_ELLIPSIS = re.compile(r"(?:…+|⋯+|\.{2,}|。{2,}|·{2,})$")
 _TRAIL_JUNK = "\ufe0f\ufe0e\u200d\u20e3"
 END_CLASSES = ("period", "exclaim", "question", "ellipsis", "tilde", "comma_like",
-               "other_punct", "emoji_symbol", "none")
+               "close_bracket", "open_bracket", "other_punct", "emoji_symbol", "none")
 
 
 def end_class(text):
@@ -225,6 +225,10 @@ def end_class(text):
     if c in "，,、;；:：":
         return "comma_like"
     cat = unicodedata.category(c)
+    if cat in ("Pe", "Pf"):  # ） ) 】 」 』 》 ” 等闭合类
+        return "close_bracket"
+    if cat in ("Ps", "Pi"):  # 句末是孤零零的 （ 之类（常见的「说完补一个左括号」语气）
+        return "open_bracket"
     if cat.startswith("P") or cat in ("Sm", "Sc"):
         return "other_punct"
     if cat in ("So", "Sk"):
@@ -663,7 +667,9 @@ COMPARE = [
     ("end_punct.ellipsis", "句末：省略号", "pct"),
     ("end_punct.tilde", "句末：波浪号", "pct"),
     ("end_punct.comma_like", "句末：逗号/顿号/冒号类", "pct"),
-    ("end_punct.other_punct", "句末：其他标点（括号引号等）", "pct"),
+    ("end_punct.close_bracket", "句末：闭括号/闭引号（）) 】 」 ” 等）", "pct"),
+    ("end_punct.open_bracket", "句末：开括号（孤零零的 （ 等，未闭合）", "pct"),
+    ("end_punct.other_punct", "句末：其他标点", "pct"),
     ("end_punct.emoji_symbol", "句末：emoji/符号", "pct"),
     ("end_punct.none", "句末：无标点", "pct"),
     ("markdown.any", "含 Markdown 标记（任一）", "pct"),
@@ -689,7 +695,13 @@ COMPARE = [
     ("reply_delay.p90_s", "回复延迟 p90（秒）", "f1"),
     ("named.rate", "被点名（@ 或被引用回复）后 5 分钟内回话率", "rate"),
     ("hours.night_0_6", "凌晨 0–6 点发言占比", "pct"),
+    ("reply_delay.n_runs", "（样本量）新一轮发言次数", "int"),
+    ("named.total", "（样本量）被点名次数", "int"),
+    ("initiation.count", "（样本量）主动发起次数", "int"),
 ]
+
+# 样本量 / 体量类，只列数不打偏离标记
+NO_FLAG_KEYS = {"n_messages", "reply_delay.n_runs", "named.total", "initiation.count"}
 
 
 def flatten(d, prefix=""):
@@ -730,7 +742,7 @@ def compare_rows(bot_flat, member_flats, min_named=30):
             row.update({"top_median": med, "top_min": min(vals), "top_max": max(vals)})
             row["ratio_to_median"] = (b / med) if (b is not None and med) else None
             flag = ""
-            if b is not None and len(vals) >= 3:
+            if b is not None and len(vals) >= 3 and key not in NO_FLAG_KEYS:
                 lo, hi = min(vals), max(vals)
                 q1, q3 = _quartiles(vals)
                 if b < lo or b > hi:
@@ -964,21 +976,26 @@ def txt_crosscheck(txt_dir, window_engine, cfg):
     if not txt_dir or not os.path.isdir(txt_dir):
         return rows
     head = re.compile(r"^\[\d\d-\d\d \d\d:\d\d\] ")
+    # 「昵称(数字)」形态的行是别人的发言（txt 里夹带的上下文），其余形态才是 bot 自己的
+    named = re.compile(r"^\[\d\d-\d\d \d\d:\d\d\] [^\n()（）]{1,40}\(\d{5,12}\)")
     per_month = Counter()
+    per_month_named = Counter()
     for name in sorted(os.listdir(txt_dir)):
         if not name.endswith(".txt"):
             continue
         month = name[:7]
-        n = 0
         with open(os.path.join(txt_dir, name), "r", encoding="utf-8-sig", errors="replace") as f:
             for line in f:
                 if head.match(line):
-                    n += 1
-        per_month[month] += n
+                    per_month[month] += 1
+                    if named.match(line):
+                        per_month_named[month] += 1
     bot = window_engine.members.get(cfg.bot_uin) if window_engine else None
     for month in sorted(per_month):
         j = bot.months.get(month, 0) if bot else None
-        rows.append("%s：txt 带时间戳的行 %d，JSON 里 bot 当月 %s" % (month, per_month[month], j if j is not None else "—"))
+        rest = per_month[month] - per_month_named[month]
+        rows.append("%s：txt 带时间戳的行 %d（其中「昵称(数字)」形态 %d，其余 %d），JSON 里 bot 当月 %s" % (
+            month, per_month[month], per_month_named[month], rest, j if j is not None else "—"))
     return rows
 
 

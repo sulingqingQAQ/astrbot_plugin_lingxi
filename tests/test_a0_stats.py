@@ -148,7 +148,8 @@ class TextFeatureTests(unittest.TestCase):
             "好的。": "period", "ok.": "period", "行！": "exclaim", "行!!": "exclaim",
             "真的？": "question", "是吗?": "question", "嗯...": "ellipsis", "嗯……": "ellipsis",
             "嗯。。。": "ellipsis", "算了": "none", "ok": "none", "哈哈~": "tilde", "哈哈～": "tilde",
-            "先这样，": "comma_like", "(笑)": "other_punct", "（笑）": "other_punct", "「好」": "other_punct",
+            "先这样，": "comma_like", "(笑)": "close_bracket", "（笑）": "close_bracket", "「好」": "close_bracket",
+            "也行（": "open_bracket", "好吧(": "open_bracket", "a—b": "none", "路上-": "other_punct", "5+": "other_punct",
             "😀": "emoji_symbol", "好❤\ufe0f": "emoji_symbol", "123": "none", "好的。  ": "period",
         }
         for text, want in cases.items():
@@ -257,13 +258,15 @@ class EngineMetricTests(unittest.TestCase):
         self.assertAlmostEqual(f["types"]["pure_text"], 4 / 6)
 
     def test_end_punct_ratios(self):
-        texts = ["好的。", "行！", "真的？", "嗯...", "算了", "哈哈~", "ok", "(笑)", "😀"]
+        texts = ["好的。", "行！", "真的？", "嗯...", "算了", "哈哈~", "ok", "(笑)", "😀", "也行（"]
         a, _ = run([mk(BOT, T0 + i * 100000, t) for i, t in enumerate(texts)])
         e = fin(a, BOT)["end_punct"]
-        self.assertEqual(e["n_text"], 9)
-        for k in ("period", "exclaim", "question", "ellipsis", "tilde", "other_punct", "emoji_symbol"):
-            self.assertAlmostEqual(e[k], 1 / 9, msg=k)
-        self.assertAlmostEqual(e["none"], 2 / 9)
+        self.assertEqual(e["n_text"], 10)
+        for k in ("period", "exclaim", "question", "ellipsis", "tilde", "close_bracket", "open_bracket",
+                  "emoji_symbol"):
+            self.assertAlmostEqual(e[k], 1 / 10, msg=k)
+        self.assertAlmostEqual(e["none"], 2 / 10)
+        self.assertEqual(e["other_punct"], 0.0)
         self.assertEqual(e["comma_like"], 0.0)
         self.assertAlmostEqual(sum(e[k] for k in S.END_CLASSES), 1.0)
 
