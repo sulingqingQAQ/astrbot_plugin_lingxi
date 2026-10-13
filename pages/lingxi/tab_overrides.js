@@ -198,7 +198,10 @@
       var banner = document.querySelector("#banner");
       if (banner && banner.classList.contains("show") && banner.classList.contains("error")) {
         var t = banner.innerText || "";
+        // 服务端拒绝覆盖表时错误进 #banner；文案不一定带“覆盖”二字，
+        // 有覆盖表暂存没落下且顶部有错就提示，避免文案一改提示就丢。
         if (t.indexOf("覆盖") >= 0) show = true;
+        else if (LX.state.overridesDirty) show = true;
       }
     } catch (e) { /* 读不到就不显示 */ }
     ov.saveNote.classList.toggle("hidden", !show);
