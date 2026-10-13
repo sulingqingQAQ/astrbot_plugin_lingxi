@@ -205,6 +205,97 @@ def _initial_config():
 
 # -- 场景 ----------------------------------------------------------------------
 
+def _sc_U2(ctx):
+    """U2 登录：内存中的测试账号已拿到登录态，且登录态调鉴权接口有效。"""
+    assert ctx.token, "期望登录后 token 非空，实际为空"
+    assert getattr(ctx, "login_path", ""), "期望记录了登录用的真实路径"
+    code, raw = _http("GET", ctx.ext_base + "meta", token=ctx.token,
+                       timeout=30)
+    assert code == 200, (
+        "期望带登录态 GET meta 返回 200，实际 %s %s" % (code, raw[:200]))
+
+
+def _find_pages_detail(ctx):
+    """列出插件页：返回 (真实路径, 响应对象)。新接口优先，旧接口兜底。"""
+    cands = [
+        "/api/v1/plugins/pages?plugin_id=%s" % PLUGIN_NAME,
+        "/api/v1/plugins/%s" % PLUGIN_NAME,
+        "/api/plugin/get?name=%s" % PLUGIN_NAME,
+    ]
+    last = ""
+    for path in cands:
+        code, raw = _web_get(ctx, path, timeout=30)
+        last = "GET %s -> %s %s" % (path, code, raw[:200])
+        obj = _parse_json(raw)
+        if code == 200 and isinstance(obj, dict) and obj.get("status") == "ok":
+            return path, obj
+    raise AssertionError("列出插件页失败：%s" % last)
+
+
+def _get_page_entry(ctx):
+    """取页面入口配置：返回 (真实路径, 入口对象)。"""
+    cands = [
+        "/api/v1/plugins/page?plugin_id=%s&page_name=lingxi" % PLUGIN_NAME,
+        "/api/plugin/page/entry?name=%s&page=lingxi" % PLUGIN_NAME,
+    ]
+    last = ""
+    for path in cands:
+        code, raw = _web_get(ctx, path, timeout=30)
+        last = "GET %s -> %s %s" % (path, code, raw[:200])
+        obj = _parse_json(raw)
+        if code == 200 and isinstance(obj, dict) and obj.get("status") == "ok":
+            return path, obj.get("data") or {}
+    raise AssertionError("取页面入口失败：%s" % last)
+
+
+def _content_urls(entry):
+    """入口配置里的 content_path 拆出基址与查询串，拼出各静态文件 URL。"""
+    cpath = entry.get("content_path") or entry.get("contentPath") or ""
+    assert cpath, "期望入口配置里有 content_path，实际入口=%r" % (entry,)
+    if "?" in cpath:
+        base, qs = cpath.split("?", 1)
+        qs = "?" + qs
+    else:
+        base, qs = cpath, ""
+    if not base.endswith("/"):
+        base += "/"
+    return base, qs
+
+
+def _sc_U3(ctx):
+    """U3 宿主发现插件页：列表里有 lingxi 页；入口 HTML 含标题；静态文件非空。"""
+    list_path, detail = _find_pages_detail(ctx)
+    ctx.pages_list_path = list_path
+    blob = json.dumps(detail, ensure_ascii=False)
+    assert "lingxi" in blob, (
+        "期望插件详情里出现 lingxi 页，实际无（经 %s）" % list_path)
+    entry_path, entry = _get_page_entry(ctx)
+    ctx.page_entry_path = entry_path
+    base, qs = _content_urls(entry)
+    ctx.page_content_base = base + qs
+    if base.startswith("http"):
+        code, raw = _http("GET", base + qs, token=ctx.token, timeout=30)
+    else:
+        code, raw = _web_get(ctx, base + qs, timeout=30)
+    assert code == 200, (
+        "期望页面入口内容返回 200，实际 %s %s" % (code, raw[:200]))
+    assert "<title>灵犀</title>" in raw, (
+        "期望入口 HTML 里有 <title>灵犀</title>，实际前 300 字=%r" % raw[:300])
+    files = ["app.js", "form.js", "tab_overrides.js",
+             "app.css", "form.css", "tab_overrides.css"]
+    for fn in files:
+        code2, raw2 = _web_get(ctx, base + fn + qs, timeout=30)
+        if code2 == 404 and base.startswith("/api/plugin/page/content/"):
+            # 兼容新资产接口
+            alt = ("/api/v1/plugins/page/assets?plugin_id=%s"
+                   "&page_name=lingxi&asset_path=%s" % (PLUGIN_NAME, fn))
+            code2, raw2 = _web_get(ctx, alt, timeout=30)
+        assert code2 == 200, (
+            "期望静态文件 %s 返回 200，实际 %s %s" % (fn, code2, raw2[:200]))
+        assert raw2.strip(), "期望静态文件 %s 非空，实际为空" % fn
+    ctx.page_files = files
+
+
 def _sc_U1(ctx):
     """U1 加载与注册：日志有 lingxi 加载成功、无 Traceback、注册 7 个接口。"""
     proc = ctx.proc
@@ -302,7 +393,7 @@ async def amain(only):
             password = ""
             _probe_ext_base(ctx)
             print("ext api ok via %s" % ctx.ext_path, flush=True)
-            scenarios = [("U1", _sc_U1)]
+            scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3)]
             for name, fn in scenarios:
                 if only and name not in only:
                     continue
