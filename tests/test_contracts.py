@@ -38,7 +38,9 @@ class ContractsTest(unittest.TestCase):
         a = c.Assembled(system_tail="", user_text="")
         self.assertIsNone(a.model_rounds)
         self.assertFalse(hasattr(a, "contexts"))
-        self.assertIn("0.2", c.CONTRACT_VERSION)
+        # 版本号只要求是 0.x 临时版；具体版本不在测试里写死，免得每次升版都要改测试
+        self.assertTrue(c.CONTRACT_VERSION.startswith("0."))
+        self.assertIn("provisional", c.CONTRACT_VERSION)
 
     def test_v03_outcome_has_source_and_delivered(self):
         o = c.Outcome("hi")
