@@ -80,9 +80,14 @@ async def _save(browser, base):
     await browser.click("#btn-save")
     await browser.wait_for(
         "document.querySelector('#diff-panel').classList.contains('hidden') === false")
+    n = await browser.count(".diff-item")
+    assert n >= 1, "改动清单是空的，保存没有意义"
     await browser.click("#btn-confirm-save")
+    # toast 收起后文字仍在：必须等浮层重新 show，否则会读到上次保存的残留文字
     await browser.wait_for(
-        "document.querySelector('#toast').innerText.indexOf('已保存')>=0")
+        "(function(){var t=document.querySelector('#toast');"
+        "return t.classList.contains('show')&&t.innerText.indexOf('已保存')>=0;})()",
+        timeout=10.0)
     # toast 是页面中部的 fixed 浮层：等它收起再点别的按钮，否则真点击会被浮层吃掉
     await browser.wait_for(
         "document.querySelector('#toast').classList.contains('hidden')", timeout=10.0)
