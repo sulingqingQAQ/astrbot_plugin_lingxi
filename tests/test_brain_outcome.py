@@ -224,5 +224,79 @@ class RobustTest(unittest.TestCase):
         self.assertFalse(r.outcome.silent)
 
 
+class WiringTest(unittest.TestCase):
+    """规则 3/5：GuardRules 接线、重切、括号不管、正常 Outcome 细节。"""
+
+    def test_strip_period_disabled(self):
+        r = parse_reply(
+            "合成文本。",
+            _trigger(),
+            DictCfg({"speech.strip_period": False}),
+        )
+        self.assertEqual(r.parts, ["合成文本。"])
+        self.assertEqual(r.outcome.text, "合成文本。")
+
+    def test_strip_markdown_disabled(self):
+        r = parse_reply(
+            "**合成**。",
+            _trigger(),
+            DictCfg({"speech.strip_markdown": False}),
+        )
+        # 句号照去，Markdown 原样留
+        self.assertEqual(r.parts, ["**合成**"])
+
+    def test_strip_markdown_enabled_default(self):
+        r = parse_reply("**合成**。", _trigger(), DictCfg())
+        self.assertEqual(r.parts, ["合成"])
+
+    def test_max_chars_resplit(self):
+        r = parse_reply(
+            "第一句。第二句。第三句。",
+            _trigger(),
+            DictCfg({"speech.max_chars": 6}),
+        )
+        self.assertEqual(len(r.parts), 3)
+        self.assertTrue(all(len(p) <= 6 for p in r.parts))
+        self.assertEqual(r.outcome.text, "\n".join(r.parts))
+        self.assertIn("resplit", r.actions)
+        self.assertFalse(r.outcome.silent)
+        self.assertFalse(r.needs_retry)
+
+    def test_max_chars_string_number_coerced(self):
+        r = parse_reply(
+            "第一句。第二句。第三句。",
+            _trigger(),
+            DictCfg({"speech.max_chars": "6"}),
+        )
+        self.assertEqual(len(r.parts), 3)
+
+    def test_max_chars_negative_no_resplit(self):
+        r = parse_reply(
+            "第一句。第二句。",
+            _trigger(),
+            DictCfg({"speech.max_chars": -5}),
+        )
+        self.assertEqual(r.parts, ["第一句。第二句"])
+        self.assertNotIn("resplit", r.actions)
+
+    def test_paren_kept(self):
+        # 句末"（"是口癖，不剥
+        r = parse_reply("今天好开心（", _trigger(), DictCfg())
+        self.assertEqual(r.parts, ["今天好开心（"])
+        self.assertFalse(r.outcome.silent)
+
+    def test_actions_passthrough(self):
+        r = parse_reply(
+            "合成<think>合成内心</think>正文。", _trigger(), DictCfg()
+        )
+        self.assertEqual(r.parts, ["合成正文"])
+        self.assertIn("strip_tag:think", r.actions)
+        self.assertIn("strip_period", r.actions)
+
+    def test_normal_reason_empty(self):
+        r = parse_reply("合成正文。", _trigger(), DictCfg())
+        self.assertEqual(r.outcome.reason, "")
+
+
 if __name__ == "__main__":
     unittest.main()
