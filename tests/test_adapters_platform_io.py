@@ -6,7 +6,7 @@
 import asyncio
 import unittest
 
-from lx.adapters.platform_io import make_send_text, parse_onebot_message
+from lx.adapters.platform_io import make_history_puller, make_send_text, parse_onebot_message
 from lx.contracts import Scope, SessionKey
 
 
@@ -159,6 +159,127 @@ class ParseOnebotMessageTest(unittest.TestCase):
         msg = parse_onebot_message(rec, self.SELF)
         self.assertIsNotNone(msg)
         self.assertEqual(msg.ts, 0.0)
+
+
+class _FakeApi:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    async def call_action(self, action, **params):
+        self.calls.append((action, params))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class _FakeBotApiChannel:
+    """通道一：bot.api.call_action。"""
+
+    def __init__(self, api):
+        self.api = api
+
+
+class _FakeBotDirectChannel:
+    """通道二：bot.call_action。"""
+
+    def __init__(self, result=None, error=None):
+        self._result = result
+        self._error = error
+        self.calls = []
+
+    async def call_action(self, action, **params):
+        self.calls.append((action, params))
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class MakeHistoryPullerTest(unittest.TestCase):
+    SELF = "998877"
+
+    def _rec(self, mid, ts, text="合成历史"):
+        return {
+            "message_id": mid,
+            "time": ts,
+            "sender": {"user_id": 412001, "nickname": "合成昵称甲", "card": ""},
+            "message": [{"type": "text", "data": {"text": text}}],
+        }
+
+    def _puller(self, bot, logs=None):
+        logs = logs if logs is not None else []
+        return make_history_puller(lambda key: bot, lambda key: self.SELF, log=logs.append), logs
+
+    def test_group_action_and_int_group_id(self):
+        api = _FakeApi(result={"messages": [self._rec(764201, 1799999000)]})
+        puller, _ = self._puller(_FakeBotApiChannel(api))
+        key = SessionKey(Scope.GROUP, "653101", "synthplat")
+        out = _run(puller(key, 20))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(api.calls[0][0], "get_group_msg_history")
+        params = api.calls[0][1]
+        self.assertEqual(params["group_id"], 653101)
+        self.assertIsInstance(params["group_id"], int)
+        self.assertEqual(params["count"], 20)
+
+    def test_private_action_and_str_user_id(self):
+        api = _FakeApi(result={"messages": [self._rec(764202, 1799999001)]})
+        puller, _ = self._puller(_FakeBotApiChannel(api))
+        key = SessionKey(Scope.PRIVATE, "412001", "synthplat")
+        out = _run(puller(key, 20))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(api.calls[0][0], "get_friend_msg_history")
+        params = api.calls[0][1]
+        self.assertEqual(params["user_id"], "412001")
+        self.assertIsInstance(params["user_id"], str)
+
+    def test_sorted_ascending_and_none_dropped(self):
+        api = _FakeApi(
+            result={
+                "messages": [
+                    self._rec(764203, 1799999005, "合成晚"),
+                    {"message": [{"type": "text", "data": {"text": "合成无id"}}]},  # 无 message_id → 丢掉
+                    self._rec(764204, 1799999002, "合成早"),
+                ]
+            }
+        )
+        puller, _ = self._puller(_FakeBotApiChannel(api))
+        out = _run(puller(SessionKey(Scope.GROUP, "653101", "synthplat"), 20))
+        self.assertEqual([m.text for m in out], ["合成早", "合成晚"])
+
+    def test_direct_channel_fallback(self):
+        bot = _FakeBotDirectChannel(result={"messages": [self._rec(764205, 1799999000)]})
+        puller, _ = self._puller(bot)
+        out = _run(puller(SessionKey(Scope.PRIVATE, "412001", "synthplat"), 10))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(bot.calls[0][0], "get_friend_msg_history")
+
+    def test_no_channel_returns_empty(self):
+        puller, _ = self._puller(object())
+        out = _run(puller(SessionKey(Scope.GROUP, "653101", "synthplat"), 10))
+        self.assertEqual(out, [])
+
+    def test_no_bot_returns_empty(self):
+        puller = make_history_puller(lambda key: None, lambda key: self.SELF)
+        out = _run(puller(SessionKey(Scope.GROUP, "653101", "synthplat"), 10))
+        self.assertEqual(out, [])
+
+    def test_protocol_error_returns_empty_and_logs(self):
+        api = _FakeApi(error=RuntimeError("合成协议端空历史抛错"))
+        puller, logs = self._puller(_FakeBotApiChannel(api))
+        out = _run(puller(SessionKey(Scope.PRIVATE, "412001", "synthplat"), 10))
+        self.assertEqual(out, [])
+        self.assertEqual(len(logs), 1)
+
+    def test_count_non_positive_returns_empty_without_call(self):
+        api = _FakeApi(result={"messages": [self._rec(764206, 1799999000)]})
+        bot = _FakeBotApiChannel(api)
+        puller, _ = self._puller(bot)
+        key = SessionKey(Scope.GROUP, "653101", "synthplat")
+        self.assertEqual(_run(puller(key, 0)), [])
+        self.assertEqual(_run(puller(key, -5)), [])
+        self.assertEqual(api.calls, [])
 
 
 if __name__ == "__main__":

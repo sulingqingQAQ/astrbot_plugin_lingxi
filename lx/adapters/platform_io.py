@@ -122,3 +122,53 @@ def parse_onebot_message(rec: Mapping[str, Any], self_id: str) -> Optional[Msg]:
         quote_id=quote_id,
         images=images,
     )
+
+
+def make_history_puller(
+    get_bot: Callable[[SessionKey], Any],
+    self_id_of: Callable[[SessionKey], str],
+    log: Callable[[str], None] = lambda s: None,
+) -> Callable[[SessionKey, int], Awaitable[list[Msg]]]:
+    """造一个从协议端回拉历史的 puller(key, count)。
+
+    通道优先 bot.api.call_action，其次 bot.call_action（旧 core/forward_msg.py:321-342
+    的做法，但本卡只要这两种；都没有 → []）。群聊调 get_group_msg_history
+   （group_id=int(key.id)），私聊调 NapCat 扩展 get_friend_msg_history
+   （user_id=str(key.id)；历史为空时协议端会抛错，当作空列表）。
+    返回按 ts 升序、去掉 None；count <= 0 直接返回 []；任何异常 → log 并返回 []，不抛。
+    """
+
+    async def puller(key: SessionKey, count: int) -> list[Msg]:
+        if count <= 0:
+            return []
+        try:
+            bot = get_bot(key)
+            if bot is None:
+                return []
+            if key.scope == Scope.GROUP:
+                action = "get_group_msg_history"
+                params: dict[str, Any] = {"group_id": int(key.id), "count": count}
+            else:
+                action = "get_friend_msg_history"
+                params = {"user_id": str(key.id), "count": count}
+            api = getattr(bot, "api", None)
+            call = getattr(api, "call_action", None)
+            if not callable(call):
+                call = getattr(bot, "call_action", None)
+            if not callable(call):
+                return []
+            result = await call(action, **params)
+            messages = (result or {}).get("messages") or []
+            self_id = self_id_of(key)
+            out: list[Msg] = []
+            for rec in messages:
+                msg = parse_onebot_message(rec, self_id)
+                if msg is not None:
+                    out.append(msg)
+            out.sort(key=lambda m: (m.ts, m.id))
+            return out
+        except Exception as exc:  # noqa: BLE001——协议端空历史抛错等一律转空列表 + log
+            log(f"[platform_io] history_pull 失败（{key}）：{exc!r}")
+            return []
+
+    return puller
