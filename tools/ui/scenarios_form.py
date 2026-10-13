@@ -211,8 +211,9 @@ async def _run(out_dir):
             print("③ [%s] 保存生效 OK" % t)
             # 恢复默认：值回默认（相对已保存值产生一条新暂存），再保存一次落盘，暂存清零
             await browser.click(sel + " .field-reset")
+            # 真点击是异步落到页面的：必须等到新暂存出现，否则下一步读到的是点击前的值
             await browser.wait_for(
-                "LX.getValue(%s, %s) !== null" % (_q(scope), _q(path)))
+                "LX.isDirty(%s, %s) === true" % (_q(scope), _q(path)))
             cur = await browser.eval("LX.getValue(%s, %s)" % (_q(scope), _q(path)))
             assert cur == default, "③ [%s] 恢复默认不对：%r != %r" % (t, cur, default)
             await _save(browser, base)
