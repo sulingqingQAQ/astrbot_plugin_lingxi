@@ -6,11 +6,13 @@
 import unittest
 
 from lx.brain.brain import Brain, Prepared
+from lx.brain.outcome import ParsedReply, parse_reply
 from lx.contracts import (
     Assembled,
     GateResult,
     HistoryView,
     Msg,
+    Outcome,
     Scope,
     SessionKey,
     SessionState,
@@ -279,6 +281,124 @@ class PrepareTest(unittest.TestCase):
         p = b.prepare(_key(), _trigger())
         self.assertFalse(p.allowed)
         self.assertTrue(logs)
+
+
+def _parsed(text="合成回复", silent=False, reason="", source=None,
+            needs_retry=False, note=None, nxt=None):
+    oc = Outcome(text=text, silent=silent, reason=reason, source=source)
+    return ParsedReply(outcome=oc, parts=[] if text is None else [text],
+                       needs_retry=needs_retry,
+                       next_reply_reason=nxt, status_note=note)
+
+
+class FinishTest(unittest.TestCase):
+    def test_finish_returns_parse_reply(self):
+        b, args, _ = _brain()
+        trig = _trigger()
+        parsed = b.finish(_key(), trig, "合成模型输出")
+        self.assertIsNotNone(parsed.outcome.text)
+        self.assertIn("合成模型输出", parsed.outcome.text)
+
+    def test_finish_none_raw_silent_ok(self):
+        b, args, _ = _brain()
+        parsed = b.finish(_key(), _trigger(silent_ok=True), None)
+        self.assertTrue(parsed.outcome.silent)
+        self.assertIsNone(parsed.outcome.text)
+
+
+class ReportTest(unittest.TestCase):
+    def test_order_notify_before_register(self):
+        order = []
+
+        class OrderTicker:
+            def notify_user_message(self, key):
+                pass
+
+            def notify_replied(self, key, outcome):
+                order.append("notify")
+
+        class OrderNext:
+            def register(self, key, reason, cfg):
+                order.append("register")
+                return True
+
+        b, args, _ = _brain(ticker=OrderTicker(), next_reply=OrderNext())
+        parsed = _parsed(text="合成回复", nxt="time_60s", note="合成便签正文")
+        b.report(_key(), _trigger(), parsed, True)
+        self.assertEqual(order, ["notify", "register"])
+
+    def test_delivered_records_history_and_cooldown(self):
+        cfg = DictCfg({"trigger.reply_cooldown_seconds": 60})
+        b, args, _ = _brain(cfg=cfg, now=5000.0)
+        key = _key()
+        parsed = _parsed(text="合成回复")
+        out = b.report(key, _trigger(), parsed, True)
+        self.assertTrue(out.delivered)
+        bot_msgs = [m for _, m in args["history"].recorded if m.is_bot]
+        self.assertEqual(len(bot_msgs), 1)
+        self.assertEqual(bot_msgs[0].text, "合成回复")
+        self.assertTrue(bot_msgs[0].id.startswith("bot-"))
+        self.assertEqual(args["store"].get(key).cooldown_until, 5000.0 + 60)
+
+    def test_cooldown_zero_not_set(self):
+        cfg = DictCfg({"trigger.reply_cooldown_seconds": 0})
+        b, args, _ = _brain(cfg=cfg, now=5000.0)
+        key = _key()
+        b.report(key, _trigger(), _parsed(text="合成回复"), True)
+        self.assertEqual(args["store"].get(key).cooldown_until, 0.0)
+
+    def test_silent_does_nothing(self):
+        b, args, logs = _brain(now=5000.0)
+        key = _key()
+        parsed = _parsed(text=None, silent=True, reason="合成沉默")
+        out = b.report(key, _trigger(), parsed, False)
+        self.assertTrue(out.silent)
+        self.assertEqual(args["history"].recorded, [])
+        self.assertEqual(args["store"].get(key).cooldown_until, 0.0)
+        self.assertTrue(logs)
+
+    def test_delivered_writeback_and_source_fill(self):
+        b, args, _ = _brain()
+        trig = _trigger(source=Source.IDLE)
+        parsed = _parsed(text="合成回复")
+        parsed.outcome.delivered = None
+        parsed.outcome.source = None
+        out = b.report(_key(), trig, parsed, True)
+        self.assertTrue(out.delivered)
+        self.assertEqual(out.source, Source.IDLE)
+
+    def test_delivered_none_kept_when_text_present(self):
+        b, args, _ = _brain()
+        parsed = _parsed(text="合成回复")
+        parsed.outcome.delivered = None
+        out = b.report(_key(), _trigger(), parsed, None)
+        self.assertIsNone(out.delivered)
+
+    def test_status_note_none_skips_register(self):
+        b, args, _ = _brain()
+        b.report(_key(), _trigger(), _parsed(text="合成回复", note=None), True)
+        self.assertEqual(args["notes"].registered, [])
+
+    def test_status_note_registers(self):
+        b, args, _ = _brain()
+        b.report(_key(), _trigger(), _parsed(text="合成回复", note="合成便签正文"), True)
+        self.assertEqual(len(args["notes"].registered), 1)
+
+    def test_empty_next_reason_skips_register(self):
+        b, args, _ = _brain()
+        b.report(_key(), _trigger(), _parsed(text="合成回复", nxt=""), True)
+        self.assertEqual(args["next_reply"].registered, [])
+
+    def test_each_step_exception_isolated(self):
+        b, args, _ = _brain()
+        args["ticker"].fail_replied = True
+        args["notes"].fail_register = True
+        args["next_reply"].fail = True
+        parsed = _parsed(text="合成回复", nxt="time_60s", note="合成便签")
+        out = b.report(_key(), _trigger(), parsed, True)
+        # 各步异常被吞掉，仍然返回 outcome 且历史照记
+        self.assertEqual(out.text, "合成回复")
+        self.assertEqual(len([m for _, m in args["history"].recorded if m.is_bot]), 1)
 
 
 if __name__ == "__main__":

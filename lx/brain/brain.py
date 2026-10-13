@@ -30,6 +30,7 @@ from ..contracts import (
     SessionKey,
     Trigger,
 )
+from .outcome import ParsedReply, parse_reply
 
 __all__ = ["Brain", "Prepared"]
 
@@ -59,6 +60,13 @@ def _cfg_float(cfg: Any, path: str, default: float = 0.0) -> float:
     try:
         return float(cfg.get(path, default))
     except (TypeError, ValueError):
+        return default
+
+
+class _EmptyCfg:
+    """resolver 失败时的兜底配置：所有 get 走 default。"""
+
+    def get(self, path: str, default: Any = None) -> Any:
         return default
 
 
@@ -184,3 +192,104 @@ class Brain:
                 ),
             )
             return Prepared(allowed=False, why="内部异常", asm=None, retry_after=None)
+
+    # -- 规则 3：finish --
+
+    def finish(
+        self, key: SessionKey, trigger: Trigger, raw: Optional[str]
+    ) -> ParsedReply:
+        try:
+            cfg = self._resolver.resolve(key)
+        except Exception as e:
+            _safe_log(self._log, "[brain] finish 取配置失败，用空配置：%r" % (e,))
+            cfg = _EmptyCfg()
+        return parse_reply(raw, trigger, cfg, self._log)
+
+    # -- 规则 4：report --
+
+    def report(
+        self,
+        key: SessionKey,
+        trigger: Trigger,
+        parsed: ParsedReply,
+        delivered: Optional[bool],
+    ) -> Outcome:
+        outcome = parsed.outcome
+        # a. 写回 delivered 与 source
+        try:
+            if outcome.text:
+                if delivered is not None:
+                    outcome.delivered = delivered
+                # delivered 为 None 且有内容 = 还没发，原样保留 None
+            else:
+                outcome.delivered = False  # 沉默 / 无内容保持 False
+            if not outcome.source:
+                outcome.source = trigger.source
+        except Exception as e:
+            _safe_log(self._log, "[brain] report 写回失败：%r" % (e,))
+        # b. 先通知（后登记自约，因为新回复会让旧自约作废）
+        try:
+            self._ticker.notify_replied(key, outcome)
+        except Exception as e:
+            _safe_log(self._log, "[brain] report 通知 ticker 失败：%r" % (e,))
+        # c. 便签
+        try:
+            if parsed.status_note is not None:
+                self._notes.register_from_buffer(key, parsed.status_note)
+        except Exception as e:
+            _safe_log(self._log, "[brain] report 登记便签失败：%r" % (e,))
+        # d. 自约
+        try:
+            if parsed.next_reply_reason:
+                try:
+                    cfg = self._resolver.resolve(key)
+                except Exception as e:
+                    _safe_log(self._log, "[brain] report 取配置失败，跳过自约：%r" % (e,))
+                    cfg = None
+                if cfg is not None:
+                    self._next_reply.register(key, parsed.next_reply_reason, cfg)
+        except Exception as e:
+            _safe_log(self._log, "[brain] report 登记自约失败：%r" % (e,))
+        # e. 真的送达：记历史 + 硬冷却
+        try:
+            if delivered is True:
+                try:
+                    now = self._clock()
+                except Exception as e:
+                    _safe_log(self._log, "[brain] report 时钟失败，跳过记历史与冷却：%r" % (e,))
+                    now = None
+                if now is not None:
+                    try:
+                        self._history.record(
+                            key,
+                            Msg(
+                                id="bot-%d" % int(now * 1000),
+                                ts=now,
+                                speaker_id=self._bot_id,
+                                speaker_name=self._bot_name,
+                                text=outcome.text or "",
+                                is_bot=True,
+                            ),
+                        )
+                    except Exception as e:
+                        _safe_log(self._log, "[brain] report 记 bot 历史失败：%r" % (e,))
+                    try:
+                        cfg2 = self._resolver.resolve(key)
+                        seconds = _cfg_float(cfg2, "trigger.reply_cooldown_seconds", 0.0)
+                    except Exception as e:
+                        _safe_log(self._log, "[brain] report 读冷却配置失败：%r" % (e,))
+                        seconds = 0.0
+                    if seconds > 0:
+                        try:
+                            self._store.get(key).cooldown_until = now + seconds
+                        except Exception as e:
+                            _safe_log(self._log, "[brain] report 设冷却失败：%r" % (e,))
+        except Exception as e:
+            _safe_log(self._log, "[brain] report 送达处理失败：%r" % (e,))
+        # f. 沉默：只写一行 log
+        try:
+            if outcome.silent:
+                _safe_log(self._log, "[brain] 沉默：%s" % (outcome.reason,))
+        except Exception:
+            pass
+        return outcome
