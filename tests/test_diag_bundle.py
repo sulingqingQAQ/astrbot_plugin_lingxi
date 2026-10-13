@@ -248,8 +248,13 @@ class IncludeTextTest(unittest.TestCase):
     def test_include_text_attaches_bodies_but_still_masks_ids_and_hides_secrets(self):
         b = build(options={"include_text": True, "mask_ids": True})
         text = all_text(b)
-        for needle in (BODY_TEXT, BODY_RAW, STYLE, GLOSS, MEMBERS):
+        for needle in (BODY_TEXT, BODY_RAW, STYLE, GLOSS):
             self.assertIn(needle, text, needle)
+        # 成员档案里有群友昵称：即使勾选了包含正文，也永远只给字数（用户 2026-10-14 口径）
+        for needle in (MEMBERS, NICK):
+            self.assertNotIn(needle, text, needle)
+        self.assertEqual(b["config"]["text_boxes"]["members_text"], {"chars": len(MEMBERS + NICK)})
+        self.assertEqual(b["config"]["private"]["prompt"]["members_text"], {"chars": len(MEMBERS + NICK)})
         for needle in RAW_IDS + (SECRET,):
             self.assertNotIn(needle, text, needle)
         ev = [e for e in b["events"] if e["kind"] == "outcome" and e["result"] == "delivered"][0]

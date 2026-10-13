@@ -63,8 +63,16 @@ def _is_text_box_key(key: Any) -> bool:
     return any(key == n or key.endswith("." + n) for n in TEXT_BOX_NAMES)
 
 
-def _box_entry(value: Any, include_text: bool, mask_ids: bool) -> dict:
-    """文本框 → {"chars": n}；include_text=True 时再加 "text"。value 可以是字符串，或 {"chars","text"?}。"""
+def _is_members_key(key: Any) -> bool:
+    """成员档案文本框里会有群友昵称，诊断包永远只给字数（用户 2026-10-14 口径：不附昵称）。"""
+    return isinstance(key, str) and (key == "members_text" or key.endswith(".members_text"))
+
+
+def _box_entry(value: Any, include_text: bool, mask_ids: bool, key: Any = None) -> dict:
+    """文本框 → {"chars": n}；include_text=True 时再加 "text"（成员档案除外，永远只有字数）。
+    value 可以是字符串，或 {"chars","text"?}。"""
+    if _is_members_key(key):
+        include_text = False
     text: Optional[str] = None
     chars = 0
     if isinstance(value, str):
@@ -94,7 +102,7 @@ def _scrub(obj: Any, *, include_text: bool, mask_ids: bool, mask_keys: bool = Fa
             if is_secret_key(k):
                 out[ks] = HIDDEN
             elif _is_text_box_key(k) and isinstance(v, str):
-                out[ks] = _box_entry(v, include_text, mask_ids)
+                out[ks] = _box_entry(v, include_text, mask_ids, k)
             else:
                 out[ks] = _scrub(v, include_text=include_text, mask_ids=mask_ids, mask_keys=mask_keys)
         return out
@@ -189,7 +197,7 @@ def build_bundle(*, recorder: Any, state: Any, config_view: Any, warnings: Any, 
             "group": _clean_str_list(wl.get("group"), mask_ids, as_id=True),
         },
         "session_overrides": _scrub_overrides(cv.get("session_overrides"), include_text, mask_ids),
-        "text_boxes": {str(name): _box_entry(val, include_text, mask_ids) for name, val in boxes_in.items()},
+        "text_boxes": {str(name): _box_entry(val, include_text, mask_ids, name) for name, val in boxes_in.items()},
     }
 
     w = warnings if isinstance(warnings, dict) else {}
