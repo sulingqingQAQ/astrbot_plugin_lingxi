@@ -35,6 +35,32 @@ def _copy_lx(src_lx: str, dst_lx: str) -> None:
     # 拷贝后统一文本换行已由 copytree 保留；不额外处理二进制。
 
 
+# UI-3：插件页静态文件是文本（html/css/js），二进制（图片/字体）原样复制。
+_PAGES_TEXT_EXTS = (".html", ".css", ".js", ".json", ".txt", ".md")
+
+
+def _copy_pages(src_pages: str, dst_pages: str) -> None:
+    def _ignore(_dir: str, names: list) -> list:
+        return [n for n in names
+                if n == "__pycache__" or n.endswith((".pyc", ".map"))]
+
+    if os.path.isdir(dst_pages):
+        shutil.rmtree(dst_pages)
+    shutil.copytree(src_pages, dst_pages, ignore=_ignore)
+    for root, _dirs, files in os.walk(dst_pages):
+        for fn in files:
+            if not fn.endswith(_PAGES_TEXT_EXTS):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+
 def _rewrite_metadata_version(src: str, dst: str) -> None:
     with open(src, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
@@ -77,6 +103,10 @@ def build(repo_root: str, out_dir: str, name: str = PLUGIN_NAME) -> str:
                 shutil.copyfile(src, dst)
             else:
                 _copy_text_line_endings(src, dst)
+    # 6. UI-3：pages/（插件页）有则整个带上，不存在就跳过
+    src_pages = os.path.join(repo_root, "pages")
+    if os.path.isdir(src_pages):
+        _copy_pages(src_pages, os.path.join(plug, "pages"))
     return plug
 
 

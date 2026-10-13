@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta, timezone
 from typing import Any
 
@@ -96,6 +97,22 @@ def _warn(msg: str) -> None:
         pass
 
 
+def _webui_plugin_version() -> str:
+    """metadata.yaml 的 version；读不到用 "unknown"（UI-3）。"""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "metadata.yaml"), encoding="utf-8") as f:
+            for line in f:
+                text = line.strip()
+                if text.startswith("version:"):
+                    ver = text.split(":", 1)[1].strip().strip("\"'")
+                    if ver:
+                        return ver
+    except Exception:
+        pass
+    return "unknown"
+
+
 class LingxiPlugin(star.Star):
     """新核心插件主类：只做装配与转发。"""
 
@@ -141,6 +158,162 @@ class LingxiPlugin(star.Star):
         self._runner = TimerRunner(
             self._c, make_generate_t(context, self._c.resolver, log))
         self._wake = wake_tools(self._c, tz)
+        self._webui_service = None
+        self._webui_api = None
+        try:
+            self._setup_webui()
+        except Exception as e:
+            _warn("[lingxi] 配置面板初始化失败：%r" % (e,))
+
+    # ---------------------------------------------------------- 配置面板（UI-3）
+    def _setup_webui(self) -> None:
+        """接配置面板后端：构造 ConfigService + 注册 7 个 WebAPI。
+
+        lx.webui.* 由 UI-1a / UI-1b 两张卡在做，本分支还没有——import 失败只记
+        日志直接返回，插件照常加载（页面不可用而已）。方法整体不抛。
+        """
+        try:
+            try:
+                from .lx.webui.service import ConfigService
+                from .lx.webui.schema_export import build_meta
+                from .lx.adapters.webapi import LingxiWebApi
+                from .lx.config.spec import SCHEMA_VERSION
+            except Exception as e:
+                _warn("[lingxi] 配置面板不可用（缺模块，UI-1a/1b 未合入）：%r" % (e,))
+                return
+            version = _webui_plugin_version()
+            save = getattr(self.config, "save_config", None)
+            if not callable(save):
+                save = lambda: None  # noqa: E731 —— 假配置时不落盘
+            try:
+                data_dir = star.StarTools.get_data_dir(_PLUGIN_DATA_DIR_NAME)
+                backups_dir = os.path.join(str(data_dir), "config_backup")
+            except Exception:
+                backups_dir = os.path.join(".", "config_backup")
+            try:
+                warnings = list(getattr(self._c, "warnings", None) or [])
+            except Exception:
+                warnings = []
+            service = ConfigService(
+                self.config, save, self._webui_reload,
+                plugin_version=version, startup_warnings=warnings,
+                backups_dir=backups_dir)
+            api = LingxiWebApi(
+                service, lambda: build_meta(version, SCHEMA_VERSION),
+                choices_provider=self._webui_choices, log=_make_log())
+            self._webui_service = service
+            self._webui_api = api
+            try:
+                n = api.register(self._context)
+                try:
+                    logger.info("[lingxi] 配置面板接口注册 %d 个" % n)
+                except Exception:
+                    pass
+            except Exception as e:
+                _warn("[lingxi] 配置面板接口注册失败：%r" % (e,))
+        except Exception as e:
+            _warn("[lingxi] 配置面板初始化失败：%r" % (e,))
+
+    def _webui_reload(self, conf) -> list:
+        """热加载回调（给 ConfigService 用）：重解析覆盖表 + resolver.reload。
+
+        返回 list[str] 提示，不抛。resolver 还没有 reload 方法（UI-1b 未合入）
+        时退回原地重跑 __init__（等价，见 UI-0 §3：清缓存）。
+        """
+        def _get(key: str):
+            try:
+                get = getattr(conf, "get", None)
+                if callable(get):
+                    return get(key)
+            except Exception:
+                pass
+            return None
+
+        try:
+            from .lx.config.overrides import parse_overrides_text
+        except Exception as e:
+            return ["会话覆盖表解析模块缺失：%s（需要重载插件才生效）" % e]
+        try:
+            parsed, errs = parse_overrides_text(_get("session_overrides") or "")
+        except Exception as e:
+            return ["会话覆盖表解析失败：%s" % e]
+        notes = ["会话覆盖表：" + e for e in (errs or [])]
+        priv, grp = _get("private"), _get("group")
+        try:
+            resolver = self._c.resolver
+            wl = _get("whitelist")
+            kwargs = {} if wl is None else {"whitelist": wl}
+            reload = getattr(resolver, "reload", None)
+            if callable(reload):
+                reload(priv, grp, parsed, **kwargs)
+            else:
+                resolver.__init__(priv, grp, parsed, **kwargs)
+        except Exception as e:
+            notes.append("配置热加载失败：%s（需要重载插件才生效）" % e)
+            return notes
+        # 审计（UI-3）：构造时把配置值缓存下来的部件，热加载后会过期。
+        # ① JsonStateStore._wake_max：assembly.build_components 启动时从
+        #    resolver 取 wake.max_tasks 定死（assembly.py 第 65–75 行），
+        #    store.py 第 177 行收进 self._wake_max——这里活刷，不用重载插件。
+        try:
+            from .lx.contracts import Scope, SessionKey
+            probe = resolver.resolve(SessionKey(Scope.PRIVATE, "_", ""))
+            wake_max = int(probe.get("wake.max_tasks", 100))
+            if isinstance(wake_max, bool) or wake_max < 1:
+                raise ValueError("wake_max 非法：%r" % (wake_max,))
+            try:
+                self._c.store._wake_max = wake_max
+            except Exception:
+                notes.append("定时唤醒任务上限需要重载插件才生效")
+        except Exception:
+            notes.append("定时唤醒任务上限需要重载插件才生效")
+        # ② 显示名：__init__ 里从配置算一次（本文件 _bot_name_of）——这里跟着
+        #    活刷；identity 已在首条消息时固定，对齐差一拍，不要求重载插件。
+        try:
+            self._bot_name = _bot_name_of(conf)
+        except Exception:
+            pass
+        return notes
+
+    def _webui_choices(self) -> dict:
+        """尽力取模型提供商 id 与人格名；取不到返回空列表，不抛（UI-3）。"""
+        providers: list = []
+        personas: list = []
+        try:
+            get_all = getattr(self._context, "get_all_providers", None)
+            provs = get_all() if callable(get_all) else []
+            for p in provs or []:
+                try:
+                    pid = p.meta().id
+                except Exception:
+                    continue
+                if isinstance(pid, str) and pid.strip() and pid not in providers:
+                    providers.append(pid.strip())
+        except Exception:
+            providers = []
+        try:
+            pm = getattr(self._context, "persona_manager", None)
+            v3 = getattr(pm, "personas_v3", None)
+            if isinstance(v3, list) and v3:
+                for p in v3:
+                    try:
+                        name = p.get("name") if isinstance(p, dict) else getattr(
+                            p, "name", None)
+                    except Exception:
+                        continue
+                    if isinstance(name, str) and name.strip() and name not in personas:
+                        personas.append(name.strip())
+            else:
+                for p in (getattr(pm, "personas", None) or []):
+                    try:
+                        name = getattr(p, "persona_id", None)
+                    except Exception:
+                        continue
+                    if isinstance(name, str) and name.strip() and name not in personas:
+                        personas.append(name.strip())
+        except Exception:
+            personas = []
+        return {"providers": providers, "personas": personas}
 
     def _ensure_identity(self, event: AstrMessageEvent) -> None:
         """第一次拿到事件时记 self_id；Brain.set_identity 存在才调（AD-5a）。"""
