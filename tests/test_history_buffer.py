@@ -152,5 +152,55 @@ class TestPatchImage(unittest.TestCase):
         self.assertIsNone(b.messages(_key())[0].images[0].caption)
 
 
+class TestClearEvict(unittest.TestCase):
+    def test_clear_empties_and_marks(self):
+        logs = []
+        clock = FakeClock()
+        b = _buf(clock=clock, logs=logs)
+        b.record(_key(), _msg("m1", 100.0))
+        clock.advance(10.0)
+        b.clear(_key(), "合成原因：用户清理")
+        self.assertEqual(b.messages(_key()), [])
+        self.assertEqual(b.cleared_at(_key()), clock.now)
+        self.assertTrue(any("合成原因：用户清理" in s for s in logs))
+
+    def test_clear_missing_session_no_raise(self):
+        b = _buf()
+        b.clear(_key("不存在"), "合成原因")  # 不抛
+        self.assertEqual(b.messages(_key("不存在")), [])
+
+    def test_evict_idle_removes_only_idle(self):
+        clock = FakeClock()
+        b = _buf(clock=clock, idle_ttl=7200.0)
+        b.record(_key("g旧"), _msg("m1", 100.0))
+        clock.advance(3600.0)
+        b.record(_key("g新"), _msg("m2", 100.0))
+        clock.advance(3600.0 + 1)  # g旧已空闲超 2h，g新刚好 3600s
+        self.assertEqual(b.evict_idle(), 1)
+        self.assertEqual(b.messages(_key("g旧")), [])
+        self.assertEqual([m.id for m in b.messages(_key("g新"))], ["m2"])
+
+    def test_evict_idle_boundary_kept(self):
+        clock = FakeClock()
+        b = _buf(clock=clock, idle_ttl=7200.0)
+        b.record(_key(), _msg("m1", 100.0))
+        clock.advance(7200.0)  # 恰好等于 ttl：不算"早于"，保留
+        self.assertEqual(b.evict_idle(), 0)
+        self.assertEqual(len(b.messages(_key())), 1)
+
+    def test_evict_idle_returns_zero_when_none(self):
+        b = _buf()
+        self.assertEqual(b.evict_idle(), 0)
+
+    def test_evict_idle_drops_cleared_mark(self):
+        clock = FakeClock()
+        b = _buf(clock=clock, idle_ttl=100.0)
+        b.record(_key(), _msg("m1", 100.0))
+        b.clear(_key(), "合成原因")
+        clock.advance(200.0)
+        self.assertEqual(b.evict_idle(), 1)
+        self.assertIsNone(b.cleared_at(_key()))
+
+
 if __name__ == "__main__":
     unittest.main()

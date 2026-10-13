@@ -105,6 +105,28 @@ class MemoryHistoryBuffer:
             self._log(f"patch_image 失败: {e!r}")
             return False
 
+    def clear(self, key: SessionKey, reason: str) -> None:
+        try:
+            st = self._state_for(key)
+            st.msgs.clear()
+            st.by_id.clear()
+            st.cleared_at = self._clock()
+            st.pulled = False
+            self._log(f"clear {key}: {reason}")
+        except Exception as e:
+            self._log(f"clear 失败: {e!r}")
+
+    def evict_idle(self) -> int:
+        try:
+            cutoff = self._clock() - self._idle_ttl
+            dead = [k for k, st in self._states.items() if st.last_active < cutoff]
+            for k in dead:
+                del self._states[k]
+            return len(dead)
+        except Exception as e:
+            self._log(f"evict_idle 失败: {e!r}")
+            return 0
+
     def render(self, key: SessionKey, cfg: ResolvedConfig) -> HistoryView:
         raise NotImplementedError("A-2b")
 
