@@ -343,6 +343,13 @@ class EHandlers:
                 except Exception as e:
                     _safe_log(self._log, "[handlers] 清空 chain 失败：%r" % (e,))
                 try:
+                    # D 场景：只清空 chain 不停事件的话，AstrBot 内置
+                    # on_message 会走默认 LLM 补发一句兜底文。停事件后
+                    # star_request 循环 break、默认 LLM 流程跳过。
+                    event.stop_event()
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] stop_event 失败：%r" % (e,))
+                try:
                     self._c.brain.report(key, trigger, parsed, False)
                 except Exception as e:
                     _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
