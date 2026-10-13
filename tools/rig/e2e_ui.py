@@ -205,6 +205,86 @@ def _initial_config():
 
 # -- 场景 ----------------------------------------------------------------------
 
+def _need_ok(name, code, raw):
+    obj = _parse_json(raw)
+    assert code == 200, (
+        "%s 期望 HTTP 200，实际 %s %s" % (name, code, raw[:200]))
+    assert isinstance(obj, dict) and obj.get("status") == "ok", (
+        "%s 期望 status=ok，实际 %s" % (name, raw[:300]))
+    return obj.get("data")
+
+
+def _sc_U4(ctx):
+    """U4 七个接口经宿主调用：形状符合 UI-0 §2；about 版本；choices 含 fake-llm。"""
+    meta = _need_ok("meta", *_api_get(ctx, "meta"))
+    assert isinstance(meta, dict), "meta 期望是对象，实际=%r" % (meta,)
+    assert "plugin_version" in meta, "meta 缺 plugin_version"
+    assert "schema_version" in meta, "meta 缺 schema_version"
+    scopes = meta.get("scopes")
+    assert isinstance(scopes, list) and {s.get("scope") for s in scopes} >= {
+        "private", "group"}, "meta.scopes 期望含 private/group，实际=%r" % (scopes,)
+    blocks = meta.get("blocks")
+    assert isinstance(blocks, dict) and "private" in blocks and "group" in blocks, (
+        "meta.blocks 期望含 private/group 两栏，实际=%r" % (blocks,))
+    ov = meta.get("overrides") or {}
+    assert ov.get("syntax") == "yaml", (
+        "meta.overrides.syntax 期望 yaml，实际=%r" % (ov,))
+    assert isinstance(ov.get("max_bytes"), int), (
+        "meta.overrides.max_bytes 期望是整数，实际=%r" % (ov,))
+
+    cfg = _need_ok("config", *_api_get(ctx, "config"))
+    assert isinstance(cfg.get("private"), dict), "config 缺 private 对象"
+    assert isinstance(cfg.get("group"), dict), "config 缺 group 对象"
+    assert isinstance(cfg.get("session_overrides"), str), (
+        "config.session_overrides 期望是字符串")
+    rev = cfg.get("revision")
+    assert isinstance(rev, str) and len(rev) == 12 and all(
+        c in "0123456789abcdef" for c in rev), (
+        "config.revision 期望 12 位十六进制，实际=%r" % (rev,))
+    assert isinstance(cfg.get("warnings"), list), "config 缺 warnings 列表"
+
+    saved = _need_ok("config/save", *_api_post(
+        ctx, "config/save", {"revision": rev, "changes": []}))
+    assert saved.get("saved") is True, (
+        "空改动保存期望 saved=true，实际=%r" % (saved,))
+
+    chk = _need_ok("overrides/check", *_api_post(
+        ctx, "overrides/check", {"text": ""}))
+    assert "ok" in chk and "errors" in chk and "sessions" in chk, (
+        "overrides/check 缺 ok/errors/sessions，实际=%r" % (chk,))
+
+    exp = _need_ok("explain", *_api_get(
+        ctx, "explain", {"scope": "group", "id": GROUP_ID}))
+    assert exp.get("scope") == "group" and exp.get("id") == GROUP_ID, (
+        "explain 回显 scope/id 不对，实际=%r" % (exp,))
+    assert isinstance(exp.get("whitelist"), dict), "explain 缺 whitelist"
+    assert "enabled" in exp and "takes_over" in exp, "explain 缺 enabled/takes_over"
+    vals = exp.get("values")
+    assert isinstance(vals, dict) and vals, "explain.values 期望非空对象"
+    for k, v in vals.items():
+        assert isinstance(v, dict) and v.get("source") in (
+            "default", "global", "override") and "value" in v, (
+            "explain.values[%r] 形状不对，实际=%r" % (k, v))
+        break
+
+    cho = _need_ok("choices", *_api_get(ctx, "choices"))
+    provs = cho.get("providers")
+    assert isinstance(provs, list), "choices.providers 期望是列表"
+    assert "fake-llm" in provs, (
+        "choices.providers 期望含隔离根配置的 fake-llm，实际=%r" % (provs,))
+    assert isinstance(cho.get("personas"), list), "choices 缺 personas 列表"
+
+    ab = _need_ok("about", *_api_get(ctx, "about"))
+    assert ab.get("plugin_version") == "v3.0.0-dev.1", (
+        "about.plugin_version 期望 v3.0.0-dev.1，实际=%r" % (ab.get("plugin_version"),))
+    assert "schema_version" in ab, "about 缺 schema_version"
+    assert isinstance(ab.get("backups"), list), "about.backups 期望是列表"
+    assert "legacy_sections_present" in ab, "about 缺 legacy_sections_present"
+
+    ctx.meta = meta
+    ctx.about = ab
+
+
 def _sc_U2(ctx):
     """U2 登录：内存中的测试账号已拿到登录态，且登录态调鉴权接口有效。"""
     assert ctx.token, "期望登录后 token 非空，实际为空"
@@ -393,7 +473,8 @@ async def amain(only):
             password = ""
             _probe_ext_base(ctx)
             print("ext api ok via %s" % ctx.ext_path, flush=True)
-            scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3)]
+            scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3),
+                         ("U4", _sc_U4)]
             for name, fn in scenarios:
                 if only and name not in only:
                     continue
