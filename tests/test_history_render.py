@@ -242,5 +242,65 @@ class TestBuildViewWindowOldNew(unittest.TestCase):
         self.assertEqual(v, HistoryView([], [], None, ""))
 
 
+class TestBuildViewBudget(unittest.TestCase):
+    def test_exact_fits(self):
+        a = mk("m1", dt(13, "09:00"), text="第一")
+        b = mk("m2", dt(13, "09:05"), text="第二")
+        l1 = format_line(a, by_id={"m1": a}, tz=TZ, include_sender_id=True, show_msg_id=False)
+        l2 = format_line(b, by_id={"m1": a, "m2": b}, tz=TZ,
+                         include_sender_id=True, show_msg_id=False)
+        budget = (len(l1) + 1) + (len(l2) + 1)
+        v = build_view([a, b], cfg(**{"context.inject_chars": budget}), TZ)
+        self.assertEqual([m.id for m in v.new], ["m1", "m2"])
+        self.assertIs(v.focus, b)
+        self.assertEqual(v.text, l1 + "\n" + l2)
+
+    def test_one_short_only_newest(self):
+        a = mk("m1", dt(13, "09:00"), text="第一")
+        b = mk("m2", dt(13, "09:05"), text="第二")
+        l1 = format_line(a, by_id={"m1": a}, tz=TZ, include_sender_id=True, show_msg_id=False)
+        l2 = format_line(b, by_id={"m1": a, "m2": b}, tz=TZ,
+                         include_sender_id=True, show_msg_id=False)
+        budget = (len(l1) + 1) + (len(l2) + 1) - 1
+        v = build_view([a, b], cfg(**{"context.inject_chars": budget}), TZ)
+        self.assertEqual(v.older, [])
+        self.assertEqual([m.id for m in v.new], ["m2"])
+        self.assertIs(v.focus, b)
+        self.assertEqual(v.text, l2)
+
+    def test_newest_alone_over_budget_truncates_body(self):
+        m = mk("m1", dt(13, "09:05"), text="字" * 50)
+        full = format_line(m, by_id={"m1": m}, tz=TZ, include_sender_id=True, show_msg_id=False)
+        head = full[: full.find(": ") + 2]
+        budget = len(head) + 6
+        self.assertTrue(len(full) + 1 > budget)  # 确认真的是单独超预算
+        v = build_view([m], cfg(**{"context.inject_chars": budget}), TZ)
+        self.assertEqual(v.new, [m])
+        self.assertIs(v.focus, m)
+        self.assertTrue(v.text.startswith(head), v.text)
+        self.assertTrue(v.text.endswith("…"), v.text)
+        self.assertEqual(len(v.text) + 1, budget)
+        self.assertEqual(m.text, "字" * 50)  # 不修改输入的 Msg
+
+    def test_zero_unlimited(self):
+        msgs = [mk(f"m{i}", dt(13, f"09:0{i}"), text="字" * 100) for i in range(5)]
+        v = build_view(msgs, cfg(**{"context.inject_chars": 0}), TZ)
+        self.assertEqual(len(v.new), 5)
+        self.assertEqual(len(v.text.split("\n")), 5)
+
+    def test_separator_not_counted(self):
+        a = mk("m1", dt(13, "09:00"), sid="u1", sname="甲", text="第一")
+        bot = mk("m2", dt(13, "09:01"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        c = mk("m3", dt(13, "09:05"), sid="u2", sname="乙", text="第三")
+        by_id = {m.id: m for m in (a, bot, c)}
+        lines = [format_line(m, by_id=by_id, tz=TZ,
+                             include_sender_id=True, show_msg_id=False) for m in (a, bot, c)]
+        budget = sum(len(line) + 1 for line in lines)
+        v = build_view([a, bot, c], cfg(**{"context.inject_chars": budget}), TZ)
+        self.assertEqual(v.older, [a, bot])
+        self.assertEqual(v.new, [c])
+        self.assertIn("--- 以下是你上次发言之后的新消息 ---", v.text.split("\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

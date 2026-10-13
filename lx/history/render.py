@@ -45,6 +45,21 @@ def format_line(
 SEPARATOR = "--- 以下是你上次发言之后的新消息 ---"
 
 
+def _truncate_line(line: str, budget: int) -> str:
+    """最新单条超预算时的截断：行首 `[时间] 昵称(ID): ` 不动，正文截到总长 budget-1 并以 … 结尾。"""
+    allowed = budget - 1  # 再 +1 换行后刚好放进预算
+    head_end = line.find(": ") + 2
+    if head_end <= 1:  # 找不到 ": "，退化成整行硬截
+        return line[: max(allowed - 1, 0)] + "…" if allowed >= 1 else "…"
+    head, body = line[:head_end], line[head_end:]
+    allow_body = allowed - len(head)
+    if allow_body <= 0:
+        return head + "…"  # 预算连行首+一个字都放不下：尽力保留最新，不抛错
+    if allow_body == 1:
+        return head + "…"
+    return head + body[: allow_body - 1] + "…"
+
+
 def build_view(msgs: Sequence[Msg], cfg: ResolvedConfig, tz) -> HistoryView:
     """按 新/旧划分 → 去 bot → 窗口 → 字数预算 拼出 HistoryView。msgs 已按 ts 升序；不修改输入。"""
     if not cfg.get("context.enabled", True):
@@ -74,13 +89,34 @@ def build_view(msgs: Sequence[Msg], cfg: ResolvedConfig, tz) -> HistoryView:
     if limit > 0:
         combined = combined[-limit:] if limit < len(combined) else combined
     older_ids = {id(m) for m in older_cand}
-    older = [m for m in combined if id(m) in older_ids]
-    new = [m for m in combined if id(m) not in older_ids]
     include_sender_id = bool(cfg.get("context.include_sender_id", True))
     show_msg_id = bool(cfg.get("context.enable_message_id", False))
     lines = [format_line(m, by_id=by_id, tz=tz,
                          include_sender_id=include_sender_id, show_msg_id=show_msg_id)
              for m in combined]
+    # 字数预算：从最新往回累加 len(行)+1（换行），超过就停、更旧的丢掉；分隔行不占预算
+    try:
+        budget = int(cfg.get("context.inject_chars", 8000))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        budget = 8000
+    if budget > 0 and combined:
+        total = 0
+        keep_from = len(combined)
+        for i in range(len(combined) - 1, -1, -1):
+            cost = len(lines[i]) + 1
+            if total + cost <= budget:
+                total += cost
+                keep_from = i
+            else:
+                break
+        if keep_from >= len(combined):
+            # 最新一条单独超预算：至少保留它，正文截短到刚好放下并以 … 结尾
+            keep_from = len(combined) - 1
+            lines[keep_from] = _truncate_line(lines[keep_from], budget)
+        combined = combined[keep_from:]
+        lines = lines[keep_from:]
+    older = [m for m in combined if id(m) in older_ids]
+    new = [m for m in combined if id(m) not in older_ids]
     if older and new:
         text = "\n".join(lines[: len(older)] + [SEPARATOR] + lines[len(older):])
     else:
