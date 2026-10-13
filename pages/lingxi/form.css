@@ -1,0 +1,44 @@
+/* UI-4c 表单样式。深浅色走 app.css 的 CSS 变量；窄屏（≤700px）块导航变顶部下拉。 */
+.form-toolbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.form-search { flex: 1 1 220px; }
+.form-only-changed-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.form-layout { display: flex; gap: 16px; align-items: flex-start; }
+.block-nav {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 0 0 220px; position: sticky; top: 64px; max-height: calc(100vh - 96px); overflow: auto;
+}
+.block-btn {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  border: 1px solid transparent; background: transparent;
+}
+.block-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.block-btn-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.block-count {
+  font-size: 11.5px; color: var(--warn); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0 6px;
+}
+.form-items { flex: 1; min-width: 0; }
+.block-head { margin-bottom: 12px; }
+.block-head h3 { margin: 0 0 4px; font-size: 14.5px; }
+.block-hint, .block-locked { font-size: 12.5px; }
+.block-locked { margin-top: 4px; }
+.form-empty { padding: 24px; text-align: center; }
+.field-default { font-size: 12.5px; margin: 4px 0; }
+.field-reset { margin-top: 4px; }
+.field-control { margin: 6px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.field-control input[type="text"], .field-control input[type="number"],
+.field-control select, .field-control textarea { flex: 1 1 200px; }
+.field-count { font-size: 12px; }
+.block-select { display: none; width: 100%; margin-bottom: 12px; }
+@media (max-width: 700px) {
+  .block-nav { display: none; }
+  .block-select { display: block; }
+  .form-layout { flex-direction: column; }
+  .form-items { width: 100%; }
+}
