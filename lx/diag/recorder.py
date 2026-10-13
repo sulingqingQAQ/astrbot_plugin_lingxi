@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from .mask import mask_digits, mask_id
+from .mask import mask_digits, mask_id, scrub_exception_args
 
 __all__ = ["DiagRecorder", "classify_level", "SERIES_BUCKET_SECONDS", "SERIES_BUCKETS"]
 
@@ -274,10 +274,17 @@ class DiagRecorder:
             pass
 
     def log(self, msg: Any) -> None:
-        """日志回调：粗判级别，截断，进日志环，写文件（无正文）。永不抛。"""
+        """日志回调：粗判级别，截断，进日志环，写文件（无正文）。永不抛。
+
+        异常 repr 的参数先折叠成 ``(…)``（上游可能把请求片段回显在里面）；折叠前的原样只存内存（``raw``），
+        ``snapshot(include_text=True)`` 才输出，文件里永远是折叠后的。"""
         try:
-            text = _clip(msg if isinstance(msg, str) else str(msg), self._max_line)
+            full = msg if isinstance(msg, str) else str(msg)
+            text = _clip(scrub_exception_args(full), self._max_line)
             rec = {"ts": self._now(), "level": classify_level(text), "text": text, "prev_run": False}
+            original = _clip(full, self._max_line)
+            if original != text:
+                rec["raw"] = original
             with self._lock:
                 self._logs.append(rec)
                 self._write_file({"ts": rec["ts"], "level": rec["level"], "text": text})
@@ -401,6 +408,9 @@ class DiagRecorder:
         out_events = [self._render_event(e, include_text, mask_ids) for e in events]
         out_logs = []
         for r in logs:
+            original = r.pop("raw", None)
+            if include_text and original:
+                r["text"] = original
             if mask_ids:
                 r["text"] = mask_digits(r["text"])
             out_logs.append(r)

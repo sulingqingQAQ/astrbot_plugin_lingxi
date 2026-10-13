@@ -14,7 +14,7 @@
 - mask_ids=False：号码才出现；
 - 滚动文件永远没有正文（无论导出时勾了什么）。
 
-已知限制（见 summary.md「隐私说明」）：日志行里异常的 repr 可能带出相关片段，写成 ``expectedFailure``；
+日志行里异常 repr 的参数已折叠（2026-10-14 起是正式保证，见 ExceptionReprLimitationTest）；
 滚动文件里的会话号现状是原样落盘，同样标 ``expectedFailure``。这些测试"意外通过"就说明现状变了，
 需要回来改测试和文档。
 
@@ -438,15 +438,13 @@ class RollingFileTest(_WorldCase):
         text = self.w.file_text()
         self.assertEqual([n for n in ALL_TEXT_CANARIES if n in text], [])
 
-    @unittest.expectedFailure
-    def test_file_has_no_raw_ids(self):
-        """已知现状（DIAG-7 报告）：``_write_file`` 把事件的 ``session`` 和日志行原样写盘，``mask_ids`` 只在
-        ``snapshot`` 输出时生效（lx/diag/recorder.py 的 event / log 写文件处）。文件在插件数据目录里、不随诊断包导出
-        （导出走快照，读回时也会再打码，见 ReadBackTest）；是否要写盘时就打码，由协调者定。定了之后把这条的
-        expectedFailure 去掉，或改成断言"文件里是原号"。"""
+    def test_file_keeps_raw_ids_on_purpose(self):
+        """协调者口径（2026-10-14）：滚动文件只在本机插件数据目录里、不随诊断包导出，里面存**原始会话号**
+        （这样"显示完整会话号"对上次运行的轨迹也有意义）；打码只在导出 / 状态接口输出时做。
+        这条锁住"现状是原号"：哪天改成写盘就打码，这里会红，回来改口径和文档。"""
         self._export_all_combos()
         text = self.w.file_text()
-        self.assertEqual([n for n in RAW_IDS if n in text], [])
+        self.assertTrue([n for n in RAW_IDS if n in text], "文件里本应保留原号")
 
 
 class ReadBackTest(_WorldCase):
@@ -499,26 +497,33 @@ class ExceptionReprLimitationTest(unittest.TestCase):
 
     def test_summary_privacy_note_warns_about_exception_repr(self):
         s = self.w.surfaces(False, True)
-        self.assertIn("日志里的异常描述（repr）可能带出", s["summary.md"])
+        self.assertIn("异常描述（repr）里的参数已折叠", s["summary.md"])
 
-    @unittest.expectedFailure
+    # 2026-10-14：日志环 / 文件里的异常 repr 参数已折叠成 (…)（lx/diag/mask.py scrub_exception_args），
+    # 原样只存内存、include_text=True 才输出。下面三条原先是 expectedFailure，现在是正式保证。
     def test_exception_repr_in_log_line_hidden_by_default(self):
-        """已知限制，见 summary.md 隐私说明：``rec.log("... %r" % 异常)`` 的 repr 原样进日志环和导出。"""
+        """``rec.log("... %r" % 异常)`` 的 repr 参数不进日志环和导出。"""
         self.w.rec.log("[brain] converse_t 模型调用失败：%r" % (RuntimeError(C_EXC),))
         s = self.w.surfaces(False, True)
         self.assertEqual(leaks(s, (C_EXC,)), [])
+        self.assertIn("RuntimeError(…)", s["diag.json"])
 
-    @unittest.expectedFailure
     def test_exception_repr_via_brain_log_hidden_by_default(self):
-        """已知限制，见 summary.md 隐私说明：Brain 的 ``%r`` 日志经 ``log=rec.log`` 进日志环（插件入口就是这样接的）。"""
+        """Brain 的 ``%r`` 日志经 ``log=rec.log`` 进日志环（插件入口就是这样接的），同样被折叠。"""
         self._brain_with_exception()
         s = self.w.surfaces(False, True)
         self.assertEqual(leaks(s, (C_EXC,)), [])
 
-    @unittest.expectedFailure
     def test_exception_repr_not_in_rolling_file(self):
-        """已知限制，见 summary.md 隐私说明：日志行（含异常 repr）原样写进滚动文件，只截断到 300 字。"""
+        """滚动文件里永远是折叠后的日志行。"""
         self._brain_with_exception()
+        self.assertNotIn(C_EXC, self.w.file_text())
+
+    def test_exception_repr_original_only_with_include_text(self):
+        """折叠前的原样只存内存，勾"包含正文"才在日志里出现；文件里仍然没有。"""
+        self.w.rec.log("[brain] converse_t 模型调用失败：%r" % (RuntimeError(C_EXC),))
+        s_on = self.w.surfaces(True, True)
+        self.assertIn(C_EXC, s_on["diag.json"])
         self.assertNotIn(C_EXC, self.w.file_text())
 
 

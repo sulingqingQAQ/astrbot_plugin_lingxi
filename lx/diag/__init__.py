@@ -5,7 +5,7 @@
 """
 
 from .bundle import FORMAT, build_bundle, build_zip, render_summary_md
-from .mask import HIDDEN, is_secret_key, mask_digits, mask_id, redact_config
+from .mask import HIDDEN, is_secret_key, mask_digits, mask_id, redact_config, scrub_exception_args
 from .recorder import DiagRecorder, classify_level
 from .state import collect_state
 
@@ -22,4 +22,5 @@ __all__ = [
     "mask_id",
     "redact_config",
     "render_summary_md",
+    "scrub_exception_args",
 ]

@@ -15,9 +15,59 @@ import hashlib
 import re
 from typing import Any
 
-__all__ = ["mask_digits", "mask_id", "redact_config", "is_secret_key", "HIDDEN"]
+__all__ = ["mask_digits", "mask_id", "redact_config", "is_secret_key", "scrub_exception_args", "HIDDEN"]
 
 HIDDEN = "<已隐藏>"
+
+# 异常的 repr：``TimeoutError('...')`` / ``asyncio.exceptions.TimeoutError()`` 之类
+_EXC_OPEN = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Warning|Timeout|Interrupt)\(")
+
+
+def scrub_exception_args(text: Any) -> str:
+    """把日志行里异常 repr 的参数折叠成 ``(…)``：``RuntimeError('某段上游回显')`` → ``RuntimeError(…)``。
+
+    上游接口有时会把请求片段回显在错误消息里，参数里就可能带聊天内容。只保留异常类名。
+    括号按层数配对并认引号（引号里的括号不算）；参数为空 ``()`` 原样留；配不上（被截断等）就从 ``(`` 起折叠到行尾。
+    不认识的写法（比如用 ``str(e)`` 直接拼进句子）管不到，那是已知限制。
+    """
+    s = text if isinstance(text, str) else ("" if text is None else str(text))
+    out = []
+    i = 0
+    while True:
+        m = _EXC_OPEN.search(s, i)
+        if m is None:
+            out.append(s[i:])
+            break
+        out.append(s[i:m.end()])
+        j = m.end()
+        depth = 1
+        quote = ""
+        while j < len(s):
+            ch = s[j]
+            if quote:
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(s):  # 没配上：折叠到行尾
+            out.append("…")
+            break
+        if s[m.end():j].strip():
+            out.append("…")
+        out.append(")")
+        i = j + 1
+    return "".join(out)
 
 _DIGITS = re.compile(r"[0-9]{5,}")
 # 键名含这些词的值一律隐藏。"key" 后面跟 word 的（keyword / keywords，比如
