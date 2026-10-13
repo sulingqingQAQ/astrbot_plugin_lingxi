@@ -3,6 +3,10 @@
 让 Bot 像活人一样社交的 AstrBot 插件。一句话概括：**它让 Bot 在没人理它的时候也会自己开口、
 在被搭话时像真人一样分几条把话说完、在群聊里像群友一样见缝插针、还能自己"看懂"图片和网页。**
 
+> 灵犀（Lingxi）原作者为 [DBJD-CR](https://github.com/DBJD-CR)；本版本（v3 系列）由
+> [sulingqingQAQ](https://github.com/sulingqingQAQ) 在其代码基础上重写，仍按 AGPL-3.0 发布，
+> 原作者的版权声明与 LICENSE 保留，源码里从旧代码移植的部分均保留出处注释。
+>
 > 本插件基于 [Pancakes-Labs/astrbot_plugin_proactive_chat](https://github.com/Pancakes-Labs/astrbot_plugin_proactive_chat)（AGPL-3.0）深度改造而来，
 > 并吸收了 [astrbot_plugin_astrbot_enhance_mode](https://github.com/Axi404/astrbot_plugin_astrbot_enhance_mode)
 > 与 [chatluna-llm-web-search](https://github.com/CookSleep/chatluna-llm-web-search) 的部分设计思路。
