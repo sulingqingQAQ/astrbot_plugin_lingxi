@@ -47,9 +47,10 @@ WEBUI_PORT = 16185
 WS_PORT = 16199
 
 # 场景 B system 断言用的 lingxi 稳定片段（assembler.py 生态）：
-# silence.wait 私聊默认 False -> "就输出空内容。"；群聊/其他 silent_ok=True -> "就只输出 <refuse/>..."。
-# 两句公共子串，覆盖两种变体。
-SYSTEM_STABLE_FRAG = "如果你觉得不该开口"
+# build_interaction_instructions() 无条件追加 "## Mention / ## Quote / ## Refuse"
+# 三段（lx/pure/tags.py），其中 "## Quote" 最稳定：silence 块受 silent_ok 门控，
+# next_reply/chat_status 块受各自开关门控，只有标签说明段是无条件的。
+SYSTEM_STABLE_FRAG = "## Quote"
 
 
 # -- OpenAI 消息文本抽取 -----------------------------------------------------
@@ -285,9 +286,15 @@ async def _sc_D(ctx, proc):
     await ctx.napcat.send_private(USER_IN, "你别回我")
     await asyncio.sleep(15)
     sent = ctx.napcat.sent()
-    assert sent == [], (
-        "期望什么都没发出去（sent 为空），实际发出 %d 条：%r"
-        % (len(sent), [s["text"] for s in sent]))
+    reqs = ctx.llm.requests()
+    parts = []
+    for r in reqs:
+        users = _user_texts(r.get("messages"))
+        parts.append("t=%s user尾=%r" % (
+            r.get("_received_at"), [t[-60:] for t in users]))
+    evi = ("llm请求数=%d [%s]，发出=%r"
+           % (len(reqs), " | ".join(parts), [s["text"] for s in sent]))
+    assert sent == [], "期望什么都没发出去（sent 为空），实际" + evi
     with open(proc.log_path, "rb") as f:
         text = f.read().decode("utf-8", errors="replace")
     assert "Traceback" not in text, (
