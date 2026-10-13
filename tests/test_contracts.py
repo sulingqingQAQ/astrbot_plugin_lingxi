@@ -40,6 +40,13 @@ class ContractsTest(unittest.TestCase):
         self.assertFalse(hasattr(a, "contexts"))
         self.assertIn("0.2", c.CONTRACT_VERSION)
 
+    def test_v03_outcome_has_source_and_delivered(self):
+        o = c.Outcome("hi")
+        self.assertIsNone(o.source)
+        self.assertIsNone(o.delivered)
+        o2 = c.Outcome("hi", source=c.Source.IDLE, delivered=True)
+        self.assertEqual((o2.source, o2.delivered), (c.Source.IDLE, True))
+
     def test_mutable_defaults_not_shared(self):
         a, b = c.SessionState(), c.SessionState()
         a.status["x"] = 1

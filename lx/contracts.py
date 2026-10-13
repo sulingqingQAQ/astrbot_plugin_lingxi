@@ -1,6 +1,6 @@
 """lx 契约（B1 接口草案的代码化）。只有协调者改这个文件。
 
-状态：**v0.2 临时版**（A-0 探针后修订；B-0 探针回来后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
+状态：**v0.3 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；B-0 探针回来后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
 但不要把实现绑死在细节上；契约改了，协调者会通知并合并进各线分支。
 
 只放：数据类、枚举、Protocol 签名、时钟类型。**不放任何业务逻辑，不 import astrbot。**
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
-CONTRACT_VERSION = "0.2-provisional"
+CONTRACT_VERSION = "0.3-provisional"
 
 # 注入时钟：所有带时间的逻辑都接收一个 Clock，测试里用假时钟。返回秒级 Unix 时间戳。
 Clock = Callable[[], float]
@@ -175,6 +175,8 @@ class Outcome:
     silent: bool = False  # 模型选择沉默（空串 / 沉默标签）
     reason: str = ""  # 沉默或丢弃的原因，进日志
     raw: Optional[str] = None  # 模型原始输出（仅供日志，注意别写别人原话）
+    source: Optional[Source] = None  # v0.3：这次回复是哪个触发源引起的（追发只在"正常回复"之后登记，要靠它区分）
+    delivered: Optional[bool] = None  # v0.3：真的送达了吗（DeliveryReport.sent）；None = 还没发或没有可发的内容
 
 
 class Transport(Protocol):
