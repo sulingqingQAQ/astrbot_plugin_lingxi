@@ -178,7 +178,10 @@ class DiagRecorder:
             self._started_at = time.time()
         if file_path:
             self._file = _RotatingJsonl(str(file_path), file_max_bytes, file_backups)
-            self._read_back(str(file_path), max(0, int(file_backups)))
+            try:
+                self._read_back(str(file_path), max(0, int(file_backups)))
+            except Exception as e:  # 读回只是锦上添花：任何意外都不能让构造失败
+                self.file_error = "读取 %s" % type(e).__name__
 
     # ------------------------------------------------------------ 文件
 

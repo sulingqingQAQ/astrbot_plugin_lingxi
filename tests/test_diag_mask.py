@@ -93,6 +93,13 @@ class RedactConfigTest(unittest.TestCase):
         self.assertEqual(out["jina_api_key"], HIDDEN)
         self.assertEqual(out["key"], HIDDEN)
 
+    def test_is_secret_key(self):
+        from lx.diag.mask import is_secret_key
+        for name in ("api_key", "KEY", "access_token", "client_secret", "Password", "cookies", "oauth"):
+            self.assertTrue(is_secret_key(name), name)
+        for name in ("wake_keywords", "keyword_enabled", "base_minutes", "", None, 5):
+            self.assertFalse(is_secret_key(name), name)
+
     def test_scalars_pass_through(self):
         self.assertEqual(redact_config(5), 5)
         self.assertEqual(redact_config("s"), "s")
