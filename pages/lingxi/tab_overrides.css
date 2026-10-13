@@ -77,7 +77,16 @@ span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
   .ov-meta { flex: 1 1 100%; }
   #ex-id { flex-basis: 140px; }
   #ov-help summary { min-height: 40px; }
-  .ex-table tr.ex-row > td:first-child, .ex-table tr.ex-row > td:nth-child(2) { width: auto; }
+  /* 试算表在手机上改成"一项一块"：项名占一整行，下面左边是当前值、右边是来源徽标（三列硬挤会把项名挤成一字一行） */
+  .ex-table thead { display: none; }
+  .ex-table tr.ex-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px var(--sp-3);
+    padding: 10px var(--sp-3); border-bottom: 1px solid var(--border);
+  }
+  .ex-table tr.ex-row > td { padding: 0; border: 0; width: auto; background: transparent; }
+  .ex-table tr.ex-row > td:first-child { grid-column: 1 / -1; font-weight: 600; white-space: normal; }
+  .ex-table tr.ex-row > td:nth-child(2) { color: var(--text-2); min-width: 0; }
+  .ex-table tr.ex-row > td:last-child { text-align: right; }
   .ex-bar .ex-only { margin-left: 0; }
   .kv-grid { grid-template-columns: minmax(0, 1fr); }
 }

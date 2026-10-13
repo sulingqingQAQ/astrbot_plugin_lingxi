@@ -60,14 +60,8 @@ def _pid_alive(pid):
 
 
 async def _settle(browser, ms=420):
-    """等标签淡入 / 过渡动画走完再截图（动画 ≤ 180ms）。
-    无头 Edge 在没有交互时不一定持续出帧，动画会停在半路（截图发白）：所以主动请求几帧再等一会儿。"""
+    """等页面稳定再截图（整轮截图都开着减弱动效，所以只需要等一等渲染 / 布局）。"""
     await asyncio.sleep(ms / 1000.0)
-    for _ in range(3):  # 和一个 600ms 的定时器赛跑：万一不出帧也不会卡死
-        await browser.eval(
-            "Promise.race([new Promise(function(r){requestAnimationFrame(function(){setTimeout(r,80);});}),"
-            "new Promise(function(r){setTimeout(r,600);})])")
-    await asyncio.sleep(0.2)
 
 
 async def _open(browser, base, tab, theme, vp):
@@ -141,9 +135,8 @@ async def _prep_page(browser, tab, block, vp):
 
 
 async def _shoot(browser, path):
-    # 先抓一张丢掉：无头 Edge 没有交互时帧很少，第一次抓图会逼它出一帧，第二张才是动画走完后的样子
-    await browser.screenshot(path)
-    await asyncio.sleep(0.25)
+    # 整轮截图都开着"减弱动效"（见 _run）：无头 Edge 没有交互时帧很少，CSS 动画会停在半路、截图发白；
+    # 减弱动效下动画 0.01ms 就走完，抓到的就是最终长相。动效本身另有场景断言（scenarios_shell.py）。
     await browser.screenshot(path)
     print("截图：%s（%d 字节）" % (path, os.path.getsize(path)))
 
@@ -404,6 +397,24 @@ async def _run(out_root, rnd, only):
         await browser.start()
         pid = browser._pid
         print("edge pid:", pid)
+        # 无头 Edge 偶尔会让某条 CDP 命令卡很久（要么是截图、要么是改视口后的第一条命令）：
+        # 单条命令 12 秒没回就重发，最多 3 次，别让一张图拖垮整轮。
+        orig_cmd = browser.cmd
+
+        async def cmd_with_retry(method, timeout=30.0, **params):
+            last = None
+            for _ in range(3):
+                try:
+                    return await orig_cmd(method, timeout=12.0, **params)
+                except TimeoutError as e:
+                    last = e
+                    print("CDP 命令超时，重发：%s" % method)
+                    await asyncio.sleep(0.5)
+            raise last
+
+        browser.cmd = cmd_with_retry
+        await browser.cmd("Emulation.setEmulatedMedia",
+                          features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
         await _tabs_matrix(browser, base, out, only)
         await _states(browser, base, out, only)
         await _overlays(browser, harness, base, out, only)

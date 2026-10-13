@@ -59,6 +59,7 @@
       return j.length > 80 ? j.slice(0, 80) + "…" : j;
     }
     var t = String(v);
+    if (t === "") return "（空）";
     return t.length > 80 ? t.slice(0, 80) + "…" : t;
   }
 

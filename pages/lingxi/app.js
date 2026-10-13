@@ -494,6 +494,7 @@
   }
 
   function fmtVal(field, value) {
+    if (typeof value === "boolean") return value ? "开" : "关";
     if (Array.isArray(value)) return value.length + " 行";
     if (typeof value === "string") {
       if (value === "") return "（空）";
