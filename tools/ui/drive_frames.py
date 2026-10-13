@@ -457,7 +457,14 @@ class FrameBrowser(Browser):
                 pass
         for t in list(self._bg):
             t.cancel()
+        profile = self._profile
         await super().close()
+        # 进程树刚被杀，profile 里的文件可能还被占着：多试几次，别留垃圾目录
+        for _ in range(10):
+            if not profile or not Path(profile).exists():
+                break
+            shutil.rmtree(profile, ignore_errors=True)
+            await asyncio.sleep(0.5)
 
 
 def leftover_edge_pids(profile_marker: str = PROFILE_PREFIX):

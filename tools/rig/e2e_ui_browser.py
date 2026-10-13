@@ -356,6 +356,13 @@ async def _sc_B2(ctx):
     ctx.note("iframe 执行上下文：%s，安全源=%r，frame=%s"
              % ("独立进程（OOPIF，子 target 会话）" if f.get("oopif") else "与宿主同进程",
                 f["origin"], safe_url(f["frame_url"])))
+    # 真桥接 SDK 的证据：宿主 plugin_page_bridge.js 里 apiGet 是 makeRequest 的薄包装
+    # （UI-5 的假 SDK 是直接 fetch，函数体里没有这个名字）；垫片注入之前先验
+    sdk_src = await fb.ctx_eval(
+        f, "String(window.AstrBotPluginPage&&AstrBotPluginPage.apiGet)")
+    assert "makeRequest" in sdk_src, (
+        "iframe 里的 AstrBotPluginPage.apiGet 不是宿主桥接 SDK（函数体里没有 makeRequest）："
+        "%r" % (sdk_src[:120],))
     # 沙箱证据：没有 same-origin 时 window.origin 是字符串 'null'
     ctx.note("iframe 内 window.origin=%r" % (await fb.ctx_eval(f, "window.origin"),))
     # 宿主侧边栏的“插件页面”分组里应有灵犀入口，链接指向同一路由
