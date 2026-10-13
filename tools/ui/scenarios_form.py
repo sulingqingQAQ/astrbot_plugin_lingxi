@@ -184,6 +184,27 @@ async def _chk_invalid_number(browser, harness, base, meta):
     assert not (await browser.text(esel)).strip(), "#8 放弃之后红字提示还在"
     print("#8 数字框无效输入不带旧暂存 OK")
 
+async def _chk_invalid_decimal_for_int(browser, harness, base, meta):
+    # #8 另一条路径：给 int 项填小数（单独成条，方便在旧页面上单独验红）
+    scope = "private"
+    ib, ifld = _first_field(meta, scope, lambda f, b: f["type"] == "int" and not f["condition"])
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    await _select_block(browser, scope, ib["title"])
+    isel = '#tab-%s %s input[type="number"]' % (scope, _field_sel(scope, ifld["path"]))
+    good = ifld["default"] + 1
+    await browser.fill(isel, str(good))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(ifld["path"])))
+    await browser.fill(isel, "%s.5" % good)
+    await asyncio.sleep(0.4)
+    assert await browser.eval("LX.isDirty(%s, %s)" % (_q(scope), _q(ifld["path"]))) is False, \
+        "#8 给 int 项填小数后，上一次的有效暂存还留着"
+    assert await browser.eval("document.querySelector('#btn-save').disabled === true"), \
+        "#8 给 int 项填小数后保存按钮应禁用（没有别的改动）"
+    await _discard(browser)
+    print("#8 int 项填小数不带旧暂存 OK")
+
+
 async def _chk_server_error_clears(browser, harness, base, meta):
     scope = "private"
 
@@ -243,11 +264,10 @@ async def _chk_only_changed(browser, harness, base, meta):
         _server_set(harness, base, gscope, gfld["path"], gfld["default"])
 
 
-async def _chk_flush_debounce(browser, harness, base, meta):
+async def _flush_setup(browser, base, meta):
+    """#18 共用准备：开私聊页，选到带 text 项的块，返回要用的项与选择器。"""
     scope = "private"
     bb, bfld = _first_field(meta, scope, lambda f, b: f["type"] == "bool" and not f["condition"])
-
-    # ---- #18 防抖冲刷：输入后立刻点保存 / 放弃 ----
     await _fresh(browser, base)
     await _show_tab(browser, scope)
     tb, tfld = _first_field(meta, scope, lambda f, b: f["type"] == "text" and not f["condition"]
@@ -256,6 +276,12 @@ async def _chk_flush_debounce(browser, harness, base, meta):
     tsel = '#tab-%s %s [data-role="control"]' % (scope, _field_sel(scope, tfld["path"]))
     word = "刚输入的最后几个字符END"
     new_text = (tfld["default"] or "")[:20] + word
+    return scope, bfld, tfld, tsel, word, new_text
+
+
+async def _chk_flush_on_save_sync(browser, harness, base, meta):
+    # ---- #18 防抖冲刷：输入后立刻点保存 / 放弃 ----
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
     # (a) 同一个 JS 滴答里：派发 input 后立刻点保存（没有失焦，没有 change）——只有保存前冲刷防抖才过
     await browser.eval("LX.setValue(%s, %s, %s)" % (
         _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
@@ -272,19 +298,29 @@ async def _chk_flush_debounce(browser, harness, base, meta):
         "#18 输入后立刻点保存，改动清单里没有刚输入的完整文字：%r" % (line,)
     await browser.click("#btn-cancel-save")
     await _discard(browser)
+    print("#18(a) 保存前冲刷防抖 OK")
+
+
+async def _chk_flush_on_discard(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
     # (b) 放弃：待决的防抖不能在放弃之后又把文字暂存回来
     await browser.eval("LX.setValue(%s, %s, %s)" % (
         _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
     await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    # 同一个 JS 滴答里完成"输入 → 放弃（点两次）"，保证 150ms 防抖还没到点（真点击在无头 Edge 里可能慢过 150ms）
     await browser.eval(
         "(function(){var e=document.querySelector(%s);e.focus();e.value=%s;"
-        "e.dispatchEvent(new Event('input',{bubbles:true}));return true;})()"
+        "e.dispatchEvent(new Event('input',{bubbles:true}));"
+        "var d=document.querySelector('#btn-discard');d.click();d.click();return true;})()"
         % (_q(tsel), _q(new_text)))
-    await browser.click("#btn-discard")
-    await browser.click("#btn-discard")
     await asyncio.sleep(0.5)
     left = await browser.eval("JSON.stringify(Array.from(LX.state.dirty.keys()))")
     assert left == "[]", "#18 放弃之后待决的防抖又把改动暂存回来了：%s" % left
+    print("#18(b) 放弃前冲刷防抖 OK")
+
+
+async def _chk_flush_real_click_with_dirty(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
     # (c) 真实键盘输入（fill）后立刻真点保存；先有一条别的暂存，保存按钮可点
     await browser.eval("LX.setValue(%s, %s, %s)" % (
         _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
@@ -298,6 +334,11 @@ async def _chk_flush_debounce(browser, harness, base, meta):
         "#18 fill 后立刻点保存，清单里不是完整的新文字：%r" % (line,)
     await browser.click("#btn-cancel-save")
     await _discard(browser)
+    print("#18(c) 真点保存（有别的暂存）OK")
+
+
+async def _chk_flush_real_click_no_dirty(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
     # (d) 一点暂存都没有时（保存按钮是禁用的）：输入后立刻点保存，也应该弹出带完整文字的清单
     await browser.fill(tsel, new_text)
     await browser.click("#btn-save")
@@ -308,7 +349,7 @@ async def _chk_flush_debounce(browser, harness, base, meta):
         "#18 没有别的暂存时，输入后立刻点保存没得到完整清单：%r" % (line,)
     await browser.click("#btn-cancel-save")
     await _discard(browser)
-    print("#18 防抖冲刷 OK")
+    print("#18(d) 真点保存（没有别的暂存）OK")
 
 
 async def _chk_list_diff(browser, harness, base, meta):
@@ -340,14 +381,35 @@ async def _chk_list_diff(browser, harness, base, meta):
         assert "另有 2 个" in line, "超出部分没写“另有 2 个”：%r" % line
         assert "删除" not in line, "没有删除时不该写删除：%r" % line
         await browser.click("#btn-cancel-save")
+        # 只调整顺序：不能写成“新增 0 个”之类，要说明没有增删
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(pfld["path"]), json.dumps(["x3", "x2", "x1"])))
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, pfld["path"])
+        print("list 清单（只调顺序）：", line)
+        assert "顺序" in line and "新增" not in line and "删除" not in line, \
+            "只调整顺序时清单应说明没有增删：%r" % line
+        await browser.click("#btn-cancel-save")
+        # text 类型仍然截断显示（不受 list 改动影响）
+        tb, tfld = _first_field(meta, scope, lambda f, b: f["type"] == "text" and not f["condition"]
+                                and b["key"] != "whitelist")
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(tfld["path"]), json.dumps("字" * 120)))
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, tfld["path"])
+        assert "…" in line and "字" * 100 not in line, "text 类型的清单应截断显示：%r" % line[:200]
+        await browser.click("#btn-cancel-save")
         await _discard(browser)
         print("list 项改动清单 OK")
     finally:
         _server_set(harness, base, scope, pfld["path"], pfld["default"])
 
 
-UI8_CHECKS = (_chk_invalid_number, _chk_server_error_clears, _chk_only_changed,
-              _chk_flush_debounce, _chk_list_diff)
+UI8_CHECKS = (_chk_invalid_number, _chk_invalid_decimal_for_int,
+              _chk_server_error_clears, _chk_only_changed,
+              _chk_flush_on_save_sync, _chk_flush_on_discard,
+              _chk_flush_real_click_with_dirty, _chk_flush_real_click_no_dirty,
+              _chk_list_diff)
 
 
 async def _extra_ui8(browser, harness, base, meta):
