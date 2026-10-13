@@ -154,7 +154,7 @@
 }
 
 .src-override {
-  background: #1f8a4c;
+  background: #197a42; /* 白字对比度 > 5:1（原 #1f8a4c 约 4.4） */
 }
 
 :root[data-theme="dark"] .src-default {
@@ -182,6 +182,12 @@
 .about-label {
   flex-shrink: 0;
   color: var(--muted);
+}
+
+/* 值很长（配置路径、备份文件名）时允许在任意位置换行，不被 overflow-x:clip 裁掉 */
+.about-row > span:not(.about-label) {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 #about-backups .ex-table {
