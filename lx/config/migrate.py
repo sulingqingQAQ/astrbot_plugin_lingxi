@@ -12,6 +12,9 @@
 
 规则：
 - 旧键不存在 → 新项用规格表默认值；旧值类型不对 / 超出新范围 → 新项用默认值，report 里记原因，旧值仍留在旧分节里。
+- 旧值和旧 schema 默认相同（= 没改过，AstrBot 按 schema 补的默认值也算）→ 视为没配过：单来源的新项用新默认值，
+  只有真正改过的值才搬过去；合并的新项仍把旧默认值收进来一起算（缺一路会算错，比如免打扰时段少一段）。
+  这样新默认值能对没动过旧配置的人生效，改过的人不受影响。
 - 迁移前新分节里已经有人手动改过的值（和默认不同）→ 保留，旧值不覆盖，report.notes 里说一声。
 - 已经是新结构（schema_version >= 2）→ 原样返回，report.skipped=True。幂等。
 """
@@ -316,7 +319,10 @@ def migrate_legacy(old_conf: Mapping[str, Any]) -> tuple[dict, MigrationReport]:
         if not res.present:
             res.note = "旧配置里没有这一项，新项用默认值"
             continue
+        added = False
         for d in e.dests:
+            if not res.changed_from_default and not d.merge:
+                continue  # 没改过旧默认 = 没显式配过，单来源目标沿用新默认值（合并目标仍收，见模块 docstring）
             try:
                 xf = XFORMS[d.xf] if d.xf else None
                 value = xf(raw, ctx, d, e.legacy) if xf else copy.deepcopy(raw)
@@ -324,6 +330,9 @@ def migrate_legacy(old_conf: Mapping[str, Any]) -> tuple[dict, MigrationReport]:
                 res.note = str(why) + "；新项用默认值"
                 continue
             contribs.setdefault((d.scope, d.path), []).append((e.legacy, value, d))
+            added = True
+        if not added and not res.changed_from_default and not res.note:
+            res.note = "旧值和旧默认值一样（没改过），新项用新默认值"
 
     trees = {sc: spec.default_tree(sc) for sc in (Scope.PRIVATE, Scope.GROUP)}
     applied_dests: dict[str, set] = {}

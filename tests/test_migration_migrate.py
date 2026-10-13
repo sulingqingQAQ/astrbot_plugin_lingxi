@@ -76,10 +76,14 @@ class AllDefaultsTest(unittest.TestCase):
             self.assertEqual(r.status, lm.TABLE[r.legacy].status, r.legacy)
 
     def test_all_moved_applied_when_present(self):
+        # 没改过旧默认的键不搬（新项用新默认值），除非它的目标是合并项（合并缺一路会算错）；
+        # 全默认值输入里 changed_from_default 全是 False，所以 applied 该为 True 的只有纯合并去向。
         for r in self.report.results:
             if r.status == lm.MOVED:
                 self.assertTrue(r.present, r.legacy)
-                self.assertTrue(r.applied, f"{r.legacy} 没写进去：{r.note}")
+                dests = lm.TABLE[r.legacy].dests
+                want = bool(dests) and all(d.merge for d in dests)
+                self.assertEqual(r.applied, want, f"{r.legacy} 没写进去：{r.note}")
 
     def test_no_user_visible_notes_on_pristine_defaults(self):
         self.assertEqual(self.report.notes, [])

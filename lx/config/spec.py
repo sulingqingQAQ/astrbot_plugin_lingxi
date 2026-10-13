@@ -365,9 +365,10 @@ _CONTEXT = Block(
     "上下文",
     "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
     (
-        _f("context.enabled", "bool", True, legacy_default("group_enhance_settings.group_history.enable"), "启用历史缓冲",
+        _f("context.enabled", "bool", True, True, "启用历史缓冲",
            "开启后 lingxi 会把这个会话的消息记下来（含图片说明），回复时一并交给模型看。关掉则模型只能看到 AstrBot 自己的对话记录。"
-           "（私聊旧版没有缓冲；等待聚合需要它，所以私聊默认开。）", new_private=True),
+           "（私聊、群聊默认都开：私聊旧版没有缓冲，等待聚合需要它；群 @ 回复要带上被 @ 的消息内容，也需要它。"
+           "旧配置里没改过这一项的跟新默认开；改过的值迁移时照搬。）", new_private=True),
         _f("context.max_messages", "int", 200, legacy_default("group_enhance_settings.group_history.max_messages"), "最多记住几条消息",
            "每个会话最多保留多少条消息（存储量）。调大：能回看更久，占用略增。每次真正交给模型多少条由下面两项决定。", new_private=True, lo=1, slider=(10, 1000, 10)),
         _f("context.inject_messages", "int", legacy_default("friend_settings.context_settings.platform_history_count"),
