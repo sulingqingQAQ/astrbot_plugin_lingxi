@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from lx.contracts import Msg, Outcome, Scope, SessionKey, Source
-from lx.triggers.events import ActivitySource, DirectSource, IntervalSource
+from lx.triggers.events import ActivitySource, DirectSource, EventRouter, IntervalSource
 
 TZ = timezone(timedelta(hours=8))
 
@@ -424,6 +424,120 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual(src.due(1_700_000_000.0), [])
         self.assertIsNone(src.on_user_message(make_key()))
         self.assertEqual(src.id, Source.ACTIVITY)
+
+
+class BoomSource:
+    """on_message / on_replied 都抛：断言路由隔离异常。"""
+    id = Source.IDLE
+
+    def on_message(self, key, msg, cfg, event):
+        raise RuntimeError("合成的源故障")
+
+    def due(self, now):
+        return []
+
+    def on_user_message(self, key):
+        return None
+
+    def on_replied(self, key, outcome):
+        raise RuntimeError("合成的回复登记故障")
+
+
+def router_cfg(**over):
+    values = dict(ACT_BASE)
+    values.update({
+        "trigger.keyword_enabled": True,
+        "trigger.wake_keywords": ["synthwake"],
+        "trigger.direct_aggregate_seconds": 0,
+        "trigger.interval_count": 1,
+    })
+    values.update(over)
+    return FakeCfg(values)
+
+
+class RouterTest(unittest.TestCase):
+    def _trio(self, **kw):
+        clock = Clock()
+        direct = DirectSource()
+        activity = ActivitySource(clock=clock, tz=TZ)
+        interval = IntervalSource()
+        logs = []
+        router = EventRouter([direct, activity, interval], log=logs.append)
+        return clock, direct, activity, interval, router, logs
+
+    def test_priority_direct_over_others(self):
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.GROUP)
+        trig = router.route(key, make_msg("合成路由甲", addressed="at"), router_cfg(), SENTINEL)
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.DIRECT)
+
+    def test_priority_activity_over_interval(self):
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.GROUP)
+        trig = router.route(key, make_msg("合成路由乙"), router_cfg(), SENTINEL)
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.ACTIVITY)
+
+    def test_interval_only(self):
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.GROUP)
+        trig = router.route(key, make_msg("合成路由丙"), router_cfg(**{"activity.enabled": False}), SENTINEL)
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.INTERVAL)
+
+    def test_no_hits_returns_none(self):
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.GROUP)
+        cfg = router_cfg(**{"activity.enabled": False, "trigger.interval_count": 0})
+        self.assertIsNone(router.route(key, make_msg("合成路由丁"), cfg, SENTINEL))
+
+    def test_all_sources_account_despite_suppression(self):
+        # direct 胜出，但 interval 的计数器和 activity 的积压照样走了；
+        # 被压下去的 interval 触发不留痕（计数器按触发清零），路由按优先级取胜
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.GROUP)
+        cfg = router_cfg(**{"trigger.interval_count": 2})
+        trig = router.route(key, make_msg("合成路由戊", addressed="at"), cfg, SENTINEL)
+        self.assertEqual(trig.source, Source.DIRECT)
+        self.assertEqual(interval._counts.get(key), 1)
+        self.assertEqual(activity._states[key].msgs_since_judge, 0)  # activity 通过并清零
+        trig2 = router.route(key, make_msg("合成路由己"), cfg, SENTINEL)
+        self.assertEqual(trig2.source, Source.ACTIVITY)  # interval 也触发了但被压住
+        self.assertEqual(interval._counts.get(key), 0)
+        self.assertEqual(activity._states[key].msgs_since_judge, 0)
+
+    def test_source_exception_isolated(self):
+        logs = []
+        interval = IntervalSource()
+        router = EventRouter([BoomSource(), interval], log=logs.append)
+        key = make_key(Scope.GROUP)
+        cfg = FakeCfg({"trigger.interval_count": 1, "trigger.wait_seconds": 0})
+        trig = router.route(key, make_msg("合成路由庚"), cfg, SENTINEL)
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.INTERVAL)
+        self.assertTrue(logs)
+
+    def test_notify_replied_forwards_and_isolates(self):
+        logs = []
+        interval = IntervalSource()
+        activity = ActivitySource(clock=Clock(), tz=TZ)
+        router = EventRouter([BoomSource(), interval, activity], log=logs.append)
+        key = make_key(Scope.GROUP)
+        cfg = FakeCfg({"trigger.interval_count": 5, "trigger.wait_seconds": 0})
+        interval.on_message(key, make_msg("合成通知甲"), cfg, SENTINEL)
+        self.assertEqual(interval._counts.get(key), 1)
+        router.notify_replied(key, replied(Source.DIRECT))
+        self.assertEqual(interval._counts.get(key), 0)
+        self.assertTrue(logs)
+
+    def test_route_with_boom_cfg_does_not_raise(self):
+        clock, direct, activity, interval, router, logs = self._trio()
+        key = make_key(Scope.PRIVATE)
+        trig = router.route(key, make_msg("合成路由辛"), BoomCfg(), SENTINEL)
+        # 私聊 wait_seconds 规格默认 10 → WAIT；至少不断言抛
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.WAIT)
 
 
 if __name__ == "__main__":

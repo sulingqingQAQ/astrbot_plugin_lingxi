@@ -468,3 +468,52 @@ class ActivitySource(_CfgHelper):
             hour_key, day_key = self._hour_day(now)
             state.hourly[hour_key] = state.hourly.get(hour_key, 0) + 1
             state.daily[day_key] = state.daily.get(day_key, 0) + 1
+
+
+def _rank(source: Any) -> int:
+    """路由优先级：DIRECT/WAIT > ACTIVITY > INTERVAL，其他断后。"""
+    if source in (Source.DIRECT, Source.WAIT):
+        return 0
+    if source == Source.ACTIVITY:
+        return 1
+    if source == Source.INTERVAL:
+        return 2
+    return 3
+
+
+class EventRouter:
+    """事件路由：每个源的 ``on_message`` 都调用（各自记账），收集非 None 结果，
+    按 ``DIRECT/WAIT > ACTIVITY > INTERVAL`` 取第一个返回。
+
+    某个源抛异常 → 写 log 并当作 None。被压下去的触发不留任何痕迹——但注意
+    ``ActivitySource`` 通过时已经更新了 ``last_judge_ts``（旧行为，保留）。
+    """
+
+    def __init__(self, sources: Sequence[Any], log: Optional[LogFn] = None) -> None:
+        self._sources = list(sources)
+        self._log: LogFn = _new_log(log)
+
+    def route(self, key: SessionKey, msg: Msg, cfg: ResolvedConfig,
+              event: Any) -> Optional[Trigger]:
+        best: Optional[Trigger] = None
+        best_rank = 99
+        for src in self._sources:
+            try:
+                got = src.on_message(key, msg, cfg, event)
+            except Exception as e:
+                self._log(f"[events] 路由 {getattr(src, 'id', '?')} 失败，当作无触发: {e}")
+                got = None
+            if got is None:
+                continue
+            rank = _rank(getattr(got, "source", None))
+            if rank < best_rank:
+                best = got
+                best_rank = rank
+        return best
+
+    def notify_replied(self, key: SessionKey, outcome: Outcome) -> None:
+        for src in self._sources:
+            try:
+                src.on_replied(key, outcome)
+            except Exception as e:
+                self._log(f"[events] 回复登记 {getattr(src, 'id', '?')} 失败，已跳过: {e}")
