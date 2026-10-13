@@ -360,7 +360,7 @@ async def _showcase(browser, out, only):
         base = sc.start()
         try:
             for theme in THEMES:
-                for vname, vp in (("D", (1100, 1400, False)), ("M", MOBILE)):
+                for vname, vp in (("D", (1100, 2200, False)), ("M", MOBILE)):
                     tag = "showcase_%s_%s" % (theme, vname)
                     if only and only not in tag:
                         continue

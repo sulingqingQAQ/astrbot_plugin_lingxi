@@ -434,7 +434,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px 
 .alert-danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
 .alert-info { --tone: var(--info); --tone-soft: var(--info-soft); }
 .alert-icon { flex: none; display: inline-flex; margin-top: 2px; color: var(--tone); }
-.alert-body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.alert-body { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
 .alert-title { font-weight: 600; color: var(--tone); }
 .alert-text { color: var(--text); }
 .alert-actions { flex: none; display: flex; align-items: center; gap: var(--sp-2); margin-left: auto; }
@@ -563,7 +563,7 @@ main { max-width: 1200px; margin: 0 auto; padding: var(--sp-5) var(--sp-5) 64px;
   .card-actions > button { flex: 1 1 auto; }
   .banner.show, .fatal.show { width: calc(100% - 2 * var(--sp-3)); margin-top: var(--sp-3); }
   /* 保存栏固定在底部（约 60px 高），toast 抬到它上方，免得盖住按钮 */
-  .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(76px + env(safe-area-inset-bottom)); width: calc(100% - 2 * var(--sp-3)); max-width: none; }
   .toggle { min-height: 40px; }
   summary { min-height: 40px; }
   input[type="range"] { height: 40px; }
@@ -574,6 +574,7 @@ main { max-width: 1200px; margin: 0 auto; padding: var(--sp-5) var(--sp-5) 64px;
   .diff-list { padding: 0 var(--sp-4); }
   .dialog-actions { padding: var(--sp-3) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom)); }
   .dialog-actions button { flex: 1 1 0; }
-  .alert { flex-wrap: wrap; }
+  .alert, .fatal.show { flex-wrap: wrap; }
   .alert-actions { margin-left: 0; width: 100%; }
+  .alert-actions > button { flex: 1 1 auto; }
 }
