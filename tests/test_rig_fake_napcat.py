@@ -212,5 +212,132 @@ class TestPushEvents(_Base):
         self.assertEqual(ev["raw_message"], "普通群消息")
 
 
+class TestApiResponseAndRecord(_Base):
+    async def test_api_echo_response(self):
+        await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_private_msg",
+                                {"user_id": 10001, "message": "hi"},
+                                echo="e-1")
+        resps = await self.srv.wait_responses(n=1)
+        self.assertEqual(resps[0]["echo"], "e-1")
+        self.assertEqual(resps[0]["status"], "ok")
+        self.assertEqual(resps[0]["retcode"], 0)
+        self.assertIn("message_id", resps[0]["data"])
+
+    async def test_sent_records_text_at_reply(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_group_msg", {
+            "group_id": 900100200,
+            "message": [
+                {"type": "reply", "data": {"id": "7701"}},
+                {"type": "at", "data": {"qq": "10001"}},
+                {"type": "text", "data": {"text": "合成回复甲"}},
+            ],
+        }, echo="e-2")
+        got = await cli.wait_sent(n=1)
+        self.assertEqual(len(got), 1)
+        rec = got[0]
+        self.assertEqual(rec["action"], "send_group_msg")
+        self.assertEqual(rec["text"], "合成回复甲")
+        self.assertEqual(rec["at"], ["10001"])
+        self.assertEqual(rec["reply"], 7701)
+        self.assertIsInstance(rec["ts"], int)
+        self.assertEqual(len(cli.calls()), 1)
+        self.assertEqual(cli.calls()[0]["action"], "send_group_msg")
+
+    async def test_sent_string_message_with_cq(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_msg", {
+            "message": "[CQ:reply,id=7702][CQ:at,qq=10002]合成字符串甲",
+        }, echo="e-3")
+        got = await cli.wait_sent(n=1)
+        self.assertEqual(got[0]["text"], "合成字符串甲")
+        self.assertEqual(got[0]["at"], ["10002"])
+        self.assertEqual(got[0]["reply"], 7702)
+
+    async def test_forward_msg_not_in_sent_but_in_calls(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_group_forward_msg",
+                                {"group_id": 900100200, "messages": []},
+                                echo="e-4")
+        await self.srv.wait_responses(n=1)
+        await asyncio.sleep(0.2)
+        self.assertEqual(cli.sent(), [])
+        self.assertEqual(len(cli.calls()), 1)
+        self.assertEqual(cli.calls()[0]["action"], "send_group_forward_msg")
+
+    async def test_default_data_bundle(self):
+        cli = await self._connect(self_id="10000", nickname="合成bot")
+        await self.srv.wait_frames(n=1)
+        batch = [
+            ("get_login_info", {}),
+            ("get_group_info", {"group_id": 900100200}),
+            ("get_group_member_info",
+             {"group_id": 900100200, "user_id": 10001}),
+            ("get_group_member_list", {"group_id": 900100200}),
+            ("get_stranger_info", {"user_id": 10001}),
+            ("get_friend_list", {}),
+            ("get_friend_msg_history", {"user_id": 10001}),
+            ("get_group_msg_history", {"group_id": 900100200}),
+            ("can_send_image", {}),
+            ("can_send_record", {}),
+            ("get_status", {}),
+            ("get_version_info", {}),
+        ]
+        for i, (action, params) in enumerate(batch):
+            await self.srv.send_api(action, params, echo=f"b-{i}")
+        resps = await self.srv.wait_responses(n=len(batch))
+        by_echo = {r["echo"]: r["data"] for r in resps}
+        self.assertEqual(by_echo["b-0"],
+                         {"user_id": 10000, "nickname": "合成bot"})
+        self.assertEqual(by_echo["b-1"]["group_name"], "合成群")
+        self.assertEqual(by_echo["b-1"]["group_id"], 900100200)
+        self.assertEqual(by_echo["b-2"]["role"], "member")
+        self.assertEqual(by_echo["b-2"]["user_id"], 10001)
+        members = by_echo["b-3"]
+        self.assertEqual(len(members), 3)
+        self.assertIn(10000, [m["user_id"] for m in members])
+        self.assertEqual(by_echo["b-4"]["nickname"], "合成用户")
+        self.assertEqual(by_echo["b-5"], {})
+        self.assertEqual(by_echo["b-6"], {"messages": []})
+        self.assertEqual(by_echo["b-7"], {"messages": []})
+        self.assertEqual(by_echo["b-8"], {"yes": True})
+        self.assertEqual(by_echo["b-9"], {"yes": True})
+        self.assertEqual(by_echo["b-10"], {"online": True, "good": True})
+        self.assertEqual(by_echo["b-11"]["app_name"], "fake-napcat")
+        self.assertEqual(by_echo["b-11"]["protocol_version"], "v11")
+        self.assertEqual(len(cli.calls()), len(batch))
+
+    async def test_set_response_override_dict_and_callable(self):
+        cli = await self._connect(self_id="10000")
+        cli.set_response("get_group_info", {"group_id": 1, "custom": True})
+        cli.set_response("get_login_info",
+                         lambda params: {"user_id": -1, "via": "callable"})
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("get_group_info", {}, echo="o-1")
+        await self.srv.send_api("get_login_info", {}, echo="o-2")
+        resps = await self.srv.wait_responses(n=2)
+        by_echo = {r["echo"]: r["data"] for r in resps}
+        self.assertEqual(by_echo["o-1"], {"group_id": 1, "custom": True})
+        self.assertEqual(by_echo["o-2"],
+                         {"user_id": -1, "via": "callable"})
+
+    async def test_clear(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_private_msg",
+                                {"user_id": 10001, "message": "hi"},
+                                echo="c-1")
+        await cli.wait_sent(n=1)
+        self.assertEqual(len(cli.calls()), 1)
+        cli.clear()
+        self.assertEqual(cli.calls(), [])
+        self.assertEqual(cli.sent(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
