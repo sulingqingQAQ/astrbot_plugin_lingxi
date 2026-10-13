@@ -203,7 +203,61 @@ class NextReplySource:
 
     # -- 计时型（定时驱动，不带 cfg） --
     def due(self, now: float) -> list[tuple[SessionKey, Trigger]]:
-        return []
+        out: list[tuple[SessionKey, Trigger]] = []
+        try:
+            for key, entries in list(self._entries.items()):
+                if not entries:
+                    continue
+                state = self._state_for(key)
+                hit_entry: Optional[dict[str, Any]] = None
+                hit_note = ""
+                for entry in entries:
+                    groups = entry.get("groups") or []
+                    fired = False
+                    note = ""
+                    for group in groups:
+                        try:
+                            if chime_evaluate_next_reply_group(
+                                group, state, entry["sent_at"], now
+                            ):
+                                fired = True
+                                note = group.get("natural", "")
+                                break
+                        except Exception as e:
+                            self._log(f"[next_reply] 评估失败 {key}: {e}")
+                            continue
+                    if not fired:
+                        # cap 兜底：到点无论条件满足与否都放行，用第一个 group。
+                        try:
+                            cap = float(entry.get("cap", _DEFAULT_CAP))
+                        except (TypeError, ValueError):
+                            cap = _DEFAULT_CAP
+                        try:
+                            sent_at = float(entry.get("sent_at", 0.0))
+                        except (TypeError, ValueError):
+                            sent_at = 0.0
+                        if cap > 0 and now - sent_at >= cap:
+                            fired = True
+                            note = groups[0].get("natural", "") if groups else ""
+                    if fired:
+                        hit_entry = entry
+                        hit_note = note
+                        break
+                if hit_entry is not None:
+                    self._entries.pop(key, None)
+                    out.append((
+                        key,
+                        Trigger(
+                            source=Source.NEXT_REPLY,
+                            reason=hit_entry["reason_tpl"],
+                            silent_ok=hit_entry["silent_ok"],
+                            meta={"vars": {"note": hit_note}},
+                        ),
+                    ))
+            return out
+        except Exception as e:
+            self._log(f"[next_reply] due 异常: {e}")
+            return out
 
     # -- 用户发言：本源是空操作 --
     def on_user_message(self, key: SessionKey) -> None:
@@ -211,4 +265,8 @@ class NextReplySource:
 
     # -- bot 回完：送达则清该会话全部 entry --
     def on_replied(self, key: SessionKey, outcome: Outcome) -> None:
-        return None
+        try:
+            if outcome.delivered is True:
+                self._entries.pop(key, None)
+        except Exception as e:
+            self._log(f"[next_reply] on_replied 异常 {key}: {e}")

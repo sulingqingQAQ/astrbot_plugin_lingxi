@@ -199,5 +199,114 @@ class OnMessageTest(unittest.TestCase):
         self.assertFalse(trig.silent_ok)
 
 
+class DueTest(unittest.TestCase):
+    def test_time_all_fires(self):
+        src, clock, cfg = make_source(t=3_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_600s", cfg))
+        self.assertEqual(src.due(3_000_000.0 + 100), [])
+        hits = src.due(3_000_000.0 + 601)
+        self.assertEqual(len(hits), 1)
+        hit_key, trig = hits[0]
+        self.assertEqual(hit_key, key)
+        self.assertEqual(trig.source, Source.NEXT_REPLY)
+        self.assertEqual(trig.reason, "TPL({{note}})")
+        self.assertIn("note", trig.meta["vars"])
+        # 命中后清空：再 due 为空
+        self.assertEqual(src.due(3_000_000.0 + 602), [])
+
+    def test_time_id_needs_user_first(self):
+        src, clock, cfg = make_source(t=4_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_60s_id_alice1", cfg))
+        # 约定用户还没说话：60s 处不触发
+        self.assertEqual(src.due(4_000_000.0 + 61), [])
+        # 用户发新消息（消费点跳过 time 组，但记时间）
+        clock.t = 4_000_010.0
+        self.assertIsNone(src.on_message(key, make_msg("alice1"), cfg, None))
+        self.assertEqual(src.due(4_000_010.0 + 30), [])
+        hits = src.due(4_000_010.0 + 61)
+        self.assertEqual(len(hits), 1)
+
+    def test_cap_fallback_fires_anyway(self):
+        src, _, cfg = make_source(
+            {"trigger.next_reply_max_seconds": 100}, t=5_000_000.0)
+        key = make_key()
+        # time_99999s 正常到不了，靠 cap=100 兜底放行
+        self.assertTrue(src.register(key, "time_99999s", cfg))
+        self.assertEqual(src.due(5_000_000.0 + 50), [])
+        hits = src.due(5_000_000.0 + 101)
+        self.assertEqual(len(hits), 1)
+
+    def test_cap_zero_disables_fallback(self):
+        src, _, cfg = make_source(
+            {"trigger.next_reply_max_seconds": 0}, t=6_000_000.0)
+        key = make_key()
+        # ghost9 从不说话、无 max_wait：条件本身永不满足；cap=0 也不兜底
+        self.assertTrue(src.register(key, "time_60s_id_ghost9", cfg))
+        self.assertEqual(src.due(6_000_000.0 + 999999), [])
+
+    def test_due_empty_when_nothing(self):
+        src, _, _ = make_source()
+        self.assertEqual(src.due(7_000_000.0), [])
+
+    def test_due_one_per_session(self):
+        src, _, cfg = make_source(t=8_000_000.0)
+        key = make_key()
+        # 两个 group 同时满足，一次 due 只返回一个
+        self.assertTrue(src.register(key, "time_10s | time_10s", cfg))
+        hits = src.due(8_000_000.0 + 11)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(src.due(8_000_000.0 + 12), [])
+
+
+class OnRepliedTest(unittest.TestCase):
+    def test_delivered_clears(self):
+        src, clock, cfg = make_source(t=9_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_600s", cfg))
+        src.on_replied(
+            key, Outcome(text="合成", source=Source.DIRECT, delivered=True))
+        self.assertEqual(src.due(9_000_000.0 + 601), [])
+
+    def test_undelivered_keeps(self):
+        src, _, cfg = make_source(t=10_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_600s", cfg))
+        src.on_replied(
+            key, Outcome(text="合成", source=Source.DIRECT, delivered=False))
+        self.assertEqual(len(src.due(10_000_000.0 + 601)), 1)
+
+    def test_delivered_none_keeps(self):
+        src, _, cfg = make_source(t=11_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_600s", cfg))
+        src.on_replied(
+            key, Outcome(text=None, source=Source.DIRECT, delivered=None))
+        self.assertEqual(len(src.due(11_000_000.0 + 601)), 1)
+
+    def test_on_user_message_is_noop(self):
+        src, _, cfg = make_source(t=12_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "time_600s", cfg))
+        src.on_user_message(key)
+        self.assertEqual(len(src.due(12_000_000.0 + 601)), 1)
+
+
+class MultiSessionTest(unittest.TestCase):
+    def test_sessions_isolated(self):
+        src, clock, cfg = make_source(t=13_000_000.0)
+        k1 = make_key("test-nextreply-s1")
+        k2 = make_key("test-nextreply-s2")
+        self.assertTrue(src.register(k1, "id_alice1", cfg))
+        self.assertTrue(src.register(k2, "id_bob2", cfg))
+        trig = src.on_message(k1, make_msg("alice1"), cfg, None)
+        self.assertIsNotNone(trig)
+        # k2 不受影响
+        self.assertIsNone(src.on_message(k2, make_msg("alice1"), cfg, None))
+        trig2 = src.on_message(k2, make_msg("bob2"), cfg, None)
+        self.assertIsNotNone(trig2)
+
+
 if __name__ == "__main__":
     unittest.main()
