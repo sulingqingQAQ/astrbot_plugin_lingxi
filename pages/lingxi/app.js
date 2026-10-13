@@ -395,9 +395,172 @@
     fireReload();
   };
 
-  // ---- 保存流水线（完整实现见下一轮提交；骨架先占位） ----
-  LX._openDiff = function () { /* TODO */ };
-  LX._doSave = async function () { /* TODO */ };
+  // ---- 改动清单与保存 ----
+  function scopeTitle(scope) {
+    var meta = LX.state.meta;
+    if (meta && meta.scopes) {
+      for (var i = 0; i < meta.scopes.length; i++) {
+        if (meta.scopes[i].scope === scope) return meta.scopes[i].title || scope;
+      }
+    }
+    return scope;
+  }
+
+  function fmtVal(field, value) {
+    if (Array.isArray(value)) return value.length + " 行";
+    if (typeof value === "string") {
+      if (field && (field.type === "text" || field.type === "string") && value.length > 80) {
+        return value.slice(0, 80) + "…";
+      }
+      return value;
+    }
+    if (value === null || value === undefined) return "（空）";
+    if (typeof value === "object") {
+      var s = JSON.stringify(value);
+      return s.length > 80 ? s.slice(0, 80) + "…" : s;
+    }
+    return String(value);
+  }
+
+  function itemTitle(scope, path) {
+    var f = LX.fieldMeta(scope, path);
+    return f && f.title ? f.title : path;
+  }
+
+  LX._openDiff = function () {
+    var list = $("#diff-list");
+    if (!list) return;
+    while (list.firstChild) list.removeChild(list.firstChild);
+    if (dirtyCount() === 0) return;
+    LX.state.dirty.forEach(function (item) {
+      var f = LX.fieldMeta(item.scope, item.path);
+      var line = scopeTitle(item.scope) + " · " + itemTitle(item.scope, item.path) +
+        "（" + item.path + "）：" + fmtVal(f, loadedValue(item.scope, item.path)) +
+        " → " + fmtVal(f, item.value);
+      var div = el("div", { class: "diff-item", text: line });
+      div.setAttribute("data-scope", item.scope);
+      div.setAttribute("data-path", item.path);
+      list.appendChild(div);
+    });
+    if (LX.state.overridesDirty) {
+      var n = (LX.state.overridesText || "").split("\n").length;
+      var odiv = el("div", { class: "diff-item", text: "分会话覆盖表已修改（" + n + " 行）" });
+      odiv.setAttribute("data-scope", "overrides");
+      odiv.setAttribute("data-path", "session_overrides");
+      list.appendChild(odiv);
+    }
+    var panel = $("#diff-panel");
+    if (panel) panel.classList.remove("hidden");
+  };
+
+  LX._closeDiff = function () {
+    var panel = $("#diff-panel");
+    if (panel) panel.classList.add("hidden");
+  };
+
+  LX._doSave = async function () {
+    var changes = [];
+    LX.state.dirty.forEach(function (item) {
+      changes.push({ scope: item.scope, path: item.path, value: clone(item.value) });
+    });
+    var body = { revision: LX.state.config ? LX.state.config.revision : "", changes: changes };
+    if (LX.state.overridesDirty) body.session_overrides = LX.state.overridesText;
+    var btn = $("#btn-confirm-save");
+    if (btn) btn.disabled = true;
+    try {
+      var data = await LX.api.post("config/save", body);
+      if (data.saved) {
+        LX.state.config = data.config;
+        LX.state.dirty.clear();
+        LX.state.overridesText = null;
+        LX.state.overridesDirty = false;
+        LX._errors.clear();
+        LX._bannerErrors = [];
+        LX._closeDiff();
+        renderBanner();
+        hideConflict();
+        refreshSavebar();
+        renderTabDots();
+        if (data.reloaded === false && data.reload_note) {
+          toast("已保存，但要重载插件才生效：" + data.reload_note, "warn");
+        } else {
+          toast("已保存", "ok");
+        }
+        fireChange(null, null);
+        fireReload();
+      } else if (data.conflict) {
+        LX._closeDiff();
+        showConflict();
+        toast("配置在别处被改过，请先刷新", "warn");
+      } else {
+        var errs = data.errors || [];
+        LX._errors.clear();
+        LX._bannerErrors = [];
+        errs.forEach(function (er) {
+          if (er && er.scope && er.path) {
+            LX._errors.set(er.scope + ":" + er.path, er.message || "没通过检查");
+          } else if (er && er.message) {
+            LX._bannerErrors.push(er.message);
+          }
+        });
+        LX._closeDiff();
+        renderBanner();
+        refreshSavebar();
+        toast("有 " + errs.length + " 项没通过检查", "error");
+        fireChange(null, null);
+      }
+    } catch (e) {
+      toast("保存失败：" + (e && e.message ? e.message : String(e)), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  // ---- 按钮接线 ----
+  function wireButtons() {
+    var save = $("#btn-save");
+    if (save) save.addEventListener("click", function () {
+      if (dirtyCount() === 0) return;
+      try { LX._openDiff(); } catch (e) { console.error(e); }
+    });
+    var cancel = $("#btn-cancel-save");
+    if (cancel) cancel.addEventListener("click", function () { LX._closeDiff(); });
+    var confirmBtn = document.getElementById("btn-confirm-save");
+    if (confirmBtn) confirmBtn.addEventListener("click", function () { LX._doSave(); });
+    var refresh = $("#btn-refresh");
+    if (refresh) refresh.addEventListener("click", function () {
+      LX.reload().then(function () {
+        toast("已刷新", "ok");
+      }).catch(function (e) {
+        toast("刷新失败：" + (e && e.message ? e.message : String(e)), "error");
+      });
+    });
+    var discard = $("#btn-discard");
+    if (discard) {
+      var armed = false;
+      var timer = null;
+      discard.addEventListener("click", function () {
+        if (!armed) {
+          if (dirtyCount() === 0) return;
+          armed = true;
+          discard.textContent = "再点一次确认放弃";
+          discard.classList.add("armed");
+          timer = setTimeout(function () {
+            armed = false;
+            discard.textContent = "放弃";
+            discard.classList.remove("armed");
+          }, 3000);
+        } else {
+          if (timer) clearTimeout(timer);
+          armed = false;
+          discard.textContent = "放弃";
+          discard.classList.remove("armed");
+          try { LX.discardAll(); } catch (e) { console.error(e); }
+          toast("已放弃未保存的改动", "ok");
+        }
+      });
+    }
+  }
 
   async function boot() {
     try {
@@ -421,7 +584,9 @@
     }
   }
 
-  // 保存区 / 冲突刷新 / 两次点击放弃：下一轮提交接线
+  // 保存区 / 冲突刷新 / 两次点击放弃
+  wireButtons();
+  refreshSavebar();
   window.LX = LX;
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
