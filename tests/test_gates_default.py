@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from lx.contracts import GateResult, ResolvedConfig, SessionKey, Scope, Source, Trigger, Verdict
@@ -14,7 +14,8 @@ from lx.gates.gates import DefaultGates
 from lx.contracts import SessionState
 
 TZ8 = timezone(timedelta(hours=8))
-NOW = 1_000_000.0
+# 2026-01-05 03:30 +08，落在免打扰 1-7 内。
+NOW = datetime(2026, 1, 5, 3, 30, tzinfo=TZ8).timestamp()
 
 
 class FakeStore:
@@ -64,7 +65,7 @@ class TestMute(unittest.TestCase):
 
 
 class TestQuietHours(unittest.TestCase):
-    # NOW = 1970-01-12 21:46:40 UTC = 1970-01-13 05:46 +08，落在 1-7 内。
+    # NOW 为 2026-01-05 03:30 +08，落在 1-7 内。
     def test_idle_blocked_by_quiet(self) -> None:
         g = _gates(cfg=None)
         r = g.check(_key(), _trig(Source.IDLE), FakeCfg({"gate.quiet_hours": "1-7"}), NOW)
