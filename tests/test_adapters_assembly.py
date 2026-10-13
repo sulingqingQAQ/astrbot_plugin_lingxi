@@ -141,5 +141,64 @@ class BuildTest(unittest.TestCase):
             self.assertEqual(c.followup._last_user(key), "")
 
 
+def build_with_overrides(tmpdir: str, overrides: dict):
+    conf = make_conf()
+    conf["session_overrides"] = (
+        "private:u123:\n"
+        + "".join(f"  {k}: {v}\n" for k, v in overrides.items())
+    )
+    return build(tmpdir, conf=conf)
+
+
+class SeedIdleTest(unittest.TestCase):
+    def test_seed_on_and_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            c = build_with_overrides(tmp, {
+                "idle.enabled": True,
+                "idle.seed_on_start": True,
+                "idle.seed_after_minutes": 5,
+            })
+            key = SessionKey(Scope.PRIVATE, "u123", "plat")
+            n = assembly.seed_idle(c, [key], now=NOW)
+            self.assertEqual(n, 1)
+            self.assertAlmostEqual(c.idle._anchors[key], NOW - 5 * 60)
+
+    def test_seed_switch_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            c = build_with_overrides(tmp, {
+                "idle.enabled": False,
+                "idle.seed_on_start": True,
+            })
+            key = SessionKey(Scope.PRIVATE, "u123", "plat")
+            n = assembly.seed_idle(c, [key], now=NOW)
+            self.assertEqual(n, 0)
+            self.assertNotIn(key, c.idle._anchors)
+
+
+class ImportLegacyWakeTest(unittest.TestCase):
+    def test_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs: list[str] = []
+            c = build(tmp, log=logs.append)
+            legacy = {
+                "t1": {"uid": "t1", "umo": "aiocqhttp:PrivateMessage:u123",
+                       "time_str": "2030/01/01-08:00:00", "repeat": "once",
+                       "reason": "合成提醒", "created_at": NOW},
+            }
+            n = assembly.import_legacy_wake(c, legacy)
+            self.assertEqual(n, 1)
+            tasks = c.store.wake_list()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].id, "t1")
+
+    def test_failure_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs: list[str] = []
+            c = build(tmp, log=logs.append)
+            n = assembly.import_legacy_wake(c, "not-a-dict")  # type: ignore[arg-type]
+            self.assertEqual(n, 0)
+            self.assertTrue(logs)
+
+
 if __name__ == "__main__":
     unittest.main()

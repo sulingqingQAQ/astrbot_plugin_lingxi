@@ -26,6 +26,7 @@ from ..triggers.idle import IdleSource
 from ..triggers.next_reply import NextReplySource
 from ..triggers.tick import Ticker
 from ..triggers.wake import WakeSource
+from ..state.store import import_legacy_wake_records
 from .config_io import load_plugin_config
 
 _TZ8 = timezone(timedelta(hours=8))
@@ -117,3 +118,41 @@ def build_components(conf, data_dir: str, *, save, send_text, puller, bot_id: st
                    notes=notes, speaker=speaker, brain=brain, busy=busy)
     c._log = log  # type: ignore[attr-defined]
     return c
+
+
+def seed_idle(c: Components, keys: Iterable[SessionKey], now: Optional[float] = None) -> int:
+    """对开着 idle.enabled + idle.seed_on_start 的会话播种 idle 锚点。返回播种数。"""
+    if now is None:
+        now = time.time()
+    count = 0
+    for key in keys:
+        try:
+            cfg = c.resolver.resolve(key)
+            if not cfg.get("idle.enabled"):
+                continue
+            if not cfg.get("idle.seed_on_start"):
+                continue
+            try:
+                minutes = float(cfg.get("idle.seed_after_minutes", 5))
+            except (TypeError, ValueError):
+                minutes = 5.0
+            c.idle.seed(key, now - minutes * 60)
+            count += 1
+        except Exception:
+            continue
+    return count
+
+
+def import_legacy_wake(c: Components, legacy_records) -> int:
+    """把旧 wake_replies.json 记录转成 WakeTask 并入库。失败记 log 返回 0。"""
+    try:
+        tasks = import_legacy_wake_records(legacy_records, "")
+        for t in tasks:
+            c.store.wake_put(t)
+        return len(tasks)
+    except Exception as e:
+        try:
+            c._log(f"导入旧 wake 记录失败：{e}")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return 0
