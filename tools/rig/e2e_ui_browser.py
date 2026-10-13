@@ -12,10 +12,13 @@ tools/rig/e2e_ui.py。失败 = 要找的 bug：如实报现象 + 证据 + 原因
 流程：build 打包 -> prepare_root 写 cmd_config.json -> 写隔离根自己的
 dashboard 测试账号（随机密码，只在内存里，哈希才落盘）-> install_plugin 装插件
 并写插件配置（私聊白名单 ["10001"]）-> 起 FakeLLM / AstrBotProc / FakeNapCat
--> 起全新 profile 的无头 Edge -> 跑 B1..B7 -> 全部停掉 -> B8 收尾核对。
+-> 起全新 profile 的无头 Edge -> 跑 B1..B7、B9 -> 全部停掉 -> B8 收尾核对。
+B9（DIAG-3m）：诊断标签——先用假 NapCat + 假 LLM 发一轮私聊制造一条送达事件，再在页面里
+看磁贴 / 时间线、勾"包含回复正文"、点导出并用 CDP 接住下载，核对 zip 里默认没有回复正文。
+B9 自己会打开插件页，所以可以单跑：--only B1 B9。
 
 运行（wt-UI6b 根目录）：
-F:\\Gemini\\AstrBot\\AstrBot\\backend\\python\\python.exe -I tools/rig/e2e_ui_browser.py [--only B1 B2 ...]
+F:\\Gemini\\AstrBot\\AstrBot\\backend\\python\\python.exe -I tools/rig/e2e_ui_browser.py [--only B1 B2 ...] [--out 截图目录]
 
 退出码：全 PASS 为 0，否则 1。每步 PASS / FAIL(原因) / ERROR（前置失败的步骤标 SKIP）。
 密码 / token 不打印、不进日志、不进文件：登录输入走 CDP 的 Input.insertText，
@@ -54,7 +57,9 @@ PAGE_URL_TAIL = "/#" + PAGE_ROUTE
 WEBUI_PORT = 16185
 WS_PORT = 16199
 SANDBOX = "allow-scripts allow-forms allow-downloads"
-EXPECT_TABS = ["私聊", "群聊", "分会话覆盖", "关于"]
+EXPECT_TABS = ["私聊", "群聊", "分会话覆盖", "诊断", "关于"]
+B9_REPLY = "B9合成回复ZQ"          # 假 LLM 的回复：默认诊断包里绝不能出现
+DL_DIR = os.path.join(ROOT, "downloads")   # B9 用 CDP 把下载指到隔离根下这个目录
 EXPECT_VERSION = "v3.0.0-dev.1"
 OV_GROUP = "900100200"
 OV_YAML = "group:%s:\n  idle:\n    base_minutes: 12\n" % OV_GROUP
@@ -169,6 +174,8 @@ async def _poll_disk(getter, want, what, timeout=8.0):
 def _initial_config():
     cfg = base._initial_config()
     cfg["private"]["whitelist"]["ids"] = [base.USER_IN]
+    # B9 要让插件接管这个私聊，才会记下决策事件（B1..B7 不发消息，不受影响）
+    cfg["private"]["base"]["take_over"] = True
     return cfg
 
 
@@ -622,6 +629,147 @@ async def _sc_B7(ctx):
         % (m["sw"], m["iw"]))
 
 
+async def _open_plugin_page(ctx):
+    """B9 单跑（--only B1 B9）时没有 B2：自己打开插件页，等页面和标签画出来。"""
+    fb = ctx.fb
+    await fb.goto(ctx.base + PAGE_URL_TAIL, wait_ms=300)
+    await fb.wait_for("!!document.querySelector('iframe')", timeout=30)
+    ctx.fctx = await fb.wait_frame_context(timeout=30)
+    await fb.ctx_wait_for(ctx.fctx, "document.readyState==='complete'", timeout=30)
+    await fb.ctx_wait_for(
+        ctx.fctx, "document.querySelectorAll('#tabs button[data-tab]').length>=%d"
+        % len(EXPECT_TABS), timeout=20)
+    # 标签是脚本一加载就画的，配置和元数据要等接口回来
+    await fb.ctx_wait_for(
+        ctx.fctx, "!!(window.LX&&LX.state&&LX.state.meta&&LX.state.config)", timeout=20)
+
+
+async def _diag_refresh_until(ctx, cond_js, what, timeout=20.0):
+    """真点“刷新”直到 cond_js 为真（送达事件落进记录器有一点延迟）。"""
+    fb = ctx.fb
+    f = await _fctx(ctx)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        await fb.ctx_wait_for(
+            f, "document.querySelector('#diag-refresh').disabled===false", timeout=10)
+        await fb.frame_click(f, "#diag-refresh")
+        await asyncio.sleep(0.8)
+        if await fb.ctx_eval(f, cond_js):
+            return
+        if loop.time() >= deadline:
+            txt = await fb.ctx_eval(f, "document.querySelector('#tab-diag').innerText.slice(0,400)")
+            raise AssertionError("%s：%d 秒内没出现；页面开头=%r" % (what, int(timeout), txt))
+
+
+def _wait_download(want_prefix, timeout=25.0):
+    """在 DL_DIR 里等一个下载完成的文件（.crdownload 不算）；返回绝对路径或 None。"""
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        names = [n for n in os.listdir(DL_DIR)
+                 if n.startswith(want_prefix) and n.endswith(".zip")]
+        if names:
+            return os.path.join(DL_DIR, sorted(names)[-1])
+        time.sleep(0.4)
+    return None
+
+
+async def _sc_B9(ctx):
+    """B9 诊断标签：发一轮私聊 -> 磁贴 / 健康徽章 / 送达条目 -> 默认没有回复正文 -> 勾正文后出现 ->
+    取消勾选后点导出，CDP 接住下载 -> zip 里有 diag.json + summary.md、没有回复正文。"""
+    import io
+    import zipfile
+    fb = ctx.fb
+    await fb.set_viewport(1440, 900)  # 整轮跑时 B7 把窗口改成了手机宽度
+    if ctx.fctx is None:
+        await _open_plugin_page(ctx)
+    f = await _fctx(ctx)
+    await _need_loaded(ctx)
+    mark = fb.mark()
+
+    # 1. 制造一条送达事件：接管的私聊，假 LLM 回一句固定的话
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    ctx.llm.script([B9_REPLY])
+    await ctx.napcat.send_private(base.USER_IN, "诊断页测试消息")
+    sent = await ctx.napcat.wait_sent(1, 60)
+    texts = [s["text"] for s in sent]
+    assert any(B9_REPLY in t for t in texts), "期望收到接管回复 %r，实际=%r" % (B9_REPLY, texts)
+
+    # 2. 打开诊断标签：7 个磁贴、健康徽章带 data-health
+    await _show_tab(ctx, "diag")
+    await fb.ctx_wait_for(
+        f, "!!document.querySelector('#diag-health[data-health]')", timeout=15)
+    n_tiles = await fb.ctx_eval(f, "document.querySelectorAll('.diag-tile').length")
+    assert n_tiles == 7, "期望 7 个指标磁贴，实际 %r" % (n_tiles,)
+    health = await fb.ctx_eval(f, "document.querySelector('#diag-health').dataset.health")
+    assert health in ("ok", "warn", "error"), "#diag-health 的 data-health 不对：%r" % (health,)
+
+    # 3. 刷新后时间线里有送达条目；默认没有回复正文
+    await _diag_refresh_until(
+        ctx, "document.querySelectorAll('#diag-timeline .diag-event[data-result=\"delivered\"]').length>=1",
+        "时间线里没出现 data-result=delivered 的条目")
+    n_text = await fb.ctx_eval(f, "document.querySelectorAll('.diag-event-text').length")
+    assert n_text == 0, "默认不该有 .diag-event-text，实际 %r 个" % (n_text,)
+    page_text = await fb.ctx_eval(f, "document.querySelector('#tab-diag').innerText")
+    assert B9_REPLY not in page_text, "默认页面上不该出现回复正文 %r" % (B9_REPLY,)
+
+    # 4. 勾"包含回复正文"：出现回复文字
+    await fb.frame_click(f, "label.toggle:has(#diag-opt-text)")
+    await fb.ctx_wait_for(
+        f, "Array.prototype.some.call(document.querySelectorAll('.diag-event-text'),"
+        "function(e){return e.textContent.indexOf(%s)>=0;})" % json.dumps(B9_REPLY),
+        timeout=15)
+    await _shot(ctx, "b9_diag_with_text.png")
+    # 取消勾选（导出要走默认选项）
+    await fb.frame_click(f, "label.toggle:has(#diag-opt-text)")
+    await fb.ctx_wait_for(f, "document.querySelectorAll('.diag-event-text').length===0", timeout=15)
+
+    # 5. 导出：CDP 接住下载
+    os.makedirs(DL_DIR, exist_ok=True)
+    for n in os.listdir(DL_DIR):
+        if n.startswith("lingxi_diag_"):
+            os.remove(os.path.join(DL_DIR, n))
+    how = "Browser.setDownloadBehavior"
+    try:
+        await fb.cmd("Browser.setDownloadBehavior", behavior="allow", downloadPath=DL_DIR)
+    except Exception as e:  # noqa: BLE001
+        how = "Page.setDownloadBehavior（Browser 版失败：%r）" % (e,)
+        await fb.cmd("Page.setDownloadBehavior", behavior="allow", downloadPath=DL_DIR)
+    ctx.note("B9 下载接法：%s -> %s" % (how, DL_DIR))
+    await fb.frame_click(f, "#diag-export")
+    await fb.ctx_wait_for(
+        f, "document.querySelector('#diag-export-result').innerText.indexOf('lingxi_diag_')>=0",
+        timeout=20)
+    result_text = await fb.ctx_eval(f, "document.querySelector('#diag-export-result').innerText")
+    assert "不含回复正文" in result_text, "导出结果文字不对：%r" % (result_text,)
+    path = _wait_download("lingxi_diag_")
+    assert path, "25 秒内没在 %s 里等到下载的 zip；目录里有：%r；页面写的是 %r" % (
+        DL_DIR, os.listdir(DL_DIR), result_text)
+    assert os.path.basename(path) in result_text, (
+        "下载的文件名 %r 和页面写的 %r 不一致" % (os.path.basename(path), result_text))
+    with open(path, "rb") as fh:
+        data = fh.read()
+    assert data[:2] == b"PK", "下载的文件不是 zip（应以 PK 开头），开头=%r" % (data[:4],)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = sorted(zf.namelist())
+        assert names == ["diag.json", "summary.md"], "zip 内容不对：%r" % (names,)
+        blob = "\n".join(zf.read(n).decode("utf-8") for n in names)
+        bundle = json.loads(zf.read("diag.json").decode("utf-8"))
+    assert B9_REPLY not in blob, "默认诊断包里不该有假 LLM 的回复 %r" % (B9_REPLY,)
+    assert base.USER_IN not in blob, "默认诊断包里不该有原始私聊号"
+    assert bundle.get("options") == {"include_text": False, "mask_ids": True}, (
+        "包里的选项不对：%r" % (bundle.get("options"),))
+    assert any(e.get("result") == "delivered" for e in bundle.get("events", [])), (
+        "包里期望有送达事件，实际 events 前 3 条=%r" % (bundle.get("events", [])[:3],))
+    ctx.note("B9 下载 %s（%d 字节）：diag.json + summary.md，默认包里没有回复正文 / 原始号"
+             % (os.path.basename(path), len(data)))
+    evs = fb.events_since(mark)
+    assert not evs, "B9 期间有 %d 条异常 / console.error / 网络失败：%r" % (
+        len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
+
+
 # 宿主 WebUI 一打开就会联网做“检查更新”，没外网时它自己的日志里会带 Traceback。
 # 这类记录和灵犀无关，且随本机网络状态时有时无（UI-6a 没开浏览器所以没触发过）。
 # 只按“记录头里的模块名 + 文本里是外网域名且不提灵犀”窄匹配，其余一律算数。
@@ -683,7 +831,7 @@ def _post_B8(ctx, webui_port, ws_port):
 # -- 主流程 --------------------------------------------------------------------
 
 SCENARIOS = [("B1", _sc_B1), ("B2", _sc_B2), ("B3", _sc_B3), ("B4", _sc_B4),
-             ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7)]
+             ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7), ("B9", _sc_B9)]
 
 
 async def amain(only, shim=False):
@@ -804,7 +952,12 @@ def main(argv=None) -> int:
     ap.add_argument("--shim", action="store_true",
                     help="诊断模式：给 iframe 里的 apiGet/apiPost 包回信封再点重试，"
                          "看只修信封这一处之后还有没有别的问题（结果名带 [shim]）")
+    ap.add_argument("--out", default="",
+                    help="截图输出目录（缺省用脚本里的 OUT_DIR）")
     args = ap.parse_args(argv)
+    if args.out:
+        global OUT_DIR
+        OUT_DIR = args.out
     return asyncio.run(amain(set(args.only), shim=args.shim))
 
 

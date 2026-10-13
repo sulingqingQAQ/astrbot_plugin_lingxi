@@ -315,5 +315,49 @@ class TestLingxiDiag4aStatic(unittest.TestCase):
             self.assertTrue(any(k.startswith(prefix) for k in light), "app.css 没有 %s 开头的令牌" % prefix)
 
 
+class TestLingxiDiag3mStatic(unittest.TestCase):
+    """DIAG-3m：诊断标签（最小版）的静态锁。行为断言在 tools/ui/scenarios_diag.py（起无头 Edge）和
+    tools/rig/e2e_ui_browser.py 的 B9（真宿主）。钩子名来自 DIAG-0 §4.3，不许改名。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = _read_all()
+        cls.js = cls.texts["tab_diag.js"]
+        cls.css = cls.texts["tab_diag.css"]
+
+    def test_registers_diag_tab_between_overrides_and_about(self):
+        self.assertRegex(self.js, r'LX\.registerTab\(\{\s*id: "diag", title: "诊断", order: 80')
+        self.assertIn('order: 90', self.texts["tab_overrides.js"])  # 关于仍是 90，诊断夹在覆盖表与关于之间
+
+    def test_index_loads_diag_after_overrides(self):
+        index = self.texts["index.html"]
+        self.assertLess(index.index('src="./tab_overrides.js"'), index.index('src="./tab_diag.js"'))
+        self.assertIn('href="./tab_diag.css"', index)
+
+    def test_stage1_hooks_present(self):
+        for hook in ("diag-health", "data-health", "diag-summary", "diag-refresh", "aria-busy", "diag-updated",
+                     "diag-tile", "diag-tile-value", "diag-source", "diag-timeline", "diag-event", "data-prev",
+                     "diag-event-text", "diag-logs", "diag-log", "diag-opt-text", "diag-opt-ids",
+                     "diag-text-warn", "diag-export", "diag-export-result", "diag-error", "diag-empty"):
+            self.assertIn(hook, self.js, "诊断标签缺钩子 %s" % hook)
+        for key in ("uptime", "seen", "triggers", "delivered", "silent", "denied", "problems"):
+            self.assertIn('key: "%s"' % key, self.js, "缺磁贴 %s" % key)
+        for key in ("idle", "wake", "followup", "next_reply", "ticker", "history", "handlers", "runner"):
+            self.assertIn('key: "%s"' % key, self.js, "缺触发源卡 %s" % key)
+
+    def test_export_uses_blob_and_revokes(self):
+        code = _strip_js_comments(self.js)
+        for need in ('"diag/export"', '"diag/status"', "new Blob(", "URL.createObjectURL", "URL.revokeObjectURL",
+                     "a.download", "new Uint8Array(", "atob("):
+            self.assertIn(need, code, "导出流程缺 %s" % need)
+
+    def test_css_tokens_only_and_no_topbar_tricks(self):
+        self.assertIsNone(HEX_RE.search(self.css), "tab_diag.css 里不许写死 #十六进制色值，改用令牌")
+        self.assertNotRegex(self.css, r"\b(?:rgb|rgba|hsl|hsla)\(", "tab_diag.css 里不许写死 rgb()/hsl()")
+        self.assertNotIn(".topbar", self.css, "诊断标签不许碰 .topbar（backdrop-filter / transform 会废掉窄屏固定保存栏）")
+        self.assertNotIn("backdrop-filter", self.css)
+        self.assertEqual(self.css.count("@media (max-width: 700px)"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

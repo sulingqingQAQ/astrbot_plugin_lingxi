@@ -385,6 +385,11 @@ async def _chk_mobile_touch_and_overflow(browser, base):
     await browser.goto(base + "/", wait_ms=1000)
     await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"about\"]')")
     for tab in ("private", "group", "overrides", "about"):
+        # DIAG-3m：标签变成 5 个后，手机宽度下最后几个被挤出视口（标签条本来就横向滚动），真鼠标点不到；
+        # 先把标签条横向滚到该按钮可见（改 scrollLeft，不用 scrollIntoView）
+        await browser.eval(
+            "(function(){var b=document.querySelector('#tabs button[data-tab=\"%s\"]');"
+            "var bar=document.getElementById('tabs');bar.scrollLeft=Math.max(0,b.offsetLeft-24);})()" % tab)
         await browser.click('#tabs button[data-tab="%s"]' % tab)
         await browser.wait_for("document.querySelector('#tab-%s').classList.contains('active')" % tab)
         if tab == "overrides":  # 让检查结果和试算表也出现

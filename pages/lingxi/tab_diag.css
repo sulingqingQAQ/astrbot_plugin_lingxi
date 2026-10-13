@@ -1,0 +1,80 @@
+/* 诊断标签样式（DIAG-3m）。只用 app.css 的令牌与通用组件，不写死色值；纯静态，无外部资源。
+ * 手机宽度走文件末尾的媒体查询。 */
+
+/* ---- 概览条 ---- */
+.diag-overview { padding: var(--sp-4) var(--sp-5); }
+.diag-overview-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+.diag-summary { flex: 1 1 220px; min-width: 0; font-size: var(--fs-14); overflow-wrap: anywhere; }
+.diag-overview-end { display: flex; align-items: center; gap: var(--sp-3); margin-left: auto; }
+.diag-updated { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.diag-notices { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.diag-notice { overflow-wrap: anywhere; }
+#diag-error { margin-bottom: var(--sp-4); }
+.diag-loading .card { margin-bottom: var(--sp-4); }
+
+/* ---- 磁贴 ---- */
+.diag-tiles { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); }
+.diag-tile { min-width: 0; }
+.diag-tile-value { overflow-wrap: anywhere; }
+.diag-tile-note { overflow-wrap: anywhere; }
+
+/* ---- 触发源状态卡 ---- */
+.diag-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.diag-source { margin-bottom: 0; padding: var(--sp-4); min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.diag-source-head { display: flex; align-items: center; gap: var(--sp-2); }
+.diag-source-name { font-size: var(--fs-14); font-weight: 600; }
+.diag-nums { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-5); }
+.diag-num { min-width: 0; }
+.diag-num-value { font-size: var(--fs-20); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
+.diag-num-label { font-size: var(--fs-12); color: var(--text-3); }
+.diag-source-text { font-size: var(--fs-13); color: var(--text-2); overflow-wrap: anywhere; }
+.diag-source-missing { color: var(--text-3); }
+
+/* ---- 时间线 / 日志 共用的小字说明 ---- */
+.diag-tl-hint { margin-bottom: var(--sp-3); }
+
+/* ---- 时间线条目 ---- */
+#diag-timeline { margin-top: var(--sp-2); max-height: 560px; overflow-y: auto; padding-right: var(--sp-2); }
+.diag-event .tl-head { row-gap: 6px; }
+.diag-event-session { overflow-wrap: anywhere; white-space: normal; height: auto; min-height: 24px; padding-top: 3px; padding-bottom: 3px; }
+.diag-event-text {
+  margin-top: var(--sp-2); padding: var(--sp-2) var(--sp-3); max-width: 100%;
+  background: var(--sunken); border: 1px solid var(--border); border-radius: var(--r-md);
+  font-size: var(--fs-13); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* ---- 日志 ---- */
+.diag-logs {
+  max-height: 360px; overflow: auto; background: var(--sunken); border: 1px solid var(--border);
+  border-radius: var(--r-md); font-family: var(--font-mono); font-size: var(--fs-12); line-height: 1.55;
+}
+.diag-log {
+  display: grid; grid-template-columns: auto 52px minmax(0, 1fr); gap: var(--sp-2);
+  padding: 4px var(--sp-3); border-bottom: 1px solid var(--border);
+}
+.diag-log:last-child { border-bottom: 0; }
+.diag-log-time { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.diag-log-level { font-weight: 700; color: var(--text-2); }
+.diag-log-text { overflow-wrap: anywhere; white-space: pre-wrap; color: var(--text); }
+.diag-log[data-level="warn"] { background: var(--warn-soft); }
+.diag-log[data-level="warn"] .diag-log-level { color: var(--warn); }
+.diag-log[data-level="error"] { background: var(--danger-soft); }
+.diag-log[data-level="error"] .diag-log-level { color: var(--danger); }
+
+/* ---- 导出区 ---- */
+.diag-opt { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) 0; }
+.diag-opt .hint { flex: 1 1 260px; min-width: 0; }
+#diag-text-warn { margin: var(--sp-2) 0; }
+.diag-export-actions { margin-top: var(--sp-3); }
+.diag-export-result { margin-top: var(--sp-3); overflow-wrap: anywhere; }
+.diag-export-result:empty { display: none; }
+
+@media (max-width: 700px) {
+  .diag-overview { padding: var(--sp-4); }
+  .diag-overview-end { margin-left: 0; width: 100%; justify-content: space-between; }
+  .diag-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .diag-sources { grid-template-columns: minmax(0, 1fr); }
+  .diag-log { grid-template-columns: auto minmax(0, 1fr); }
+  .diag-log-text { grid-column: 1 / -1; }
+  .diag-export-actions > button { flex: 1 1 auto; }
+}
