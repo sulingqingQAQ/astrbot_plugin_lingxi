@@ -776,6 +776,10 @@ async def amain(only):
             print("---- %s 详情 ----\n%s" % (name, detail), flush=True)
     for p in (webui_port, ws_port):
         print("port %d free: %s" % (p, _port_free(p)), flush=True)
+    for attr in ("login_path", "ext_path", "pages_list_path",
+                 "page_entry_path", "page_content_base"):
+        if hasattr(ctx, attr):
+            print("%s: %s" % (attr, getattr(ctx, attr)), flush=True)
     bad = [r for r in ctx.results if r[1] in ("FAIL", "ERROR")]
     return 1 if bad else 0
 
