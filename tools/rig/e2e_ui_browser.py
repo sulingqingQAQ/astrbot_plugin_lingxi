@@ -639,6 +639,9 @@ async def _open_plugin_page(ctx):
     await fb.ctx_wait_for(
         ctx.fctx, "document.querySelectorAll('#tabs button[data-tab]').length>=%d"
         % len(EXPECT_TABS), timeout=20)
+    # 标签是脚本一加载就画的，配置和元数据要等接口回来
+    await fb.ctx_wait_for(
+        ctx.fctx, "!!(window.LX&&LX.state&&LX.state.meta&&LX.state.config)", timeout=20)
 
 
 async def _diag_refresh_until(ctx, cond_js, what, timeout=20.0):
