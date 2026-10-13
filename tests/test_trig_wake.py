@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from lx.contracts import Outcome, Scope, SessionKey, SessionState, Source, WakeTask
+from lx.prompt.template import render_template
 from lx.triggers.wake import WakeSource, make_wake_task
 
 TZ8 = timezone(timedelta(hours=8))
@@ -33,7 +34,7 @@ BASE_CFG = {
     "wake.enabled": True,
     "wake.retry_seconds": 60,
     "wake.max_attempts": 3,
-    "wake.reason": "你之前答应过：{note}（预定时间 {when}）。",
+    "prompt.reason_wake": "你之前答应过：{note}（预定时间 {when}）。",
     "silence.wake": False,
 }
 
@@ -143,10 +144,27 @@ class WakeDueTest(unittest.TestCase):
         self.assertEqual(got_key, key)
         self.assertEqual(trig.source, Source.WAKE)
         self.assertFalse(trig.silent_ok)
-        self.assertIn("合成备注", trig.reason)
+        # K-1：reason 是原样模板，变量在 meta["vars"] 里
+        self.assertEqual(trig.reason, BASE_CFG["prompt.reason_wake"])
+        self.assertEqual(trig.meta["vars"]["note"], "合成备注")
+        self.assertTrue(trig.meta["vars"]["when"])
         self.assertEqual(trig.meta.get("task_id"), "a")
         self.assertEqual(trig.meta.get("note"), "合成备注")
         self.assertEqual(trig.meta.get("attempts"), 0)
+
+    def test_rendered_reason_matches_old_behavior(self):
+        # K-1 行为等价：原样模板 + vars 经 render_template 渲染 = 以前的直接渲染结果
+        src, store, clock = make_source()
+        key = make_key()
+        store.wake_put(WakeTask("a", key, T0 - 10, "合成备注", None,
+                                {"kind": "once", "time_str": "2026/10/13-09:00:00"}))
+        _, trig = src.due(clock())[0]
+        rendered = render_template(trig.reason, trig.meta["vars"])
+        self.assertIn("合成备注", rendered)
+        self.assertEqual(
+            rendered,
+            BASE_CFG["prompt.reason_wake"].replace("{note}", "合成备注").replace(
+                "{when}", trig.meta["vars"]["when"]))
 
     def test_future_task_not_due(self):
         src, store, clock = make_source()

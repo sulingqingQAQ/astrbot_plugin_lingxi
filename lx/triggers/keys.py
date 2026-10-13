@@ -1,4 +1,11 @@
-"""lx/triggers/keys.py：触发源配置键、默认值与触发原因模板（T-1a 第零部分）。
+"""lx/triggers/keys.py：触发源配置键与默认值（T-1a 第零部分，K-1 修订）。
+
+官方键名以后由另一条线定，改名只改这一处。触发源通过
+``cfg_provider: Callable[[SessionKey], ResolvedConfig]`` 取配置，
+``ResolvedConfig.get("idle.base_minutes", 30)`` 点路径取值（见 lx/contracts.py）。
+
+触发原因模板不在这里：idle / wake 的在规格表 ``prompt.reason_idle`` /
+``prompt.reason_wake`` 里（WebUI 可改），followup 的在 ``followup.templates`` 里。
 
 官方键名以后由另一条线定，改名只改这一处。触发源通过
 ``cfg_provider: Callable[[SessionKey], ResolvedConfig]`` 取配置，
@@ -28,7 +35,6 @@ DEFAULTS: dict[str, Any] = {
     "idle.stop_at_max": False,
     "idle.seed_on_start": False,
     "idle.seed_after_minutes": 5,
-    "idle.reason": "距离上一条消息已经过去 {elapsed}，一直没有人说话。",
     # -- followup（追发，T-1b 实现；键先在这里定） --
     "followup.enabled": False,
     "followup.probability": 20,
@@ -40,7 +46,6 @@ DEFAULTS: dict[str, Any] = {
     "wake.enabled": True,
     "wake.retry_seconds": 60,
     "wake.max_attempts": 3,
-    "wake.reason": "你之前答应过：{note}（预定时间 {when}）。",
     # -- silence（各触发源的 Trigger.silent_ok 默认） --
     "silence.idle": True,
     "silence.followup": True,
@@ -56,7 +61,6 @@ HINTS: dict[str, str] = {
     "idle.stop_at_max": "开后等待时长到上限就彻底停（chatluna 行为）；关则到上限后继续按上限间隔触发、靠闸门的“最大未回复次数”来停（旧 lingxi 行为）。",
     "idle.seed_on_start": "开后启动时给会话设一个锚点（免得重启后永远不触发）；关则重启后要等有人说话才开始计时。",
     "idle.seed_after_minutes": "启动播种时，假装上一条消息是几分钟前（锚点=现在减去这个）。调大第一次触发来得更快。",
-    "idle.reason": "沉默触发时进提示词的触发原因模板，{elapsed} 是已沉默的可读时长。",
     "followup.enabled": "总开关。开后每次正常回复完有概率再追一句（仿真人接话）；关了就一次回复一次完事。",
     "followup.probability": "每次回复后追发的概率（0-100）。调大话更多，调小更稳重。",
     "followup.min_delay_seconds": "追发前最少等几秒。调大更像人想了想再补一句。",
@@ -66,7 +70,6 @@ HINTS: dict[str, str] = {
     "wake.enabled": "总开关。开后 LLM 建的定时唤醒任务到点会触发；关了任务留着但不到点触发。",
     "wake.retry_seconds": "到点没赶上（如重启、卡住）时，延迟几秒内还算数、补触发一次。调大更宽容，调小更准时。",
     "wake.max_attempts": "一次唤醒任务最多尝试投递几次。调大更执着，调小更容易放弃。",
-    "wake.reason": "唤醒触发时进提示词的触发原因模板，{note} 是任务备注，{when} 是预定时间的可读写法。",
     "silence.idle": "沉默触发这次允许模型沉默吗。开则模型可以觉得不该说就不说，关则每次都必须说点什么。",
     "silence.followup": "追发这次允许模型沉默吗，开则模型可以自行决定不追，关则抽中就必须追一句。",
     "silence.wake": "唤醒触发允许模型沉默吗。默认关：答应过的事到点必须说，不能装没看见。",

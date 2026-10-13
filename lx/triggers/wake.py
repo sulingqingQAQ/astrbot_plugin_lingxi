@@ -22,11 +22,25 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from ..contracts import Outcome, ResolvedConfig, SessionKey, Source, StateStore, Trigger, WakeTask
+from ..config.spec import field as _spec_field
+from ..contracts import Outcome, ResolvedConfig, Scope, SessionKey, Source, StateStore, Trigger, WakeTask
 from .keys import DEFAULTS
 from .timeparse import format_when, next_fire, parse_time_str
 
 LogFn = Callable[[str], None]
+
+
+def _default_reason_wake() -> str:
+    """取不到配置时 prompt.reason_wake 的回退：规格表的私聊默认。"""
+    try:
+        f = _spec_field("prompt.reason_wake")
+        if f is not None:
+            default = f.default(Scope.PRIVATE)
+            if isinstance(default, str) and default:
+                return default
+    except Exception:
+        pass
+    return "这是你之前给自己设的任务，现在到点了：{{note}}。当前时间：{{current_time}}。请按约定去做。"
 
 _REPEAT_SECONDS: dict[str, Optional[float]] = {
     "once": None,
@@ -205,14 +219,18 @@ class WakeSource:
             except Exception as e:
                 self._log(f"[wake] 取配置失败跳过 {task.id}: {e}")
                 continue
-            template = self._cfg_value(cfg, "wake.reason")
+            try:
+                template = cfg.get("prompt.reason_wake", _default_reason_wake())
+            except Exception as e:
+                self._log(f"[wake] 读配置 prompt.reason_wake 失败，用默认 {task.id}: {e}")
+                template = _default_reason_wake()
             if not isinstance(template, str) or not template:
-                template = str(DEFAULTS["wake.reason"])
+                template = _default_reason_wake()
             try:
                 when = format_when(datetime.fromtimestamp(task.fire_at, self._tz))
             except Exception:
                 when = str(task.fire_at)
-            reason = template.replace("{note}", task.note).replace("{when}", when)
+            reason = template  # 原样模板；渲染由提示词装配用 meta["vars"] 统一做
             try:
                 silent_ok = bool(self._cfg_value(cfg, "silence.wake"))
             except Exception:
@@ -226,7 +244,8 @@ class WakeSource:
                 source=Source.WAKE,
                 reason=reason,
                 silent_ok=silent_ok,
-                meta={"task_id": task.id, "note": task.note, "attempts": attempts},
+                meta={"task_id": task.id, "note": task.note, "attempts": attempts,
+                      "vars": {"note": task.note, "when": when}},
             )))
             self._fired[task.key] = task.id
         return out

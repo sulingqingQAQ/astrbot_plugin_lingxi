@@ -11,6 +11,7 @@ import random
 import unittest
 
 from lx.contracts import Outcome, Scope, SessionKey, SessionState, Source
+from lx.prompt.template import render_template
 from lx.triggers.followup import FollowupSource
 
 
@@ -133,7 +134,8 @@ class FollowupRegisterTest(unittest.TestCase):
         src.on_replied(key, replied("第二条"))
         got = src.due(clock() + 20)  # t=30（第一条的到点），第二条若登记则是 t=40
         self.assertEqual(len(got), 1)
-        self.assertIn("第一条", got[0][1].reason)
+        # K-1：reason 是原样模板，上一条回复在 vars 里；第二条没覆盖第一条的 pending
+        self.assertIn("第一条", got[0][1].meta["vars"]["last_ai"])
 
     def test_due_does_not_consume(self):
         src, store, clock = make_source()
@@ -208,7 +210,8 @@ class FollowupDelayTest(unittest.TestCase):
 
 
 class FollowupRenderTest(unittest.TestCase):
-    def test_placeholders_rendered(self):
+    def test_reason_is_raw_template_with_vars(self):
+        # K-1：reason 是原样模板，变量在 meta["vars"] 里
         src, store, clock = make_source(
             {"followup.min_delay_seconds": 30, "followup.max_delay_seconds": 30},
             last_user="合成用户话",
@@ -217,9 +220,43 @@ class FollowupRenderTest(unittest.TestCase):
         store.get(key).last_user_ts = clock() - 60
         src.on_replied(key, replied("合成bot话"))
         _, trig = src.due(clock() + 30)[0]
-        self.assertIn("合成用户话", trig.reason)
-        self.assertIn("合成bot话", trig.reason)
-        self.assertIn("1 分钟", trig.reason)  # 旧 followup 口径：90 秒 → 1 分钟
+        self.assertEqual(trig.reason, "hi {last_user}|{last_ai}|{time_since_last_chat}")
+        self.assertEqual(trig.meta["vars"]["last_user"], "合成用户话")
+        self.assertEqual(trig.meta["vars"]["last_ai"], "合成bot话")
+        self.assertEqual(trig.meta["vars"]["time_since_last_chat"], "1 分钟")
+        self.assertIn("now", trig.meta["vars"])
+        self.assertIn("umo", trig.meta["vars"])
+
+    def test_rendered_reason_matches_old_behavior(self):
+        # K-1 行为等价：原样模板 + vars 经 render_template 渲染 = 以前的直接渲染结果
+        src, store, clock = make_source(
+            {"followup.min_delay_seconds": 30, "followup.max_delay_seconds": 30},
+            last_user="合成用户话",
+        )
+        key = make_key()
+        store.get(key).last_user_ts = clock() - 60
+        src.on_replied(key, replied("合成bot话"))
+        _, trig = src.due(clock() + 30)[0]
+        rendered = render_template(trig.reason, trig.meta["vars"])
+        self.assertIn("合成用户话", rendered)
+        self.assertIn("合成bot话", rendered)
+        self.assertIn("1 分钟", rendered)  # 旧 followup 口径：90 秒 → 1 分钟
+        self.assertEqual(rendered, "hi 合成用户话|合成bot话|1 分钟")
+
+    def test_placeholders_rendered(self):
+        # 旧名保留：走新管线渲染后占位符同样被填上
+        src, store, clock = make_source(
+            {"followup.min_delay_seconds": 30, "followup.max_delay_seconds": 30},
+            last_user="合成用户话",
+        )
+        key = make_key()
+        store.get(key).last_user_ts = clock() - 60
+        src.on_replied(key, replied("合成bot话"))
+        _, trig = src.due(clock() + 30)[0]
+        rendered = render_template(trig.reason, trig.meta["vars"])
+        self.assertIn("合成用户话", rendered)
+        self.assertIn("合成bot话", rendered)
+        self.assertIn("1 分钟", rendered)  # 旧 followup 口径：90 秒 → 1 分钟
 
     def test_unknown_placeholder_kept(self):
         src, store, clock = make_source(
