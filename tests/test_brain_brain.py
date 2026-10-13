@@ -3,12 +3,14 @@
 覆盖：observe / prepare（finish / report / converse_t 后续步骤再加）。
 测试数据全合成；所有依赖用假对象注入；不 import astrbot / logging。
 """
+import asyncio
 import unittest
 
 from lx.brain.brain import Brain, Prepared
-from lx.brain.outcome import ParsedReply, parse_reply
+from lx.brain.outcome import ParsedReply
 from lx.contracts import (
     Assembled,
+    DeliveryReport,
     GateResult,
     HistoryView,
     Msg,
@@ -399,6 +401,150 @@ class ReportTest(unittest.TestCase):
         # 各步异常被吞掉，仍然返回 outcome 且历史照记
         self.assertEqual(out.text, "合成回复")
         self.assertEqual(len([m for _, m in args["history"].recorded if m.is_bot]), 1)
+
+
+class ConverseTTest(unittest.TestCase):
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_normal_delivery(self):
+        b, args, _ = _brain()
+        key = _key()
+        trig = _trigger(source=Source.IDLE)
+
+        async def generate(asm):
+            return "合成定时回复"
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                return DeliveryReport(sent=True, parts=1)
+
+        out = self._run(b.converse_t(key, trig, generate=generate, speaker=Spk()))
+        self.assertEqual(out.text, "合成定时回复")
+        self.assertTrue(out.delivered)
+
+    def test_silent(self):
+        b, args, _ = _brain()
+        trig = _trigger(source=Source.IDLE)
+
+        async def generate(asm):
+            return ""
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                raise AssertionError("沉默时不应调用 deliver")
+
+        out = self._run(b.converse_t(_key(), trig, generate=generate, speaker=Spk()))
+        self.assertTrue(out.silent)
+        self.assertFalse(out.delivered)
+
+    def test_retry_once_success(self):
+        b, args, _ = _brain()
+        calls = []
+
+        async def generate(asm):
+            calls.append(1)
+            if len(calls) == 1:
+                return ""
+            return "合成重试回复"
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                return DeliveryReport(sent=True, parts=1)
+
+        out = self._run(b.converse_t(_key(), _trigger(silent_ok=False), generate=generate, speaker=Spk()))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(out.text, "合成重试回复")
+
+    def test_retry_still_empty(self):
+        b, args, _ = _brain()
+        calls = []
+
+        async def generate(asm):
+            calls.append(1)
+            return ""
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                raise AssertionError("空内容不应调用 deliver")
+
+        trig = _trigger(source=Source.IDLE, silent_ok=False)
+        out = self._run(b.converse_t(_key(), trig, generate=generate, speaker=Spk()))
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(out.text)
+        self.assertFalse(out.silent)
+
+    def test_generate_raises(self):
+        b, args, _ = _brain()
+        calls = []
+
+        async def generate(asm):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("合成模型故障")
+            return "合成恢复回复"
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                return DeliveryReport(sent=True, parts=1)
+
+        out = self._run(b.converse_t(_key(), _trigger(silent_ok=False), generate=generate, speaker=Spk()))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(out.text, "合成恢复回复")
+
+    def test_generate_raises_twice_silent(self):
+        # silent_ok=True 时 parse 出沉默且 needs_retry=False，不重试，只调一次
+        b, args, _ = _brain()
+        calls = []
+
+        async def generate(asm):
+            calls.append(1)
+            raise RuntimeError("合成模型持续故障")
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                raise AssertionError("空内容不应调用 deliver")
+
+        out = self._run(
+            b.converse_t(_key(), _trigger(silent_ok=True), generate=generate, speaker=Spk())
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(out.silent)
+
+    def test_speaker_failure_means_undelivered(self):
+        b, args, _ = _brain()
+
+        async def generate(asm):
+            return "合成回复"
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                raise RuntimeError("合成发送故障")
+
+        out = self._run(b.converse_t(_key(), _trigger(), generate=generate, speaker=Spk()))
+        self.assertFalse(out.delivered)
+        self.assertEqual(out.text, "合成回复")
+
+    def test_gate_reject(self):
+        gates = FakeGates(GateResult(verdict=Verdict.DROP, why="合成拒绝"))
+        b, args, _ = _brain(gates=gates)
+        called = []
+
+        async def generate(asm):
+            called.append(1)
+            return "不应被调用"
+
+        class Spk:
+            async def deliver(self, key, text, cfg):
+                raise AssertionError("闸门拒绝时不应调用 deliver")
+
+        trig = _trigger(source=Source.IDLE)
+        out = self._run(b.converse_t(_key(), trig, generate=generate, speaker=Spk()))
+        self.assertIsNone(out.text)
+        self.assertFalse(out.delivered)
+        self.assertEqual(out.reason, "合成拒绝")
+        self.assertEqual(out.source, Source.IDLE)
+        self.assertEqual(called, [])
 
 
 if __name__ == "__main__":

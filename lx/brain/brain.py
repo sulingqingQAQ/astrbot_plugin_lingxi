@@ -293,3 +293,51 @@ class Brain:
         except Exception:
             pass
         return outcome
+
+    # -- 规则 5：converse_t --
+
+    async def converse_t(
+        self, key: SessionKey, trigger: Trigger, *, generate: Any, speaker: Any
+    ) -> Outcome:
+        try:
+            cfg = self._resolver.resolve(key)
+        except Exception as e:
+            _safe_log(self._log, "[brain] converse_t 取配置失败：%r" % (e,))
+            return Outcome(
+                text=None, silent=False, reason="内部异常",
+                source=trigger.source, delivered=False,
+            )
+        prepped = self.prepare(key, trigger)
+        if not prepped.allowed:
+            return Outcome(
+                text=None, silent=False, reason=prepped.why,
+                source=trigger.source, delivered=False,
+            )
+        try:
+            raw = await generate(prepped.asm)
+        except Exception as e:
+            _safe_log(self._log, "[brain] converse_t 模型调用失败：%r" % (e,))
+            raw = None
+        parsed = self.finish(key, trigger, raw)
+        if parsed.needs_retry:
+            try:
+                raw2 = await generate(prepped.asm)
+            except Exception as e:
+                _safe_log(self._log, "[brain] converse_t 重试调用失败：%r" % (e,))
+                raw2 = None
+            parsed = self.finish(key, trigger, raw2)
+            # 仍为空就不再试：outcome 自然保持 silent=False, text=None
+        if parsed.outcome.text:
+            try:
+                rep = await speaker.deliver(key, parsed.outcome.text, cfg)
+                sent = getattr(rep, "sent", False) if rep is not None else False
+                delivered: Optional[bool] = bool(sent) if sent is not None else None
+                # rep.sent 为 None（现状）→ 当未送达处理，避免 None 污染 report
+                if delivered is None:
+                    delivered = False
+            except Exception as e:
+                _safe_log(self._log, "[brain] converse_t 发送失败：%r" % (e,))
+                delivered = False
+        else:
+            delivered = False
+        return self.report(key, trigger, parsed, delivered)
