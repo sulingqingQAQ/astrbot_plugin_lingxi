@@ -167,6 +167,18 @@ def make_event(self_id="bot9",
     )
 
 
+def _close_diag(plugin):
+    """诊断记录器的滚动文件句柄要关掉，Windows 才删得掉临时目录；并摘掉模块级日志出口。"""
+    try:
+        diag = getattr(plugin, "_diag", None)
+        if diag is not None:
+            if _plugin_mod._diag_sink == diag.log:
+                _plugin_mod._set_diag_sink(None)
+            diag.close()
+    except Exception:
+        pass
+
+
 class TestEntryShape(unittest.TestCase):
     def test_class_exists_and_is_star(self):
         import astrbot.api.star as star
@@ -206,6 +218,7 @@ class TestLifecycle(unittest.TestCase):
         self.addCleanup(setattr, star.StarTools, "get_data_dir",
                         real_get_data_dir)
         plugin = _plugin_mod.LingxiPlugin(ctx or make_ctx(), dict(conf or {}))
+        self.addCleanup(_close_diag, plugin)
         return plugin
 
     def test_init_builds_components(self):
@@ -289,6 +302,7 @@ class TestWebuiWiring(unittest.TestCase):
         self.addCleanup(setattr, star.StarTools, "get_data_dir",
                         real_get_data_dir)
         plugin = _plugin_mod.LingxiPlugin(ctx or make_ctx(), dict(conf or {}))
+        self.addCleanup(_close_diag, plugin)
         return plugin
 
     def test_setup_webui_missing_modules_no_raise(self):
@@ -407,6 +421,65 @@ class TestWebuiWiring(unittest.TestCase):
         out = plugin._webui_choices()
         self.assertEqual(out, {"providers": ["合成提供商"],
                                "personas": ["合成人格"]})
+
+    # ---- DIAG-2：诊断记录器接线
+    def test_diag_recorder_wired_into_components_and_routes(self):
+        plugin = self._make_plugin()
+        self.assertIsNotNone(plugin._diag)
+        self.assertIs(plugin._c.diag, plugin._diag)
+        routes = [r for r, _h, _m in plugin._webui_api.routes()]
+        self.assertIn("api/diag/status", routes)
+        self.assertIn("api/diag/export", routes)
+        self.assertEqual(len(routes), 9)
+
+    def test_diag_gets_plugin_log_lines_and_warnings(self):
+        plugin = self._make_plugin()
+        plugin._log_fn("[测试] 合成日志行")
+        _plugin_mod._warn("[测试] 合成警告 失败")
+        texts = [r["text"] for r in plugin._diag.snapshot()["logs"]]
+        self.assertTrue(any("插件加载完成" in t for t in texts), texts)
+        self.assertTrue(any("合成日志行" in t for t in texts), texts)
+        self.assertTrue(any("合成警告" in t for t in texts), texts)
+
+    def test_diag_state_and_env_never_raise(self):
+        plugin = self._make_plugin()
+        state = plugin._diag_state()
+        for key in ("idle", "wake", "ticker", "history", "handlers", "runner"):
+            self.assertIn(key, state)
+        env = plugin._diag_env()
+        self.assertIn("timezone", env)
+
+    def test_diag_status_and_export_through_service(self):
+        plugin = self._make_plugin()
+        by_route = {r: h for r, h, _m in plugin._webui_api.routes()}
+        res = asyncio.run(by_route["api/diag/status"]({}, {}))
+        self.assertEqual(res["status"], "ok")
+        self.assertIn(res["data"]["health"], ("ok", "warn", "error"))
+        res2 = asyncio.run(by_route["api/diag/export"]({}, {}))
+        self.assertEqual(res2["status"], "ok")
+        self.assertTrue(res2["data"]["filename"].endswith(".zip"))
+
+    def test_diag_recorder_failure_does_not_break_plugin(self):
+        key = PLUGIN_PKG + ".lx.diag.recorder"
+        saved = sys.modules.get(key, "__absent__")
+        sys.modules[key] = None
+        try:
+            plugin = self._make_plugin()
+            self.assertIsNone(plugin._diag)
+            self.assertIsNotNone(plugin._webui_api)
+            routes = [r for r, _h, _m in plugin._webui_api.routes()]
+            self.assertEqual(len(routes), 7)
+        finally:
+            if saved == "__absent__":
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = saved
+
+    def test_terminate_closes_diag_and_clears_sink(self):
+        plugin = self._make_plugin()
+        self.assertEqual(_plugin_mod._diag_sink, plugin._diag.log)
+        asyncio.run(plugin.terminate())
+        self.assertIsNone(_plugin_mod._diag_sink)
 
 
 if __name__ == "__main__":

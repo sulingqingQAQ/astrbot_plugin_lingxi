@@ -37,10 +37,12 @@ class LingxiWebApi:
 
     def __init__(self, service: Any, meta_builder: Callable[[], dict], *,
                  choices_provider: Callable[[], dict] | None = None,
+                 diag_service: Any = None,
                  log: Callable[[str], None] = lambda s: None) -> None:
         self._service = service
         self._meta_builder = meta_builder
         self._choices_provider = choices_provider
+        self._diag_service = diag_service
         self._log = log if log is not None else (lambda s: None)
 
     def _log_msg(self, msg: str) -> None:
@@ -88,9 +90,11 @@ class LingxiWebApi:
         return ok({"providers": providers, "personas": personas})
 
     def routes(self) -> list[tuple[str, Callable, list[str]]]:
-        """(route, handler(args, body)->dict, methods) 列表，共 7 个。"""
+        """(route, handler(args, body)->dict, methods) 列表：配置面板 7 个；
+        带诊断服务（DIAG-2）时再加 ``api/diag/status`` GET、``api/diag/export`` POST，共 9 个。"""
         svc = self._service
-        return [
+        diag = self._diag_service
+        out = [
             ("api/meta",
              self._wrap("meta", lambda a, b: self._meta_builder()), ["GET"]),
             ("api/config",
@@ -108,6 +112,12 @@ class LingxiWebApi:
             ("api/about",
              self._wrap("about", lambda a, b: svc.about()), ["GET"]),
         ]
+        if diag is not None:
+            out.append(("api/diag/status",
+                        self._wrap("diag_status", lambda a, b: diag.status(a)), ["GET"]))
+            out.append(("api/diag/export",
+                        self._wrap("diag_export", lambda a, b: diag.export(b)), ["POST"]))
+        return out
 
     def register(self, context: Any,
                  plugin_name: str = "astrbot_plugin_lingxi") -> int:

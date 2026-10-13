@@ -81,13 +81,28 @@ def _bot_name_of(conf: Any) -> str:
     return "我"
 
 
-def _make_log():
+def _make_log(sink=None):
+    """日志回调：照样写宿主 logger；有 sink（诊断记录器的 log）就同时记一份进诊断环。"""
     def _log(msg: Any) -> None:
         try:
             logger.info(str(msg))
         except Exception:
             pass
+        if sink is not None:
+            try:
+                sink(str(msg))
+            except Exception:
+                pass
     return _log
+
+
+# 本模块级的 _warn 也要进诊断环；插件实例化时设置，终止时清掉（DIAG-2）。
+_diag_sink = None
+
+
+def _set_diag_sink(fn) -> None:
+    global _diag_sink
+    _diag_sink = fn
 
 
 def _warn(msg: str) -> None:
@@ -95,6 +110,12 @@ def _warn(msg: str) -> None:
         logger.warning(msg)
     except Exception:
         pass
+    sink = _diag_sink
+    if sink is not None:
+        try:
+            sink(str(msg))
+        except Exception:
+            pass
 
 
 def _webui_plugin_version() -> str:
@@ -120,14 +141,23 @@ class LingxiPlugin(star.Star):
         super().__init__(context)
         self.config = config
         self._context = context
-        log = _make_log()
+        data_dir = star.StarTools.get_data_dir(_PLUGIN_DATA_DIR_NAME)
+        # 诊断记录器（DIAG-2）：构造不抛；建不成只是没有诊断页，不影响插件
+        self._diag = None
+        try:
+            from .lx.diag.recorder import DiagRecorder
+            self._diag = DiagRecorder(
+                file_path=os.path.join(str(data_dir), "diag", "events.jsonl"))
+            _set_diag_sink(self._diag.log)
+        except Exception as e:
+            _warn("[lingxi] 诊断记录器初始化失败：%r" % (e,))
+        log = _make_log(self._diag.log if self._diag is not None else None)
+        self._log_fn = log
         tz = _resolve_tz(context)
         self._tz = tz
         self._bot_name = _bot_name_of(config)
         self._self_id = ""
         self._identity_set = False
-
-        data_dir = star.StarTools.get_data_dir(_PLUGIN_DATA_DIR_NAME)
 
         send_text = make_send_text(context, log=log)
 
@@ -153,7 +183,8 @@ class LingxiPlugin(star.Star):
 
         self._c = build_components(
             config, str(data_dir), save=save, send_text=send_text,
-            puller=puller, bot_id="", bot_name=self._bot_name, tz=tz, log=log)
+            puller=puller, bot_id="", bot_name=self._bot_name, tz=tz, log=log,
+            diag=self._diag)
         self._h = EHandlers(self._c, log=log)
         self._runner = TimerRunner(
             self._c, make_generate_t(context, self._c.resolver, log))
@@ -164,6 +195,10 @@ class LingxiPlugin(star.Star):
             self._setup_webui()
         except Exception as e:
             _warn("[lingxi] 配置面板初始化失败：%r" % (e,))
+        try:
+            log("[lingxi] 插件加载完成 %s" % _webui_plugin_version())
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- 配置面板（UI-3）
     def _setup_webui(self) -> None:
@@ -207,9 +242,19 @@ class LingxiPlugin(star.Star):
                 self.config, save, self._webui_reload,
                 plugin_version=version, startup_warnings=warnings,
                 backups_dir=backups_dir, live_warnings=self._webui_live_warnings)
+            diag_service = None
+            if self._diag is not None:
+                try:
+                    from .lx.webui.diag_service import DiagService
+                    diag_service = DiagService(
+                        self._diag, service, state_provider=self._diag_state,
+                        env_provider=self._diag_env)
+                except Exception as e:
+                    _warn("[lingxi] 诊断页不可用：%r" % (e,))
             api = LingxiWebApi(
                 service, lambda: build_meta(version, SCHEMA_VERSION),
-                choices_provider=self._webui_choices, log=_make_log())
+                choices_provider=self._webui_choices, diag_service=diag_service,
+                log=self._log_fn)
             self._webui_service = service
             self._webui_api = api
             try:
@@ -358,6 +403,25 @@ class LingxiPlugin(star.Star):
             personas = []
         return {"providers": providers, "personas": personas}
 
+    def _diag_state(self) -> dict:
+        """诊断页的状态摘要：各触发源 / 调度器 / 历史缓冲 / 忙碌集合 / 后台循环的只读数字（DIAG-2）。"""
+        from .lx.diag.state import collect_state
+        return collect_state(self._c, self._h, self._runner)
+
+    def _diag_env(self) -> dict:
+        """诊断包的环境信息：AstrBot 版本、时区（取不到的不写）。"""
+        env: dict = {}
+        try:
+            from astrbot.core.config.default import VERSION
+            env["astrbot_version"] = str(VERSION)
+        except Exception:
+            pass
+        try:
+            env["timezone"] = str(getattr(self._tz, "key", None) or self._tz)
+        except Exception:
+            pass
+        return env
+
     def _ensure_identity(self, event: AstrMessageEvent) -> None:
         """第一次拿到事件时记 self_id；Brain.set_identity 存在才调（AD-5a）。"""
         try:
@@ -452,6 +516,14 @@ class LingxiPlugin(star.Star):
     async def terminate(self) -> None:
         try:
             await self._runner.stop()
+        except Exception:
+            pass
+        # 诊断记录器：先摘掉模块级 sink 再关文件，避免关闭后还有人往里写（DIAG-2）
+        try:
+            if self._diag is not None:
+                if _diag_sink == self._diag.log:  # 重载时新实例可能已设了自己的，别误清
+                    _set_diag_sink(None)
+                self._diag.close()
         except Exception:
             pass
 
