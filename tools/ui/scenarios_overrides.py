@@ -102,6 +102,90 @@ async def _run_explain(browser):
         "document.querySelectorAll('#ex-table tr[data-path]').length > 0")
 
 
+# ---- UI-8 追加：#9 覆盖表错误条随修改消失 / #12 CRLF / #5 关于页提示 ----
+
+CRLF_TEXT = "group:123456:\r\n  idle:\r\n    base_minutes: 12\r\n"
+
+
+async def _chk_override_error_clears(browser, harness, base):
+    await browser.set_viewport(1440, 900)
+    await _goto_overrides(browser, base)
+    await browser.fill("#ov-text", UNKNOWN_KEY_YAML)
+    await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    await browser.click("#btn-save")
+    await browser.wait_for(
+        "document.querySelector('#diff-panel').classList.contains('hidden') === false")
+    await browser.click("#btn-confirm-save")
+    await browser.wait_for(
+        "(function(){var t=document.querySelector('#toast');"
+        "return t.classList.contains('show')&&t.innerText.indexOf('没通过检查')>=0;})()")
+    assert await browser.eval(
+        "document.querySelector('#banner').classList.contains('error')"), \
+        "#9 覆盖表被拒后顶部没出现错误条"
+    assert (await browser.text("#banner")).strip(), "#9 覆盖表被拒后错误条没文字"
+    # 用户改覆盖表文本：旧错误立刻消失
+    await browser.fill("#ov-text", GOOD_YAML)
+    await asyncio.sleep(0.4)
+    n_err = await browser.count("#banner .banner-err")
+    hidden = await browser.eval("document.querySelector('#banner').classList.contains('hidden')")
+    assert n_err == 0 and hidden, \
+        "#9 改了覆盖表文本，旧的服务端错误条还在：n_err=%r hidden=%r text=%r" % (
+            n_err, hidden, await browser.text("#banner"))
+    note_visible = await browser.eval(
+        "(function(){var els=document.querySelectorAll('#tab-overrides .warn-line');"
+        "for(var i=0;i<els.length;i++){var e=els[i];"
+        "if(e.innerText.indexOf('被服务端拒绝')>=0&&!e.classList.contains('hidden'))return true;}"
+        "return false;})()")
+    assert not note_visible, "#9 覆盖表下面“保存时被服务端拒绝”的小字没跟着消失"
+    print("#9 覆盖表错误条随修改消失 OK")
+
+
+async def _chk_crlf(browser, harness, base):
+    await browser.set_viewport(1440, 900)
+    await _goto_overrides(browser, base)
+    # 造出“库里存的是 CRLF”：直接改页面里已加载的配置
+    await browser.eval("LX.state.config.session_overrides = %s" % json.dumps(CRLF_TEXT))
+    await browser.fill("#ov-text", "group:1:\n  idle:\n    enabled: true\n")
+    await browser.wait_for("LX.state.overridesDirty === true")
+    await browser.click("#ov-revert")
+    await asyncio.sleep(0.4)
+    dirty = await browser.eval("LX.state.overridesDirty")
+    count_txt = (await browser.text("#dirty-count")).strip()
+    assert dirty is False and count_txt == "", \
+        "#12 库里是 CRLF，点“还原为已保存的内容”后仍算有改动：dirty=%r 顶栏=%r" % (dirty, count_txt)
+    # 编辑框里手敲出与库里等价（换行 LF）的文本，也不该算改动
+    await browser.fill("#ov-text", CRLF_TEXT.replace("\r\n", "\n"))
+    await asyncio.sleep(0.3)
+    dirty = await browser.eval("LX.state.overridesDirty")
+    assert dirty is False, "#12 编辑框内容与库里只差换行风格，却算有改动"
+    # 真改一个字，要算改动
+    await browser.fill("#ov-text", CRLF_TEXT.replace("\r\n", "\n").replace("12", "13"))
+    await browser.wait_for("LX.state.overridesDirty === true")
+    print("#12 CRLF 不误报改动 OK")
+
+
+async def _chk_about_note(browser, harness, base):
+    await browser.set_viewport(1440, 900)
+    await browser.goto(base + "/", wait_ms=1200)
+    await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"about\"]')")
+    await browser.click('#tabs button[data-tab="about"]')
+    await browser.wait_for(
+        "document.querySelector('#tab-about').classList.contains('active')")
+    txt = await browser.text("#tab-about")
+    for need in ("两边是同一份数据", "两边同时开着时", "后保存的会覆盖先保存的整块设置",
+                 "私聊 / 群聊 / 覆盖表按整块覆盖", "改之前先刷新一下"):
+        assert need in txt, "#5 关于页缺提示“%s”：%r" % (need, txt[-200:])
+    print("#5 关于页提示 OK")
+
+
+UI8_CHECKS = (_chk_override_error_clears, _chk_crlf, _chk_about_note)
+
+
+async def _extra_ui8(browser, harness, base):
+    for chk in UI8_CHECKS:
+        await chk(browser, harness, base)
+
+
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
     harness = Harness(page_dir=PAGE_DIR)
@@ -284,6 +368,9 @@ async def _run(out_dir):
         await browser.wait_for(
             "document.querySelector('#about-version').innerText.length > 0")
         await _shot(browser, os.path.join(out_dir, "about_light_desktop.png"))
+
+        # ⑪ UI-8 追加
+        await _extra_ui8(browser, harness, base)
 
         # ⑩ 全程无 JS 错误
         _check_no_errors(browser, "全程结束")

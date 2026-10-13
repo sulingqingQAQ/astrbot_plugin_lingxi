@@ -97,7 +97,7 @@ async def _contrast(browser, selector):
     return await browser.eval(CONTRAST_JS % json.dumps(selector))
 
 
-async def _extra_ui8(browser, base):
+async def _chk_banner_expand(browser, base):
     # ---- #10 提示条超过 3 条：点“还有 N 条”真的展开，再点收起 ----
     from lx.webui.service import ConfigService
     warns = ["启动提示%d" % i for i in range(1, 8)]
@@ -121,7 +121,10 @@ async def _extra_ui8(browser, base):
     finally:
         h2.stop()
 
+
+async def _chk_contrast(browser, base):
     # ---- #13 主按钮文字对比度 ≥ 4.5（浅 / 深色各查一遍；先挂上覆盖表标签让 #ov-check / #ex-run 出现）----
+    await browser.set_viewport(1440, 900)
     for theme in ("light", "dark"):
         await browser.goto(base + "/?theme=" + theme, wait_ms=1000)
         await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"overrides\"]')")
@@ -149,6 +152,7 @@ async def _extra_ui8(browser, base):
             assert r["ratio"] >= 4.5, "#13 %s 下 armed 按钮对比度 %.2f < 4.5（%s）" % (
                 theme, r["ratio"], r["raw"])
 
+async def _chk_toast_mobile(browser, base):
     # ---- 手机宽度：toast 不盖住底部固定的保存栏 ----
     await browser.set_viewport(390, 844, mobile=True)
     await browser.goto(base + "/", wait_ms=1000)
@@ -166,6 +170,14 @@ async def _extra_ui8(browser, base):
     assert rect["tb"] <= rect["st"], "手机上 toast 盖住了保存栏：%r" % (rect,)
     print("手机 toast 不盖保存栏 OK")
     await browser.set_viewport(1440, 900)
+
+
+UI8_CHECKS = (_chk_banner_expand, _chk_contrast, _chk_toast_mobile)
+
+
+async def _extra_ui8(browser, base):
+    for chk in UI8_CHECKS:
+        await chk(browser, base)
 
 
 async def _run(out_dir):
