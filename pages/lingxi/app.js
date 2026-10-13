@@ -34,6 +34,11 @@
     return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
   }
 
+  // textarea 的 .value 会把换行规整成 \n；库里存的覆盖表可能是 \r\n。比较前双方都规整，免得"没改也算改"。
+  function normNl(s) {
+    return String(s === undefined || s === null ? "" : s).replace(/\r\n?/g, "\n");
+  }
+
   // ---- el：建元素（attrs 里 html 键会被忽略，不要用它拼用户数据） ----
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -113,7 +118,9 @@
     _changeFns: [],
     _reloadFns: [],
     _errors: new Map(), // key scope:path -> message
-    _bannerErrors: []
+    _bannerErrors: [],   // 没归到具体项的错误条（顶部提示条）
+    _overrideErrors: [], // 覆盖表被服务端拒绝的错误条；覆盖表一改文本就清
+    _flushers: []        // 保存 / 放弃前要先冲刷的待决防抖（form.js 注册）
   };
 
   // ---- 回调注册（调用时 try/catch，一个坏了不影响别的） ----
@@ -154,10 +161,32 @@
     } else {
       LX.state.dirty.set(key, { scope: scope, path: path, value: clone(value) });
     }
+    // 用户动了这一项：上次保存时服务端对它的指责作废，随后的 fireChange 会让表单刷新红字
+    LX._errors.delete(key);
     refreshSavebar();
     renderTabDots();
     fireChange(scope, path);
   };
+
+  // 撤销某一项的暂存（回到已加载的值）。控件里的输入无效时用：无效输入不能算改动，更不能留着上一次的有效暂存
+  LX.revertValue = function (scope, path) {
+    var key = scope + ":" + path;
+    LX._errors.delete(key);
+    LX.state.dirty.delete(key);
+    refreshSavebar();
+    renderTabDots();
+    fireChange(scope, path);
+  };
+
+  // 待决防抖的冲刷：文本 / 列表控件有 150ms 防抖，点保存 / 放弃之前先把它们立刻落到暂存里
+  LX.addFlusher = function (fn) {
+    if (typeof fn === "function") LX._flushers.push(fn);
+  };
+  function flushPending() {
+    LX._flushers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error(e); }
+    });
+  }
 
   LX.isDirty = function (scope, path) { return LX.state.dirty.has(scope + ":" + path); };
 
@@ -185,6 +214,7 @@
     LX.state.overridesDirty = false;
     LX._errors.clear();
     LX._bannerErrors = [];
+    LX._overrideErrors = [];
     renderBanner();
     hideConflict();
     refreshSavebar();
@@ -195,12 +225,18 @@
 
   LX.markOverridesDirty = function (text) {
     var base = LX.state.config ? LX.state.config.session_overrides : "";
-    if ((text || "") === (base || "")) {
+    var nt = normNl(text);
+    if (nt === normNl(base)) {
       LX.state.overridesText = null;
       LX.state.overridesDirty = false;
     } else {
-      LX.state.overridesText = text;
+      LX.state.overridesText = nt;
       LX.state.overridesDirty = true;
+    }
+    // 覆盖表文本一改，上次保存时服务端对覆盖表的指责就作废了
+    if (LX._overrideErrors.length) {
+      LX._overrideErrors = [];
+      renderBanner();
     }
     refreshSavebar();
     fireChange(null, "session_overrides");
@@ -326,12 +362,14 @@
     if (save) save.disabled = n === 0;
   }
 
+  var warnOpen = false; // 提示条“还有 N 条”是否展开
+
   function renderBanner() {
     var banner = $("#banner");
     if (!banner) return;
     while (banner.firstChild) banner.removeChild(banner.firstChild);
     var warns = (LX.state.config && LX.state.config.warnings) || [];
-    var errs = LX._bannerErrors || [];
+    var errs = (LX._bannerErrors || []).concat(LX._overrideErrors || []);
     if (!warns.length && !errs.length) {
       banner.className = "banner hidden";
       return;
@@ -342,13 +380,14 @@
     });
     if (warns.length) {
       var box = el("div", { class: "warn-box" });
-      var showAll = warns.length <= 3 || box.getAttribute("data-open") === "1";
+      // 展开状态存在模块变量里：每次 renderBanner 都会重建 box，存在节点上等于没存
+      var showAll = warns.length <= 3 || warnOpen;
       var list = showAll ? warns : warns.slice(0, 3);
       list.forEach(function (w) { box.appendChild(el("div", { class: "warn", text: String(w) })); });
       if (warns.length > 3) {
         var btn = el("button", { class: "small secondary", text: showAll ? "收起" : "还有 " + (warns.length - 3) + " 条，点我展开" });
         btn.addEventListener("click", function () {
-          box.setAttribute("data-open", showAll ? "0" : "1");
+          warnOpen = !warnOpen;
           renderBanner();
         });
         box.appendChild(btn);
@@ -395,7 +434,7 @@
       if (deepEqual(item.value, loadedValue(item.scope, item.path))) drop.push(key);
     });
     drop.forEach(function (k) { LX.state.dirty.delete(k); });
-    if (LX.state.overridesDirty && LX.state.overridesText === (cfg.session_overrides || "")) {
+    if (LX.state.overridesDirty && normNl(LX.state.overridesText) === normNl(cfg.session_overrides)) {
       LX.state.overridesText = null;
       LX.state.overridesDirty = false;
     }
@@ -438,6 +477,41 @@
     return f && f.title ? f.title : path;
   }
 
+  // list 项（白名单等）：只写"N 行 → M 行"看不出动了谁，改成列出新增 / 删除了哪些条目
+  var LIST_DIFF_MAX = 10;
+  function listItemText(s) {
+    s = String(s);
+    return s.length > 40 ? s.slice(0, 40) + "…" : s;
+  }
+  function listChunk(items) {
+    var shown = items.slice(0, LIST_DIFF_MAX).map(listItemText).join("、");
+    var rest = items.length - LIST_DIFF_MAX;
+    return items.length + " 个：" + shown + (rest > 0 ? "，另有 " + rest + " 个" : "");
+  }
+  function listDiffText(oldV, newV) {
+    var oldL = Array.isArray(oldV) ? oldV.map(String) : [];
+    var newL = Array.isArray(newV) ? newV.map(String) : [];
+    var oldSet = new Set(oldL);
+    var newSet = new Set(newL);
+    var seen = new Set();
+    var added = [];
+    newL.forEach(function (s) {
+      if (!oldSet.has(s) && !seen.has(s)) { seen.add(s); added.push(s); }
+    });
+    seen = new Set();
+    var removed = [];
+    oldL.forEach(function (s) {
+      if (!newSet.has(s) && !seen.has(s)) { seen.add(s); removed.push(s); }
+    });
+    var parts = [];
+    if (added.length) parts.push("新增 " + listChunk(added));
+    if (removed.length) parts.push("删除 " + listChunk(removed));
+    if (!parts.length) {
+      return "没有增删条目，只调整了顺序或重复项（" + oldL.length + " 行 → " + newL.length + " 行）";
+    }
+    return parts.join("；");
+  }
+
   LX._openDiff = function () {
     var list = $("#diff-list");
     if (!list) return;
@@ -445,9 +519,12 @@
     if (dirtyCount() === 0) return;
     LX.state.dirty.forEach(function (item) {
       var f = LX.fieldMeta(item.scope, item.path);
-      var line = scopeTitle(item.scope) + " · " + itemTitle(item.scope, item.path) +
-        "（" + item.path + "）：" + fmtVal(f, loadedValue(item.scope, item.path)) +
-        " → " + fmtVal(f, item.value);
+      var old = loadedValue(item.scope, item.path);
+      var head = scopeTitle(item.scope) + " · " + itemTitle(item.scope, item.path) +
+        "（" + item.path + "）：";
+      var line = Array.isArray(item.value) || Array.isArray(old)
+        ? head + listDiffText(old, item.value)
+        : head + fmtVal(f, old) + " → " + fmtVal(f, item.value);
       var div = el("div", { class: "diff-item", text: line });
       div.setAttribute("data-scope", item.scope);
       div.setAttribute("data-path", item.path);
@@ -487,6 +564,7 @@
         LX.state.overridesDirty = false;
         LX._errors.clear();
         LX._bannerErrors = [];
+        LX._overrideErrors = [];
         LX._closeDiff();
         renderBanner();
         hideConflict();
@@ -507,11 +585,14 @@
         var errs = data.errors || [];
         LX._errors.clear();
         LX._bannerErrors = [];
+        LX._overrideErrors = [];
         errs.forEach(function (er) {
           if (er && er.scope && er.path) {
             LX._errors.set(er.scope + ":" + er.path, er.message || "没通过检查");
           } else if (er && er.message) {
-            LX._bannerErrors.push(er.message);
+            // 覆盖表的错误单独记：覆盖表文本一改它就该消失，别的未归属错误不受影响
+            if (er.path === "session_overrides") LX._overrideErrors.push(er.message);
+            else LX._bannerErrors.push(er.message);
           }
         });
         LX._closeDiff();
@@ -531,6 +612,7 @@
   function wireButtons() {
     var save = $("#btn-save");
     if (save) save.addEventListener("click", function () {
+      flushPending(); // 刚输入的最后几个字符还在 150ms 防抖里，先落到暂存再看清单
       if (dirtyCount() === 0) return;
       try { LX._openDiff(); } catch (e) { console.error(e); }
     });
@@ -551,6 +633,8 @@
       var armed = false;
       var timer = null;
       discard.addEventListener("click", function () {
+        // 先冲刷待决防抖：否则放弃之后 150ms 它又把刚输入的文字暂存回来
+        flushPending();
         if (!armed) {
           if (dirtyCount() === 0) return;
           armed = true;

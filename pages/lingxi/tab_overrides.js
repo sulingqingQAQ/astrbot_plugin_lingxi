@@ -78,8 +78,14 @@
     lastSessions: [], lastExplain: null
   };
 
+  /* 库里存的覆盖表可能是 \r\n；textarea 的 .value 总是 \n。统一成 \n 再比较 / 还原，
+   * 否则"还原为已保存的内容"之后仍会被算作有改动。 */
+  function normNl(s) {
+    return String(s === undefined || s === null ? "" : s).replace(/\r\n?/g, "\n");
+  }
+
   function savedOverridesText() {
-    return (LX.state.config && LX.state.config.session_overrides) || "";
+    return normNl(LX.state.config && LX.state.config.session_overrides);
   }
 
   function currentText() {
@@ -552,7 +558,8 @@
     card.appendChild(bline);
     var note = document.createElement("p");
     note.className = "muted";
-    note.textContent = "配置在 AstrBot 自带的配置页里也能改，两边是同一份数据；" +
+    note.textContent = "配置在 AstrBot 自带的配置页里也能改，两边是同一份数据。" +
+      "两边同时开着时，后保存的会覆盖先保存的整块设置（私聊 / 群聊 / 覆盖表按整块覆盖），改之前先刷新一下。" +
       "这里改完保存立即生效，不用重载插件。";
     card.appendChild(note);
     var btn = LX.el("button", { class: "small secondary", text: "刷新" });

@@ -68,6 +68,118 @@ def _check_no_errors(browser, where):
     assert not errors, "%s 有 JS 错误：%r" % (where, errors)
 
 
+# ---- UI-8 追加：#10 展开提示条 / #13 深色主按钮对比度 / 手机 toast 不盖保存栏 ----
+
+CONTRAST_JS = """
+(function () {
+  function chan(v) { v = v / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+  function lum(p) { return 0.2126 * chan(p[0]) + 0.7152 * chan(p[1]) + 0.0722 * chan(p[2]); }
+  function parse(s) {
+    var m = String(s).match(/rgba?\\(([^)]+)\\)/);
+    if (!m) return null;
+    return m[1].split(/[ ,\\/]+/).filter(Boolean).map(Number);
+  }
+  var out = [];
+  Array.prototype.forEach.call(document.querySelectorAll(%s), function (b) {
+    var cs = getComputedStyle(b);
+    var fg = parse(cs.color), bg = parse(cs.backgroundColor);
+    if (!fg || !bg) { out.push({id: b.id || b.textContent, ratio: -1, raw: cs.color + " on " + cs.backgroundColor}); return; }
+    var a = lum(fg), c = lum(bg);
+    var hi = Math.max(a, c), lo = Math.min(a, c);
+    out.push({id: b.id || b.textContent, ratio: (hi + 0.05) / (lo + 0.05), raw: cs.color + " on " + cs.backgroundColor});
+  });
+  return out;
+})()
+"""
+
+
+async def _contrast(browser, selector):
+    return await browser.eval(CONTRAST_JS % json.dumps(selector))
+
+
+async def _chk_banner_expand(browser, base):
+    # ---- #10 提示条超过 3 条：点“还有 N 条”真的展开，再点收起 ----
+    from lx.webui.service import ConfigService
+    warns = ["启动提示%d" % i for i in range(1, 8)]
+    svc = ConfigService({}, save=lambda: None, reload=lambda c: [],
+                        plugin_version="ui8-test", startup_warnings=warns)
+    h2 = Harness(page_dir=PAGE_DIR, service=svc)
+    base2 = h2.start()
+    try:
+        await browser.set_viewport(1440, 900)
+        await browser.goto(base2 + "/", wait_ms=1000)
+        await browser.wait_for("!!document.querySelector('#banner .warn-box button')")
+        n0 = await browser.count("#banner .warn")
+        assert n0 == 3, "#10 默认应只显示 3 条，实际 %r" % n0
+        await browser.click("#banner .warn-box button")
+        await browser.wait_for("document.querySelectorAll('#banner .warn').length === 7")
+        label = await browser.text("#banner .warn-box button")
+        assert "收起" in label, "#10 展开后按钮应写“收起”：%r" % label
+        await browser.click("#banner .warn-box button")
+        await browser.wait_for("document.querySelectorAll('#banner .warn').length === 3")
+        print("#10 提示条展开 / 收起 OK")
+    finally:
+        h2.stop()
+
+
+async def _chk_contrast(browser, base):
+    # ---- #13 主按钮文字对比度 ≥ 4.5（浅 / 深色各查一遍；先挂上覆盖表标签让 #ov-check / #ex-run 出现）----
+    await browser.set_viewport(1440, 900)
+    for theme in ("light", "dark"):
+        await browser.goto(base + "/?theme=" + theme, wait_ms=1000)
+        await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"overrides\"]')")
+        await browser.click('#tabs button[data-tab="overrides"]')
+        await browser.wait_for("!!document.querySelector('#ov-check')")
+        got_theme = await browser.eval("document.documentElement.getAttribute('data-theme')")
+        assert got_theme == theme, "主题没生效：%r != %r" % (got_theme, theme)
+        rows = await _contrast(browser, "button.primary")
+        ids = sorted(r["id"] for r in rows)
+        for need in ("btn-save", "btn-confirm-save", "ov-check", "ex-run"):
+            assert need in ids, "#13 %s 下没找到主按钮 #%s：%r" % (theme, need, ids)
+        for r in rows:
+            print("#13 [%s] %s 对比度 %.2f（%s）" % (theme, r["id"], r["ratio"], r["raw"]))
+            assert r["ratio"] >= 4.5, "#13 %s 下 #%s 对比度 %.2f < 4.5（%s）" % (
+                theme, r["id"], r["ratio"], r["raw"])
+        # “再点一次确认放弃”的 armed 状态同属醒目按钮，顺手一并查
+        await browser.eval(
+            "LX.setValue('private', 'idle.base_minutes', "
+            "LX.getValue('private', 'idle.base_minutes') + 1)")
+        await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+        await browser.click("#btn-discard")
+        await browser.wait_for("!!document.querySelector('button.armed')")
+        for r in await _contrast(browser, "button.armed"):
+            print("#13 [%s] armed 对比度 %.2f（%s）" % (theme, r["ratio"], r["raw"]))
+            assert r["ratio"] >= 4.5, "#13 %s 下 armed 按钮对比度 %.2f < 4.5（%s）" % (
+                theme, r["ratio"], r["raw"])
+
+async def _chk_toast_mobile(browser, base):
+    # ---- 手机宽度：toast 不盖住底部固定的保存栏 ----
+    await browser.set_viewport(390, 844, mobile=True)
+    await browser.goto(base + "/", wait_ms=1000)
+    await browser.wait_for("!!document.querySelector('#app-title')")
+    await browser.eval("LX.toast('手机上的提示不该盖住保存栏', 'ok')")
+    rect = await browser.eval(
+        "(function(){var t=document.querySelector('#toast').getBoundingClientRect();"
+        "var sbEl=document.querySelector('.savebar');"
+        "var s=sbEl.getBoundingClientRect();"
+        "return {tb:t.bottom,tt:t.top,st:s.top,pos:getComputedStyle(sbEl).position,"
+        "shown:document.querySelector('#toast').classList.contains('show')};})()")
+    print("toast / 保存栏位置：", rect)
+    assert rect["shown"], "toast 没显示出来：%r" % (rect,)
+    assert rect["pos"] == "fixed", "手机宽度下保存栏应固定在底部：%r" % (rect,)
+    assert rect["tb"] <= rect["st"], "手机上 toast 盖住了保存栏：%r" % (rect,)
+    print("手机 toast 不盖保存栏 OK")
+    await browser.set_viewport(1440, 900)
+
+
+UI8_CHECKS = (_chk_banner_expand, _chk_contrast, _chk_toast_mobile)
+
+
+async def _extra_ui8(browser, base):
+    for chk in UI8_CHECKS:
+        await chk(browser, base)
+
+
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
     harness = Harness(page_dir=PAGE_DIR)
@@ -201,6 +313,9 @@ async def _run(out_dir):
             size = os.path.getsize(shot)
             print("截图：%s（%d 字节）" % (shot, size))
             assert size > 2000, "截图疑似空白：%s %d 字节" % (shot, size)
+
+        # 8b. UI-8 追加
+        await _extra_ui8(browser, base)
 
         # 9. 全程无 JS 错误
         _check_no_errors(browser, "全程结束")

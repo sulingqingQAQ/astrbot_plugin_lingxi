@@ -82,7 +82,8 @@
   }
 
   function matchField(field, query, onlyChanged, scope) {
-    if (onlyChanged && !window.LX.isDirty(scope, field.path)) return false;
+    /* “只看和默认值不同的项”：比当前值（暂存优先）与规格默认值，不是只看未保存的改动。 */
+    if (onlyChanged && deepEqual(window.LX.getValue(scope, field.path), field.default)) return false;
     if (!query) return true;
     var q = query.toLowerCase();
     var hay = [field.title || "", field.hint || "", field.path || ""];
@@ -114,17 +115,41 @@
     return true;
   }
 
+  /* 待决的防抖（已排上时钟、还没落到 LX.setValue 的）。点保存 / 放弃之前壳会统一冲刷它们。 */
+  var pendingFlushes = [];
+
+  function flushAllPending() {
+    pendingFlushes.slice().forEach(function (f) { f(); });
+  }
+
   function debounce(fn, ms) {
     var timer = null;
-    return function () {
-      var args = arguments;
-      var self = this;
+    var lastSelf = null;
+    var lastArgs = null;
+    function drop() {
+      var i = pendingFlushes.indexOf(run.flush);
+      if (i >= 0) pendingFlushes.splice(i, 1);
+    }
+    function run() {
+      lastSelf = this;
+      lastArgs = arguments;
       if (timer) clearTimeout(timer);
       timer = setTimeout(function () {
         timer = null;
-        fn.apply(self, args);
+        drop();
+        fn.apply(lastSelf, lastArgs);
       }, ms);
+      if (pendingFlushes.indexOf(run.flush) < 0) pendingFlushes.push(run.flush);
+    }
+    /* 立刻执行待决的那一次（没有待决就什么都不做）。 */
+    run.flush = function () {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      drop();
+      fn.apply(lastSelf, lastArgs);
     };
+    return run;
   }
 
   /* ---- 控件 ---- */
@@ -172,17 +197,23 @@
       delete viewRef.localErr[pathRef];
       LX.setValue(scopeRef, pathRef, num);
     }
-    function pushInvalid() {
-      viewRef.localErr[pathRef] = "应该是一个数字";
+    /* 无效输入（清空 / 不是数 / 给 int 项填小数）：不算改动，要把这一项的暂存撤销掉，
+     * 否则保存会带上上一次的有效值，而输入框里已经是另一回事。 */
+    function pushInvalid(msg) {
+      viewRef.localErr[pathRef] = msg + "；这次输入没有生效，保存时不会带上它";
+      if (typeof LX.revertValue === "function") LX.revertValue(scopeRef, pathRef);
       var rec = viewRef.fields[pathRef];
-      if (rec) rec.errEl.textContent = "应该是一个数字";
+      if (rec) {
+        rec.errEl.textContent = viewRef.localErr[pathRef];
+        rec.resetBtn.disabled = false;
+      }
     }
     input.addEventListener("input", function () {
       var raw = input.value;
-      if (raw === "" || raw === null) { pushInvalid(); return; }
+      if (raw === "" || raw === null) { pushInvalid("应该是一个数字"); return; }
       var num = Number(raw);
-      if (!isFinite(num)) { pushInvalid(); return; }
-      if (type === "int" && Math.round(num) !== num) { pushInvalid(); return; }
+      if (!isFinite(num)) { pushInvalid("应该是一个数字"); return; }
+      if (type === "int" && Math.round(num) !== num) { pushInvalid("这一项只能填整数"); return; }
       if (slider && document.activeElement !== slider) slider.value = String(num);
       pushValid(num);
     });
@@ -242,6 +273,7 @@
       LX.setValue(view.scope, field.path, input.value);
     }, DEBOUNCE_MS);
     input.addEventListener("input", push);
+    input.addEventListener("change", push.flush);
     box.appendChild(input);
     box.appendChild(dl);
     return { controls: [input] };
@@ -256,6 +288,7 @@
       LX.setValue(view.scope, field.path, input.value);
     }, DEBOUNCE_MS);
     input.addEventListener("input", push);
+    input.addEventListener("change", push.flush);
     box.appendChild(input);
     return { controls: [input] };
   }
@@ -279,6 +312,7 @@
       if (count) count.textContent = String(area.value.length) + " 字";
       push();
     });
+    area.addEventListener("change", push.flush);
     box.appendChild(area);
     if (count) box.appendChild(count);
     return { controls: [area], countEl: count, countKind: "chars" };
@@ -310,6 +344,7 @@
       count.textContent = String(parseListLines(area.value).length) + " 项";
       push();
     });
+    area.addEventListener("change", push.flush);
     box.appendChild(area);
     box.appendChild(count);
     var hint = LX.el("div", { class: "field-hint", text: "每行一项，空行会被忽略" });
@@ -338,6 +373,7 @@
       LX.setValue(view.scope, field.path, fallback.value);
     }, DEBOUNCE_MS);
     fallback.addEventListener("input", push);
+    fallback.addEventListener("change", push.flush);
     box.appendChild(fallback);
     return { controls: [fallback] };
   }
@@ -349,6 +385,8 @@
     for (var i = 0; i < ctrls.length; i++) {
       var c = ctrls[i];
       if (document.activeElement === c) continue;
+      /* 数字框里是无效输入（红字还挂着）时别用已加载值盖掉用户敲的内容，等他自己改正。 */
+      if (c.type === "number" && view.localErr[rec.field.path]) continue;
       if (c.type === "checkbox") {
         c.checked = !!v;
       } else if (c.tagName === "SELECT") {
@@ -376,8 +414,8 @@
     var path = rec.field.path;
     var dirty = LX.isDirty(scope, path);
     rec.badgeDirty.classList.toggle("hidden", !dirty);
-    rec.resetBtn.disabled = deepEqual(LX.getValue(scope, path), rec.field.default);
     var local = view.localErr[path];
+    rec.resetBtn.disabled = !local && deepEqual(LX.getValue(scope, path), rec.field.default);
     var serverErr = LX.getError(scope, path);
     rec.errEl.textContent = local || serverErr || "";
     var vis = condVisible(LX, scope, blockOfKey(scope, rec.blockKey), rec.field);
@@ -495,6 +533,8 @@
     var host = view.itemsHost;
     while (host.firstChild) host.removeChild(host.firstChild);
     view.fields = {};
+    /* 控件整批重建，输入框里不再是用户敲过的无效内容（无效输入当时就没算改动），本地红字一起清掉。 */
+    view.localErr = {};
     var block = currentBlock(view);
     var vis = visibleBlocks(view);
     var shown = null;
@@ -601,6 +641,8 @@
   function boot() {
     var LX = window.LX;
     if (!LX || typeof LX.registerTab !== "function") return;
+    /* 保存 / 放弃之前，壳会调用它把 150ms 防抖里还没落下的输入先暂存。 */
+    if (typeof LX.addFlusher === "function") LX.addFlusher(flushAllPending);
     LX.registerTab({
       id: "private", title: "私聊", order: 10,
       mount: mountScope("private"),

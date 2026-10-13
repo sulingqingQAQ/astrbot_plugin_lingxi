@@ -93,6 +93,330 @@ async def _save(browser, base):
         "document.querySelector('#toast').classList.contains('hidden')", timeout=10.0)
 
 
+# ---- UI-8 追加：#8 无效数字 / #9 错误随修改消失 / #11 只看非默认 / #18 防抖冲刷 / list 改动清单 ----
+
+def _first_field(meta, scope, pred):
+    for b in meta["blocks"][scope]:
+        for f in b["fields"]:
+            if pred(f, b):
+                return b, f
+    raise AssertionError("meta 里找不到合适的项：%s" % scope)
+
+
+async def _fresh(browser, base):
+    await browser.set_viewport(1440, 900)
+    await browser.goto(base + "/", wait_ms=1000)
+    await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"private\"]')")
+    await browser.wait_for("!!LX.state.config")
+
+
+async def _discard(browser):
+    await browser.click("#btn-discard")
+    await browser.click("#btn-discard")
+    await browser.wait_for("LX.state.dirty.size === 0 && !LX.state.overridesDirty")
+
+
+def _state(base):
+    return _get_json(base + "/__harness/state")["data"]
+
+
+def _server_set(harness, base, scope, path, value):
+    res = harness.service.save_config({
+        "revision": _state(base)["revision"],
+        "changes": [{"scope": scope, "path": path, "value": value}]})
+    assert res.get("saved"), "服务侧改动没落下：%r" % (res,)
+
+
+async def _open_diff(browser):
+    await browser.click("#btn-save")
+    await browser.wait_for(
+        "document.querySelector('#diff-panel').classList.contains('hidden') === false")
+
+
+async def _diff_text_of(browser, scope, path):
+    return await browser.eval(
+        "(function(){var e=document.querySelector('.diff-item[data-scope=%s][data-path=%s]');"
+        "return e?e.innerText:null;})()" % (_q(scope), _q(path)))
+
+
+async def _chk_invalid_number(browser, harness, base, meta):
+    scope = "private"
+
+    # ---- #8 数字框清空 / 填小数（给 int 项）后，保存不能带上上一次的有效暂存值 ----
+    ib, ifld = _first_field(meta, scope, lambda f, b: f["type"] == "int" and not f["condition"])
+    bb, bfld = _first_field(meta, scope, lambda f, b: f["type"] == "bool" and not f["condition"])
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    await _select_block(browser, scope, ib["title"])
+    isel = '#tab-%s %s input[type="number"]' % (scope, _field_sel(scope, ifld["path"]))
+    esel = '#tab-%s %s .field-error' % (scope, _field_sel(scope, ifld["path"]))
+    good = ifld["default"] + 1
+    await browser.fill(isel, str(good))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(ifld["path"])))
+    await browser.fill(isel, "")
+    await asyncio.sleep(0.4)
+    assert await browser.eval("LX.isDirty(%s, %s)" % (_q(scope), _q(ifld["path"]))) is False, \
+        "#8 数字框清空后，上一次的有效暂存还留着：%r" % (
+            await browser.eval("JSON.stringify(Array.from(LX.state.dirty.entries()))"),)
+    assert (await browser.text(esel)).strip(), "#8 清空后该项没有红字提示"
+    assert await browser.eval("document.querySelector('#btn-save').disabled === true"), \
+        "#8 只剩无效输入时保存按钮应保持禁用"
+    # 小数填进 int 项同理
+    await browser.fill(isel, str(good))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(ifld["path"])))
+    await browser.fill(isel, "%s.5" % good)
+    await asyncio.sleep(0.4)
+    assert await browser.eval("LX.isDirty(%s, %s)" % (_q(scope), _q(ifld["path"]))) is False, \
+        "#8 给 int 项填小数后，上一次的有效暂存还留着"
+    assert (await browser.text(esel)).strip(), "#8 填小数后该项没有红字提示"
+    # 另有一条合法改动时点保存：清单里不能有这个无效项
+    await browser.eval("LX.setValue(%s, %s, %s)" % (
+        _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
+    await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    await _open_diff(browser)
+    n_items = await browser.count(".diff-item")
+    bad = await _diff_text_of(browser, scope, ifld["path"])
+    assert bad is None, "#8 改动清单里出现了无效输入的那一项：%r" % (bad,)
+    assert n_items == 1, "#8 改动清单应只有那条合法改动：%r" % n_items
+    await browser.click("#btn-cancel-save")
+    await _discard(browser)
+    await asyncio.sleep(0.2)
+    assert not (await browser.text(esel)).strip(), "#8 放弃之后红字提示还在"
+    print("#8 数字框无效输入不带旧暂存 OK")
+
+async def _chk_invalid_decimal_for_int(browser, harness, base, meta):
+    # #8 另一条路径：给 int 项填小数（单独成条，方便在旧页面上单独验红）
+    scope = "private"
+    ib, ifld = _first_field(meta, scope, lambda f, b: f["type"] == "int" and not f["condition"])
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    await _select_block(browser, scope, ib["title"])
+    isel = '#tab-%s %s input[type="number"]' % (scope, _field_sel(scope, ifld["path"]))
+    good = ifld["default"] + 1
+    await browser.fill(isel, str(good))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(ifld["path"])))
+    await browser.fill(isel, "%s.5" % good)
+    await asyncio.sleep(0.4)
+    assert await browser.eval("LX.isDirty(%s, %s)" % (_q(scope), _q(ifld["path"]))) is False, \
+        "#8 给 int 项填小数后，上一次的有效暂存还留着"
+    assert await browser.eval("document.querySelector('#btn-save').disabled === true"), \
+        "#8 给 int 项填小数后保存按钮应禁用（没有别的改动）"
+    await _discard(browser)
+    print("#8 int 项填小数不带旧暂存 OK")
+
+
+async def _chk_server_error_clears(browser, harness, base, meta):
+    scope = "private"
+
+    # ---- #9 服务端错误：改动那一项后立刻消失 ----
+    lb, lfld = _first_field(meta, scope, lambda f, b: f["type"] == "int" and f["lo"] is not None
+                            and not f["condition"])
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    await _select_block(browser, scope, lb["title"])
+    lisel = '#tab-%s %s input[type="number"]' % (scope, _field_sel(scope, lfld["path"]))
+    lesel = '#tab-%s %s .field-error' % (scope, _field_sel(scope, lfld["path"]))
+    await browser.fill(lisel, str(int(lfld["lo"]) - 1))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(lfld["path"])))
+    await _open_diff(browser)
+    await browser.click("#btn-confirm-save")
+    await browser.wait_for(
+        "(function(){var t=document.querySelector('#toast');"
+        "return t.classList.contains('show')&&t.innerText.indexOf('没通过检查')>=0;})()")
+    assert (await browser.text(lesel)).strip(), "#9 保存被拒后该项没显示服务端错误"
+    assert await browser.eval("LX.getError(%s, %s)" % (_q(scope), _q(lfld["path"]))), \
+        "#9 LX.getError 没值"
+    await browser.fill(lisel, str(int(lfld["lo"]) + 1))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(lfld["path"])))
+    await asyncio.sleep(0.3)
+    got = (await browser.text(lesel)).strip()
+    assert got == "", "#9 用户改正后服务端错误还在：%r" % got
+    assert await browser.eval("LX.getError(%s, %s)" % (_q(scope), _q(lfld["path"]))) is None, \
+        "#9 改正后 LX.getError 仍有值"
+    await _discard(browser)
+    print("#9 服务端错误随修改消失 OK")
+
+async def _chk_only_changed(browser, harness, base, meta):
+    # ---- #11 只看和默认值不同的项：库里存了非默认值（没有未保存改动）也要显示 ----
+    gscope = "group"
+    gb, gfld = _first_field(meta, gscope, lambda f, b: f["type"] == "int" and not f["condition"]
+                            and b["key"] != "whitelist")
+    stored = gfld["default"] + 7
+    _server_set(harness, base, gscope, gfld["path"], stored)
+    try:
+        await _fresh(browser, base)
+        await _show_tab(browser, gscope)
+        assert await browser.eval("LX.state.dirty.size") == 0
+        await browser.click("#tab-group .form-only-changed")
+        await asyncio.sleep(0.4)
+        shown = await browser.eval(
+            "Array.from(document.querySelectorAll('#tab-group .form-items .field'))"
+            ".map(function(x){return x.dataset.path;})")
+        assert shown == [gfld["path"]], \
+            "#11 只看和默认值不同：库里存了 %s=%r（默认 %r），列表应只有它：%r" % (
+                gfld["path"], stored, gfld["default"], shown)
+        n_nav = await browser.count("#tab-group .block-nav .block-btn")
+        assert n_nav == 1, "#11 块导航应只剩含非默认项的那一块：%r" % n_nav
+        await browser.click("#tab-group .form-only-changed")  # 关掉，别影响后面
+        await asyncio.sleep(0.2)
+        print("#11 只看和默认值不同（对比 default，不看是否未保存）OK")
+    finally:
+        _server_set(harness, base, gscope, gfld["path"], gfld["default"])
+
+
+async def _flush_setup(browser, base, meta):
+    """#18 共用准备：开私聊页，选到带 text 项的块，返回要用的项与选择器。"""
+    scope = "private"
+    bb, bfld = _first_field(meta, scope, lambda f, b: f["type"] == "bool" and not f["condition"])
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    tb, tfld = _first_field(meta, scope, lambda f, b: f["type"] == "text" and not f["condition"]
+                            and b["key"] != "whitelist")
+    await _select_block(browser, scope, tb["title"])
+    tsel = '#tab-%s %s [data-role="control"]' % (scope, _field_sel(scope, tfld["path"]))
+    word = "刚输入的最后几个字符END"
+    new_text = (tfld["default"] or "")[:20] + word
+    return scope, bfld, tfld, tsel, word, new_text
+
+
+async def _chk_flush_on_save_sync(browser, harness, base, meta):
+    # ---- #18 防抖冲刷：输入后立刻点保存 / 放弃 ----
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
+    # (a) 同一个 JS 滴答里：派发 input 后立刻点保存（没有失焦，没有 change）——只有保存前冲刷防抖才过
+    await browser.eval("LX.setValue(%s, %s, %s)" % (
+        _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
+    await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    await browser.eval(
+        "(function(){var e=document.querySelector(%s);e.focus();e.value=%s;"
+        "e.dispatchEvent(new Event('input',{bubbles:true}));"
+        "document.querySelector('#btn-save').click();return true;})()"
+        % (_q(tsel), _q(new_text)))
+    await browser.wait_for(
+        "document.querySelector('#diff-panel').classList.contains('hidden') === false")
+    line = await _diff_text_of(browser, scope, tfld["path"])
+    assert line is not None and word in line, \
+        "#18 输入后立刻点保存，改动清单里没有刚输入的完整文字：%r" % (line,)
+    await browser.click("#btn-cancel-save")
+    await _discard(browser)
+    print("#18(a) 保存前冲刷防抖 OK")
+
+
+async def _chk_flush_on_discard(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
+    # (b) 放弃：待决的防抖不能在放弃之后又把文字暂存回来
+    await browser.eval("LX.setValue(%s, %s, %s)" % (
+        _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
+    await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    # 同一个 JS 滴答里完成"输入 → 放弃（点两次）"，保证 150ms 防抖还没到点（真点击在无头 Edge 里可能慢过 150ms）
+    await browser.eval(
+        "(function(){var e=document.querySelector(%s);e.focus();e.value=%s;"
+        "e.dispatchEvent(new Event('input',{bubbles:true}));"
+        "var d=document.querySelector('#btn-discard');d.click();d.click();return true;})()"
+        % (_q(tsel), _q(new_text)))
+    await asyncio.sleep(0.5)
+    left = await browser.eval("JSON.stringify(Array.from(LX.state.dirty.keys()))")
+    assert left == "[]", "#18 放弃之后待决的防抖又把改动暂存回来了：%s" % left
+    print("#18(b) 放弃前冲刷防抖 OK")
+
+
+async def _chk_flush_real_click_with_dirty(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
+    # (c) 真实键盘输入（fill）后立刻真点保存；先有一条别的暂存，保存按钮可点
+    await browser.eval("LX.setValue(%s, %s, %s)" % (
+        _q(scope), _q(bfld["path"]), json.dumps(not bfld["default"])))
+    await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+    await browser.fill(tsel, new_text)
+    await browser.click("#btn-save")
+    await browser.wait_for(
+        "document.querySelector('#diff-panel').classList.contains('hidden') === false")
+    line = await _diff_text_of(browser, scope, tfld["path"])
+    assert line is not None and word in line, \
+        "#18 fill 后立刻点保存，清单里不是完整的新文字：%r" % (line,)
+    await browser.click("#btn-cancel-save")
+    await _discard(browser)
+    print("#18(c) 真点保存（有别的暂存）OK")
+
+
+async def _chk_flush_real_click_no_dirty(browser, harness, base, meta):
+    scope, bfld, tfld, tsel, word, new_text = await _flush_setup(browser, base, meta)
+    # (d) 一点暂存都没有时（保存按钮是禁用的）：输入后立刻点保存，也应该弹出带完整文字的清单
+    await browser.fill(tsel, new_text)
+    await browser.click("#btn-save")
+    await browser.wait_for(
+        "document.querySelector('#diff-panel').classList.contains('hidden') === false", timeout=3.0)
+    line = await _diff_text_of(browser, scope, tfld["path"])
+    assert line is not None and word in line, \
+        "#18 没有别的暂存时，输入后立刻点保存没得到完整清单：%r" % (line,)
+    await browser.click("#btn-cancel-save")
+    await _discard(browser)
+    print("#18(d) 真点保存（没有别的暂存）OK")
+
+
+async def _chk_list_diff(browser, harness, base, meta):
+    scope = "private"
+
+    # ---- list 项的改动清单：显示新增了哪些、删除了哪些（各最多 10 个，超出写“另有 N 个”）----
+    pb, pfld = _first_field(meta, scope, lambda f, b: f["type"] == "list" and not f["condition"])
+    _server_set(harness, base, scope, pfld["path"], ["x1", "x2", "x3"])
+    try:
+        await _fresh(browser, base)
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(pfld["path"]), json.dumps(["x1", "y1", "y2"])))
+        await browser.wait_for("document.querySelector('#btn-save').disabled === false")
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, pfld["path"])
+        print("list 清单：", line)
+        assert "行 →" not in line, "list 改动清单还是“N 行 → M 行”：%r" % line
+        assert "新增" in line and "y1" in line and "y2" in line, "list 清单没写新增了哪些：%r" % line
+        assert "删除" in line and "x2" in line and "x3" in line, "list 清单没写删除了哪些：%r" % line
+        await browser.click("#btn-cancel-save")
+        many = ["n%d" % i for i in range(1, 13)]
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(pfld["path"]), json.dumps(["x1", "x2", "x3"] + many)))
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, pfld["path"])
+        print("list 清单（新增 12 个）：", line)
+        assert "n10" in line and "n11" not in line and "n12" not in line, \
+            "新增超过 10 个时应只列前 10 个：%r" % line
+        assert "另有 2 个" in line, "超出部分没写“另有 2 个”：%r" % line
+        assert "删除" not in line, "没有删除时不该写删除：%r" % line
+        await browser.click("#btn-cancel-save")
+        # 只调整顺序：不能写成“新增 0 个”之类，要说明没有增删
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(pfld["path"]), json.dumps(["x3", "x2", "x1"])))
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, pfld["path"])
+        print("list 清单（只调顺序）：", line)
+        assert "顺序" in line and "新增" not in line and "删除" not in line, \
+            "只调整顺序时清单应说明没有增删：%r" % line
+        await browser.click("#btn-cancel-save")
+        # text 类型仍然截断显示（不受 list 改动影响）
+        tb, tfld = _first_field(meta, scope, lambda f, b: f["type"] == "text" and not f["condition"]
+                                and b["key"] != "whitelist")
+        await browser.eval("LX.setValue(%s, %s, %s)" % (
+            _q(scope), _q(tfld["path"]), json.dumps("字" * 120)))
+        await _open_diff(browser)
+        line = await _diff_text_of(browser, scope, tfld["path"])
+        assert "…" in line and "字" * 100 not in line, "text 类型的清单应截断显示：%r" % line[:200]
+        await browser.click("#btn-cancel-save")
+        await _discard(browser)
+        print("list 项改动清单 OK")
+    finally:
+        _server_set(harness, base, scope, pfld["path"], pfld["default"])
+
+
+UI8_CHECKS = (_chk_invalid_number, _chk_invalid_decimal_for_int,
+              _chk_server_error_clears, _chk_only_changed,
+              _chk_flush_on_save_sync, _chk_flush_on_discard,
+              _chk_flush_real_click_with_dirty, _chk_flush_real_click_no_dirty,
+              _chk_list_diff)
+
+
+async def _extra_ui8(browser, harness, base, meta):
+    for chk in UI8_CHECKS:
+        await chk(browser, harness, base, meta)
+
+
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
     harness = Harness(page_dir=PAGE_DIR)
@@ -392,6 +716,9 @@ async def _run(out_dir):
         assert vis_sel != "none", "⑧ 窄屏下拉没显示：%r" % vis_sel
         assert vis_nav == "none", "⑧ 窄屏侧栏没隐藏：%r" % vis_nav
         print("⑧ 窄屏 OK（select=%s nav=%s）" % (vis_sel, vis_nav))
+
+        # ⑪ UI-8 追加
+        await _extra_ui8(browser, harness, base, meta)
 
         # ⑩ 全程无 JS 错误
         _check_no_errors(browser, "全程结束")
