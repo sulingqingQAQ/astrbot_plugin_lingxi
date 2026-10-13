@@ -325,6 +325,85 @@ async def _sc_U8(ctx):
     assert disk_after == disk_before, "非法覆盖保存后磁盘文件被改了"
 
 
+def _unzip_b64(b64):
+    import base64
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(b64))) as zf:
+        return {n: zf.read(n).decode("utf-8") for n in zf.namelist()}
+
+
+def _sc_U10(ctx):
+    """U10 诊断：经宿主取 diag/status 与 diag/export；默认不含正文 / 文本框 / 原号；勾选后才有正文；
+    滚动文件落在插件数据目录且不含正文。依赖 U6 / U7 已经产生过真实对话（接管私聊、文案回复）。"""
+    REPLY = "文案回复"            # U7 里假 LLM 的回复
+    STYLE = "合成口癖标记ZZ"      # U7 存进风格文本框
+    MEMB = "合成成员甲：爱聊合成话题"  # U7 存进成员档案文本框
+
+    st = _need_ok("diag/status", *_api_get(ctx, "diag/status"))
+    for k in ("generated_at_ts", "uptime_seconds", "health", "state", "counters",
+              "series", "events", "logs", "options", "warnings", "file_error"):
+        assert k in st, "diag/status 缺 %s，实际键=%r" % (k, sorted(st))
+    assert st["health"] in ("ok", "warn", "error"), "health 取值不对：%r" % (st["health"],)
+    assert st["options"] == {"include_text": False, "mask_ids": True}, (
+        "默认选项期望不含正文 + 打码，实际=%r" % (st["options"],))
+    for k in ("idle", "ticker", "history", "runner"):
+        assert k in st["state"], "state 缺 %s，实际=%r" % (k, st["state"])
+    seen = st["counters"].get("seen.private", 0)
+    assert seen >= 1, "期望至少见到 1 条私聊消息，实际 counters=%r" % (st["counters"],)
+    outs = [e for e in st["events"] if e.get("kind") == "outcome" and e.get("result") == "delivered"]
+    assert outs, "期望至少 1 条送达事件，实际 events=%r" % (st["events"][-5:],)
+    assert all("text" not in e and "raw" not in e for e in st["events"]), "默认状态里事件不得带正文字段"
+    assert any(e.get("chars", 0) > 0 for e in outs), "送达事件应带回复字数"
+    assert not any(USER_IN in json.dumps(e, ensure_ascii=False) for e in st["events"]), (
+        "默认应打码，事件里不该有原始私聊号 %s" % USER_IN)
+    assert any("插件加载完成" in r.get("text", "") for r in st["logs"]), (
+        "日志环里期望有 '插件加载完成'，实际末 5 行=%r" % (st["logs"][-5:],))
+
+    st2 = _need_ok("diag/status(含正文)", *_api_get(
+        ctx, "diag/status", {"include_text": "1", "mask_ids": "0"}))
+    assert any(REPLY in e.get("text", "") for e in st2["events"]), (
+        "勾选正文后期望事件里能看到回复 %r，实际=%r" % (REPLY, st2["events"][-3:]))
+    assert any(USER_IN in json.dumps(e, ensure_ascii=False) for e in st2["events"]), (
+        "取消打码后期望看到原始私聊号")
+
+    ex = _need_ok("diag/export", *_api_post(ctx, "diag/export", {}))
+    assert ex.get("mime") == "application/zip" and ex.get("contains_text") is False, (
+        "默认导出期望 zip 且不含正文，实际=%r" % ({k: v for k, v in ex.items() if k != "base64"},))
+    files = _unzip_b64(ex["base64"])
+    assert set(files) == {"diag.json", "summary.md"}, "zip 内容不对：%r" % (sorted(files),)
+    blob = files["diag.json"] + "\n" + files["summary.md"]
+    for needle in (REPLY, STYLE, MEMB, "爱聊合成话题", USER_IN, GROUP_ID):
+        assert needle not in blob, "默认诊断包不该出现 %r" % (needle,)
+    bundle = json.loads(files["diag.json"])
+    assert bundle["format"] == "lingxi_diag/1", "format 不对：%r" % (bundle.get("format"),)
+    assert bundle["env"].get("plugin_version") == "v3.0.0-dev.1", "env.plugin_version 不对：%r" % (bundle["env"],)
+    assert bundle["env"].get("astrbot_version"), "env 里期望拿到 AstrBot 版本"
+    tb = bundle["config"]["text_boxes"]
+    assert tb["private.style_text"]["chars"] == len(STYLE), "风格文本框只该给字数：%r" % (tb,)
+
+    ex2 = _need_ok("diag/export(含正文)", *_api_post(ctx, "diag/export", {"include_text": True}))
+    assert ex2.get("contains_text") is True
+    blob2 = "".join(_unzip_b64(ex2["base64"]).values())
+    assert REPLY in blob2, "含正文的包里期望有回复 %r" % (REPLY,)
+    assert STYLE in blob2, "含正文的包里期望有风格文本框内容"
+    assert MEMB not in blob2 and "爱聊合成话题" not in blob2, "成员档案永远只给字数，不该出现正文"
+    assert USER_IN not in blob2, "含正文但默认打码时，包里不该有原始私聊号"
+
+    # 滚动文件：在隔离根的插件数据目录里，且不含任何正文
+    found = []
+    for dirpath, _dirs, names in os.walk(os.path.join(ROOT, "data")):
+        for n in names:
+            if n == "events.jsonl":
+                found.append(os.path.join(dirpath, n))
+    assert found, "期望插件数据目录下有 diag/events.jsonl，实际没找到"
+    with open(found[0], "rb") as f:
+        raw = f.read().decode("utf-8", errors="replace")
+    assert raw.strip(), "events.jsonl 不该是空的"
+    for needle in (REPLY, STYLE, MEMB):
+        assert needle not in raw, "滚动文件里不该有正文 %r" % (needle,)
+
+
 def _post_U9(ctx, webui_port, ws_port):
     """U9 收尾：进程已停、端口已释放、隔离根日志全程无 Traceback。"""
     assert _port_free(webui_port), "收尾后 webui 端口 %d 还被占" % webui_port
@@ -649,8 +728,8 @@ def _sc_U1(ctx):
         "期望启动日志无 Traceback，实际找到了 %d 处" % text.count("Traceback"))
     assert ("Failed to import plugin %s" % PLUGIN_NAME) not in text, (
         "期望无插件导入失败，实际日志里有 Failed to import")
-    assert "[lingxi] 配置面板接口注册 7 个" in text, (
-        "期望日志里有 '[lingxi] 配置面板接口注册 7 个'，实际没找到")
+    assert "[lingxi] 配置面板接口注册 9 个" in text, (
+        "期望日志里有 '[lingxi] 配置面板接口注册 9 个'（7 个配置 + 2 个诊断），实际没找到")
 
 
 # -- 登录与扩展接口基址 --------------------------------------------------------
@@ -731,7 +810,7 @@ async def amain(only):
             print("ext api ok via %s" % ctx.ext_path, flush=True)
             scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3),
                          ("U4", _sc_U4), ("U5", _sc_U5), ("U6", _sc_U6),
-                         ("U7", _sc_U7), ("U8", _sc_U8)]
+                         ("U7", _sc_U7), ("U8", _sc_U8), ("U10", _sc_U10)]
             for name, fn in scenarios:
                 if only and name not in only:
                     continue

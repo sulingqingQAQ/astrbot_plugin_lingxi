@@ -51,7 +51,7 @@ class E2EUIStaticTest(unittest.TestCase):
     def test_all_scenarios_present(self):
         src = _source()
         for name in ("_sc_U1", "_sc_U2", "_sc_U3", "_sc_U4", "_sc_U5",
-                     "_sc_U6", "_sc_U7", "_sc_U8", "_post_U9"):
+                     "_sc_U6", "_sc_U7", "_sc_U8", "_sc_U10", "_post_U9"):
             self.assertIn("def %s(" % name, src, "缺场景入口 %s" % name)
 
     def test_expected_ports(self):
