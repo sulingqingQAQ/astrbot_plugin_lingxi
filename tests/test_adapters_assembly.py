@@ -200,5 +200,22 @@ class ImportLegacyWakeTest(unittest.TestCase):
             self.assertTrue(logs)
 
 
+class SmokeTest(unittest.TestCase):
+    def test_route_and_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            c = build(tmp)
+            key = SessionKey(Scope.PRIVATE, "u123", "plat")
+            cfg = c.resolver.resolve(key)
+            msg = Msg(id="sm1", ts=NOW, speaker_id="u123", speaker_name="user",
+                      text="合成冒烟消息", is_bot=False, addressed="private")
+            trig = c.router.route(key, msg, cfg, None)
+            self.assertIsNotNone(trig)
+            prep = c.brain.prepare(key, trig)
+            self.assertTrue(prep.allowed, prep.why)
+            self.assertIsNotNone(prep.asm)
+            assert prep.asm is not None
+            self.assertTrue(prep.asm.user_text.strip())
+
+
 if __name__ == "__main__":
     unittest.main()
