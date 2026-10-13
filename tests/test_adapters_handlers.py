@@ -617,6 +617,25 @@ class TestOnDecoratingResult(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ev._result.chain, [])
         self.assertFalse(brain.reported[-1][3])
 
+    async def test_D_refuse_stops_event(self):
+        """D 场景回归：拒回/沉默清空 chain 时必须停事件。
+
+        否则 AstrBot 内置 on_message 会走默认 LLM 补发一句兜底文。
+        """
+        brain = FakeBrain()
+        silent = _parsed(text=None, parts=[], silent=True)
+        def _finish(key, trigger, raw):
+            assert raw == "<refuse/>"
+            return silent
+        brain.finish = _finish  # type: ignore[method-assign]
+        c = _components(brain=brain)
+        c, h = self._handler(c)
+        ev, _key, _trig = self._event_with_turn([Plain("<refuse/>")])
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev._result.chain, [])
+        self.assertFalse(brain.reported[-1][3])
+        self.assertEqual(ev.stop_calls, 1)
+
     async def test_needs_retry_only_logs(self):
         logs: list = []
         brain = FakeBrain()
