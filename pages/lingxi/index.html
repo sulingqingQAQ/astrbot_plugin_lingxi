@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>灵犀</title>
   <!-- AstrBot 托管时会把这个地址改写成带鉴权参数的真实地址 -->
   <script src="/api/plugin/page/bridge-sdk.js"></script>
@@ -12,25 +13,40 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand" id="app-title">灵犀</div>
+    <div class="brand" id="app-title">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false"><path d="M5.2 20.5v-9.2a6.8 6.8 0 0 1 13.6 0v9.2l-2.3-1.9-2.2 1.9-2.3-1.9-2.3 1.9-2.2-1.9z"/><circle class="eye" cx="9.4" cy="11" r="1.3"/><circle class="eye" cx="14.6" cy="11" r="1.3"/></svg>
+      </span>
+      <span class="brand-name">灵犀</span>
+    </div>
     <nav class="tabs" id="tabs" aria-label="配置标签"></nav>
     <div class="savebar">
-      <span class="muted" id="dirty-count"></span>
-      <button class="secondary" id="btn-discard">放弃</button>
+      <span class="badge badge-warn dot" id="dirty-count" role="status"></span>
+      <button class="ghost" id="btn-discard"><span class="btn-label">放弃</span></button>
       <button class="primary" id="btn-save" disabled>保存</button>
     </div>
   </header>
 
   <div id="banner" class="banner hidden" role="status"></div>
-  <div id="conflict-banner" class="banner conflict hidden" role="alert"><span>配置在别处被改过，请先刷新，你的改动会保留在页面里。</span> <button class="small" id="btn-refresh">刷新</button></div>
+  <div id="conflict-banner" class="banner alert alert-danger conflict hidden" role="alert">
+    <i class="alert-icon" data-icon="alert-circle" data-size="18"></i>
+    <div class="alert-body">配置在别处被改过，请先刷新，你的改动会保留在页面里。</div>
+    <div class="alert-actions"><button class="small" id="btn-refresh">刷新</button></div>
+  </div>
   <div id="fatal" class="fatal hidden" role="alert"></div>
   <div id="toast" class="toast hidden" role="status"></div>
 
   <main id="tab-host"></main>
 
-  <div id="diff-panel" class="overlay hidden" role="dialog" aria-label="确认保存这些改动">
+  <div id="diff-panel" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="diff-title">
     <div class="dialog">
-      <h3>确认保存这些改动</h3>
+      <div class="dialog-head">
+        <i class="card-icon" data-icon="list" data-size="18"></i>
+        <div class="grow">
+          <h3 id="diff-title">确认保存这些改动</h3>
+          <div class="dialog-sub">点“确认保存”才会真正写入；点“再想想”可以回去继续改。</div>
+        </div>
+      </div>
       <div id="diff-list" class="diff-list"></div>
       <div class="dialog-actions">
         <button class="secondary" id="btn-cancel-save">再想想</button>
@@ -39,9 +55,10 @@
     </div>
   </div>
 
+  <!-- 加载顺序：app.js 建 LX → icons.js 加 LX.icon → form.js（私聊 / 群聊表单）→ tab_overrides.js（覆盖表 / 关于）。
+       后面的文件缺失时只是少标签，页面不报错（app.js 里对 LX.registerTab 已做容错，404 的 script 本身不抛 JS 异常）。 -->
   <script src="./app.js"></script>
-  <!-- form.js（UI-4c：表单生成）与 tab_overrides.js（UI-4b：覆盖表/关于标签）现在还不存在：
-       缺失时只是少标签，页面不报错（app.js 里对 LX.registerTab 已做容错，404 的 script 本身不抛 JS 异常）。 -->
+  <script src="./icons.js"></script>
   <script src="./form.js"></script>
   <script src="./tab_overrides.js"></script>
 </body>
