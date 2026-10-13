@@ -237,3 +237,56 @@ class DirectSource(_CfgHelper):
 
     def on_replied(self, key: SessionKey, outcome: Any) -> None:
         return None
+
+
+class IntervalSource(_CfgHelper):
+    """按条数触发（私聊群聊通用）。每会话一个计数器，每条非 bot 消息 +1；
+    满 N 触发并清零；``on_replied``（任何来源、无论送达）清零。``id = Source.INTERVAL``。"""
+
+    id: Source = Source.INTERVAL
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        tz: Any = _DEFAULT_TZ,
+        log: Optional[LogFn] = None,
+    ) -> None:
+        self._clock = clock
+        self._tz = tz
+        self._log: LogFn = _new_log(log)
+        self._counts: dict[SessionKey, int] = {}
+
+    def on_message(self, key: SessionKey, msg: Msg, cfg: ResolvedConfig,
+                   event: Any) -> Optional[Trigger]:
+        if msg.is_bot:
+            return None
+        scope = key.scope
+        n = self._cfg(cfg, "trigger.interval_count", scope, "int")
+        if n <= 0:
+            self._counts[key] = 0
+            return None
+        count = self._counts.get(key, 0) + 1
+        if count >= n:
+            self._counts[key] = 0
+            meta: dict[str, Any] = {"vars": {}}
+            wait = self._cfg(cfg, "trigger.wait_seconds", scope, "int")
+            if wait > 0:
+                meta["wait"] = {"seconds": wait, "mode": "latest"}
+            return Trigger(
+                source=Source.INTERVAL,
+                reason=self._cfg(cfg, "prompt.reason_interval", scope, "str"),
+                silent_ok=self._cfg(cfg, "silence.interval", scope, "bool"),
+                event=event,
+                meta=meta,
+            )
+        self._counts[key] = count
+        return None
+
+    def due(self, now: float) -> list:
+        return []
+
+    def on_user_message(self, key: SessionKey) -> None:
+        return None
+
+    def on_replied(self, key: SessionKey, outcome: Any) -> None:
+        self._counts[key] = 0
