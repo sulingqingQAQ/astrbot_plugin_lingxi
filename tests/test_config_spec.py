@@ -106,6 +106,43 @@ class ScopeDifferencesTest(unittest.TestCase):
         self.assertNotIn("whitelist.ids", [f.path for f in spec.fields_for(Scope.GROUP, overridable_only=True)])
 
 
+class ContractAlignmentTest(unittest.TestCase):
+    """规格表和契约（lx/contracts.py 的 Source 枚举）对得上：每个触发源都有"可不可沉默"和"触发原因"。"""
+
+    def test_every_trigger_source_has_a_silence_switch(self):
+        from lx.contracts import Source
+
+        silence = {f.name for f in spec.block("silence").fields}
+        for s in Source:
+            self.assertIn(s.value, silence, f"silence 块缺 {s.value}")
+
+    def test_every_trigger_source_has_a_reason_template_except_followup(self):
+        from lx.contracts import Source
+
+        reasons = {f.name for f in spec.block("prompt").fields if f.name.startswith("reason_")}
+        self.assertEqual(reasons, {f"reason_{s.value}" for s in Source if s != Source.FOLLOWUP})
+        # 追发的"原因"是 followup.templates 里随机挑一条
+        self.assertIsNotNone(spec.field("followup.templates"))
+
+    def test_activity_source_is_group_only_everywhere(self):
+        self.assertEqual(spec.field("silence.activity").scope, spec.GROUP)
+        self.assertEqual(spec.field("prompt.reason_activity").scope, spec.GROUP)
+        self.assertEqual(spec.block("activity").scope, spec.GROUP)
+
+    def test_silence_defaults_follow_b1_table(self):
+        # B1 草案 §4.2 表里的"可沉默默认 [假设]"：direct 否、wake 否、其余可；wait 私聊否 / 群聊是
+        p, g = defaults.defaults_for(Scope.PRIVATE)["silence"], defaults.defaults_for(Scope.GROUP)["silence"]
+        for name in ("direct", "wake"):
+            self.assertIs(p[name], False)
+            self.assertIs(g[name], False)
+        for name in ("interval", "idle", "followup", "next_reply"):
+            self.assertIs(p[name], True)
+            self.assertIs(g[name], True)
+        self.assertIs(p["wait"], False)
+        self.assertIs(g["wait"], True)
+        self.assertIs(g["activity"], True)
+
+
 class LegacyDefaultsTest(unittest.TestCase):
     def test_legacy_default_reads_exact_values(self):
         self.assertEqual(spec.legacy_default("group_chime_settings.wake_keywords"), ["小苏"])
