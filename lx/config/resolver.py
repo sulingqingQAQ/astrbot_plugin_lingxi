@@ -228,6 +228,13 @@ class ConfigResolver:
         ids = self._wl[key.scope]["ids"]
         return key.id in ids or (key.scope == Scope.GROUP and strip_isolation(key.id) in ids)
 
+    def whitelist_ids(self, scope: Scope) -> frozenset:
+        """该范围白名单里的裸 ID 集合（只读拷贝；启动播种用它 × 平台 id 拼 SessionKey）。"""
+        try:
+            return frozenset(self._wl.get(scope, {}).get("ids", frozenset()))
+        except Exception:
+            return frozenset()
+
     def is_enabled(self, key: SessionKey) -> bool:
         wl = self._wl[key.scope]
         if wl["enabled"] and not self._listed(key):
