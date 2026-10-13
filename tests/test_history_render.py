@@ -130,5 +130,117 @@ class TestFormatLine(unittest.TestCase):
         self.assertTrue(line.endswith(long_text))
 
 
+class TestBuildViewWindowOldNew(unittest.TestCase):
+    def test_disabled(self):
+        msgs = [mk("m1", dt(13, "09:00"), text="第一")]
+        v = build_view(msgs, cfg(**{"context.enabled": False}), TZ)
+        self.assertEqual(v, HistoryView([], [], None, ""))
+
+    def test_all_new_no_bot(self):
+        a = mk("m1", dt(13, "09:00"), text="第一")
+        b = mk("m2", dt(13, "09:05"), text="第二")
+        v = build_view([a, b], cfg(), TZ)
+        self.assertEqual(v.older, [])
+        self.assertEqual(v.new, [a, b])
+        self.assertIs(v.focus, b)
+        self.assertEqual(v.text,
+                         "[10-13 09:00] 甲(u1): 第一\n[10-13 09:05] 甲(u1): 第二")
+
+    def test_split_old_new(self):
+        a = mk("m1", dt(13, "09:00"), sid="u1", sname="甲", text="第一")
+        bot = mk("m2", dt(13, "09:01"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        c = mk("m3", dt(13, "09:05"), sid="u2", sname="乙", text="第三")
+        v = build_view([a, bot, c], cfg(), TZ)
+        self.assertEqual(v.older, [a, bot])
+        self.assertEqual(v.new, [c])
+        self.assertIs(v.focus, c)
+        self.assertEqual(v.text, "\n".join([
+            "[10-13 09:00] 甲(u1): 第一",
+            "[10-13 09:01] 灵卿(bot1): 在的",
+            "--- 以下是你上次发言之后的新消息 ---",
+            "[10-13 09:05] 乙(u2): 第三",
+        ]))
+
+    def test_bot_tail_new_empty(self):
+        a = mk("m1", dt(13, "09:00"), text="第一")
+        bot = mk("m2", dt(13, "09:01"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        v = build_view([a, bot], cfg(), TZ)
+        self.assertEqual(v.older, [a, bot])
+        self.assertEqual(v.new, [])
+        self.assertIsNone(v.focus)
+        self.assertNotIn("---", v.text)
+
+    def test_exclude_bot_keeps_splitpoint(self):
+        a = mk("m1", dt(13, "09:00"), sid="u1", sname="甲", text="第一")
+        b1 = mk("m2", dt(13, "09:01"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        c = mk("m3", dt(13, "09:05"), sid="u2", sname="乙", text="第三")
+        b2 = mk("m4", dt(13, "09:06"), sid="bot1", sname="灵卿", text="收到", is_bot=True)
+        v = build_view([a, b1, c, b2], cfg(**{"context.include_bot_messages": False}), TZ)
+        # 划分点仍按最后一条 bot（m4）定：m4 及之前→older（含 m3），之后→new；再去掉 bot
+        self.assertEqual(v.older, [a, c])
+        self.assertEqual(v.new, [])
+        self.assertIsNone(v.focus)
+        self.assertNotIn("---", v.text)
+
+    def test_exclude_bot_new_nonempty(self):
+        a = mk("m1", dt(13, "09:00"), sid="u1", sname="甲", text="第一")
+        b1 = mk("m2", dt(13, "09:01"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        c = mk("m3", dt(13, "09:05"), sid="u2", sname="乙", text="第三")
+        v = build_view([a, b1, c], cfg(**{"context.include_bot_messages": False}), TZ)
+        self.assertEqual(v.older, [a])
+        self.assertEqual(v.new, [c])
+        self.assertIs(v.focus, c)
+
+    def test_window_messages(self):
+        msgs = [mk(f"m{i}", dt(13, f"09:0{i}"), text=f"第{i}") for i in range(5)]
+        v = build_view(msgs, cfg(**{"context.inject_messages": 3}), TZ)
+        self.assertEqual([m.id for m in v.new], ["m2", "m3", "m4"])
+        self.assertIs(v.focus, msgs[4])
+        self.assertEqual(len(v.text.split("\n")), 3)
+
+    def test_window_zero_unlimited(self):
+        msgs = [mk(f"m{i}", dt(13, f"09:0{i}"), text=f"第{i}") for i in range(5)]
+        v = build_view(msgs, cfg(**{"context.inject_messages": 0}), TZ)
+        self.assertEqual(len(v.new), 5)
+
+    def test_window_keeps_partition(self):
+        a = mk("m0", dt(13, "08:55"), text="第0")
+        b = mk("m1", dt(13, "08:56"), text="第1")
+        bot = mk("m2", dt(13, "08:57"), sid="bot1", sname="灵卿", text="在的", is_bot=True)
+        c = mk("m3", dt(13, "09:00"), text="第3")
+        d = mk("m4", dt(13, "09:05"), text="第4")
+        v = build_view([a, b, bot, c, d], cfg(**{"context.inject_messages": 3}), TZ)
+        self.assertEqual(v.older, [bot])
+        self.assertEqual(v.new, [c, d])
+        self.assertIn("--- 以下是你上次发言之后的新消息 ---", v.text.split("\n"))
+
+    def test_quote_outside_window(self):
+        # by_id 来自全部消息：窗口外的被引用者仍能解析昵称
+        old = mk("m0", dt(13, "08:50"), sid="u2", sname="乙", text="在吗")
+        mid = [mk(f"m{i}", dt(13, f"08:5{i}"), text=f"填充{i}") for i in range(1, 4)]
+        new = mk("m4", dt(13, "09:05"), text="来了", quote_id="m0")
+        v = build_view([old] + mid + [new], cfg(**{"context.inject_messages": 2}), TZ)
+        self.assertEqual([m.id for m in v.new], ["m3", "m4"])
+        self.assertIn("[回复 乙] 来了", v.text)
+
+    def test_flags_from_cfg(self):
+        m = mk("m7", dt(13, "09:05"), sid="u1", sname="甲", text="你好")
+        v = build_view([m], cfg(**{"context.enable_message_id": True,
+                                   "context.include_sender_id": False}), TZ)
+        self.assertEqual(v.text, "[10-13 09:05] #m7 甲: 你好")
+
+    def test_does_not_mutate(self):
+        msgs = [mk("m1", dt(13, "09:00"), text="第一"),
+                mk("m2", dt(13, "09:05"), text="第二", quote_id="m1")]
+        snapshot = [(m.id, m.ts, m.text, m.quote_id) for m in msgs]
+        build_view(msgs, cfg(), TZ)
+        self.assertEqual([(m.id, m.ts, m.text, m.quote_id) for m in msgs], snapshot)
+        self.assertEqual(len(msgs), 2)
+
+    def test_empty(self):
+        v = build_view([], cfg(), TZ)
+        self.assertEqual(v, HistoryView([], [], None, ""))
+
+
 if __name__ == "__main__":
     unittest.main()
