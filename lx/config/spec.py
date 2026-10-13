@@ -342,7 +342,8 @@ _GATE = Block(
         _both("gate.mute_minutes", "int", 30, "闭嘴时长（分钟）",
               "被说了闭嘴关键词之后安静多少分钟。调大：更久不说话。", new_private=True, new_group=True, lo=1, slider=(1, 1440, 5)),
         _g("gate.sync_platform_mute", "bool", True, "同步平台禁言",
-           "bot 在群里被管理员禁言时自动同步：禁言期间不开口，免得发不出去还白花 token。关掉则不管禁言照常生成（旧版代码里写死为开）。"),
+           "bot 在群里被管理员禁言时自动同步：禁言期间不开口，免得发不出去还白花 token。关掉则不管禁言照常生成（旧版代码里写死为开，旧 schema 里没有这个键）。",
+           new_group=True),
     ),
 )
 
