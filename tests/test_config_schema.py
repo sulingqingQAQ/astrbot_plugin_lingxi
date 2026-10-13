@@ -63,7 +63,8 @@ class SchemaShapeTest(unittest.TestCase):
         self.assertEqual(keys[0], "schema_version")
         self.assertEqual(keys[1:3], ["private", "group"])
         legacy_tops = list(spec.load_legacy_schema())
-        self.assertEqual(keys[3:], legacy_tops)
+        self.assertEqual(keys[3], "session_overrides")  # D1：分会话覆盖用 YAML 文本框，默认带
+        self.assertEqual(keys[4:], legacy_tops)
 
     def test_schema_version_invisible_int_default_zero(self):
         sv = self.schema["schema_version"]
@@ -193,11 +194,11 @@ class LegacyRetentionTest(unittest.TestCase):
 
 
 class OverridesFieldOptionTest(unittest.TestCase):
-    def test_default_has_no_overrides_field(self):
-        self.assertNotIn("session_overrides", gs.build_schema())
+    def test_option_can_drop_overrides_field(self):
+        self.assertNotIn("session_overrides", gs.build_schema(overrides_field=False))
 
-    def test_option_adds_yaml_text_field_with_hint(self):
-        schema = gs.build_schema(overrides_field=True)
+    def test_default_has_yaml_text_field_with_hint(self):
+        schema = gs.build_schema()
         node = schema["session_overrides"]
         self.assertEqual(node["type"], "text")
         self.assertTrue(node["editor_mode"])

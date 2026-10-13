@@ -1,6 +1,6 @@
 """lx 契约（B1 接口草案的代码化）。只有协调者改这个文件。
 
-状态：**v0.3 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；B-0 探针回来后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
+状态：**v0.4 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；v0.4：加可选 Seedable、WaitAggregator.forget，SessionKey 注明群聊 id 是真群号；等 adapters 跑通后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
 但不要把实现绑死在细节上；契约改了，协调者会通知并合并进各线分支。
 
 只放：数据类、枚举、Protocol 签名、时钟类型。**不放任何业务逻辑，不 import astrbot。**
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
-CONTRACT_VERSION = "0.3-provisional"
+CONTRACT_VERSION = "0.4-provisional"
 
 # 注入时钟：所有带时间的逻辑都接收一个 Clock，测试里用假时钟。返回秒级 Unix 时间戳。
 Clock = Callable[[], float]
@@ -35,7 +35,11 @@ class Scope(str, Enum):
 
 @dataclass(frozen=True)
 class SessionKey:
-    """一个会话 = 范围 + ID。与 AstrBot 的 UMO（platform:MessageType:session_id）互相转换，只在一处实现。"""
+    """一个会话 = 范围 + ID。与 AstrBot 的 UMO（platform:MessageType:session_id）互相转换，只在一处实现。
+
+    ``id`` 的含义（v0.4 写明）：私聊里是对方 QQ 号；群聊里是**真群号**，不是 UMO 的 session_id 原样——
+    开了 unique_session（独立会话）时 UMO 的 session_id 是 ``发送者_群号``，转换时要剥掉前缀，见 lx/session/key.py。
+    """
 
     scope: Scope
     id: str
@@ -123,6 +127,14 @@ class WaitAggregator(Protocol):
 
     def bump(self, key: SessionKey) -> int: ...
     def is_latest(self, key: SessionKey, seq: int) -> bool: ...
+    def forget(self, key: SessionKey) -> None: ...  # v0.4：会话结束 / 清理，丢掉该会话的序号；未知会话是空操作
+
+
+class Seedable(Protocol):
+    """v0.4：需要"启动播种"的定时触发源（目前是 idle）。装配侧把 auto_trigger 的 seed_after_minutes 换算成锚点时间，
+    再调 seed；``anchor_ts=None`` 表示以现在为锚点。不是每个 TriggerSource 都要实现，所以单独成协议。"""
+
+    def seed(self, key: SessionKey, anchor_ts: Optional[float] = None) -> None: ...
 
 
 class TriggerSource(Protocol):

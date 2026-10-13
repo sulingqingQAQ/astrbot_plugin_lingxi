@@ -3,7 +3,7 @@
 用法（在仓库根目录）：
   F:\\Gemini\\AstrBot\\AstrBot\\backend\\python\\python.exe tools\\schema\\gen_schema.py            # 写 lx\\config\\generated\\_conf_schema.v2.json
   ... gen_schema.py --check                                                                 # 只检查生成物是不是最新
-  ... gen_schema.py --overrides-field                                                       # 另外加一个 YAML 文本型的 session_overrides 字段
+  ... gen_schema.py --no-overrides-field                                                    # 不生成 YAML 文本型的 session_overrides 字段（默认生成，D1 已定用 YAML）
   ... gen_schema.py --leaf-invisible                                                        # 旧分节里每个已迁移的叶子也单独标 invisible
 
 v2 的结构：
@@ -119,7 +119,7 @@ def legacy_sections(*, leaf_invisible: bool = False) -> dict[str, Any]:
     return items
 
 
-def build_schema(*, leaf_invisible: bool = False, overrides_field: bool = False) -> dict[str, Any]:
+def build_schema(*, leaf_invisible: bool = False, overrides_field: bool = True) -> dict[str, Any]:
     schema: dict[str, Any] = {
         "schema_version": {
             "description": "配置版本（内部使用，请勿修改）",
@@ -160,10 +160,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default=OUT_PATH)
     ap.add_argument("--check", action="store_true", help="只检查生成物是不是最新，不写文件")
-    ap.add_argument("--overrides-field", action="store_true")
+    ap.add_argument("--no-overrides-field", action="store_true")
     ap.add_argument("--leaf-invisible", action="store_true")
     args = ap.parse_args(argv)
-    kw = {"overrides_field": args.overrides_field, "leaf_invisible": args.leaf_invisible}
+    kw = {"overrides_field": not args.no_overrides_field, "leaf_invisible": args.leaf_invisible}
     if args.check:
         with open(args.out, encoding="utf-8") as f:
             current = f.read()

@@ -46,14 +46,10 @@ def merge_dropped(msgs: Sequence[Msg], latest: Msg) -> list[Msg]:
     """把等待期间被丢弃的消息（应按时间升序）与放行的最后一条合并。
 
     返回按 ``ts`` 升序、按消息 ``id`` 去重的新列表；不修改输入。
-    同 id 重复时保留时间最早的一条。
+    同 id 重复时保留**后到的那条**（``latest`` 压过 ``msgs``，``msgs`` 里靠后的压过靠前的）：
+    同一条消息后到的版本可能已回填图片说明，不能丢。
     """
-    seen: set[str] = set()
-    merged: list[Msg] = []
+    by_id: dict[str, Msg] = {}
     for msg in list(msgs) + [latest]:
-        if msg.id in seen:
-            continue
-        seen.add(msg.id)
-        merged.append(msg)
-    merged.sort(key=lambda m: m.ts)
-    return merged
+        by_id[msg.id] = msg
+    return sorted(by_id.values(), key=lambda m: m.ts)

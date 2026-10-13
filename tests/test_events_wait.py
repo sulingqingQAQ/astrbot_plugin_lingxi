@@ -93,6 +93,13 @@ class TestMergeDropped(unittest.TestCase):
         out = merge_dropped(dropped, latest)
         self.assertEqual([m.id for m in out], ["m1", "m2"])
 
+    def test_same_id_keeps_the_later_arrival(self) -> None:
+        # 同一条消息后到的版本（比如已回填图片说明）压过先到的
+        dropped = [_msg("m1", 1.0, "旧"), _msg("m1", 1.0, "新")]
+        self.assertEqual(merge_dropped(dropped, _msg("m2", 2.0))[0].text, "新")
+        out = merge_dropped([_msg("m1", 1.0, "旧")], _msg("m1", 1.0, "最新"))
+        self.assertEqual([(m.id, m.text) for m in out], [("m1", "最新")])
+
     def test_latest_dup_id_not_doubled(self) -> None:
         dropped = [_msg("m1", 1.0)]
         latest = _msg("m1", 1.0, "same")

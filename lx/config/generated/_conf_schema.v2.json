@@ -288,6 +288,12 @@
             "default": "1-7",
             "hint": "24 小时制，格式 开始-结束，如 1-7 表示凌晨 1 点到 7 点，23-6 可以跨午夜。这段时间里 bot 不会主动开口（空闲触发、追发、活跃度插话）。留空 = 不设免打扰。"
           },
+          "quiet_applies_to_direct": {
+            "description": "免打扰时段也管直接回复",
+            "type": "bool",
+            "default": false,
+            "hint": "默认关：免打扰时段只拦 bot 自己找话说（空闲触发、追发、活跃度插话），有人@它或私聊它，它照样回；定时唤醒也照样到点发。打开后，免打扰时段里连这些也一律不回。"
+          },
           "max_unanswered": {
             "description": "最大未回复次数",
             "type": "int",
@@ -1259,6 +1265,12 @@
             "default": "1-7",
             "hint": "24 小时制，格式 开始-结束，如 1-7 表示凌晨 1 点到 7 点，23-6 可以跨午夜。这段时间里 bot 不会主动开口（空闲触发、追发、活跃度插话）。留空 = 不设免打扰。"
           },
+          "quiet_applies_to_direct": {
+            "description": "免打扰时段也管直接回复",
+            "type": "bool",
+            "default": false,
+            "hint": "默认关：免打扰时段只拦 bot 自己找话说（空闲触发、追发、活跃度插话），有人@它或私聊它，它照样回；定时唤醒也照样到点发。打开后，免打扰时段里连这些也一律不回。"
+          },
           "max_unanswered": {
             "description": "最大未回复次数",
             "type": "int",
@@ -1862,6 +1874,14 @@
         }
       }
     }
+  },
+  "session_overrides": {
+    "description": "会话覆盖（只写要改的项）",
+    "type": "text",
+    "default": "",
+    "hint": "给个别会话单独改设置，只写要改的项，没写的沿用上面的全局配置。格式是 YAML（也可以写 JSON）：\ngroup:900100200:\n  context:\n    max_messages: 80\n  idle:\n    enabled: true\nprivate:10001:\n  base:\n    take_over: true\n键写 group:群号 或 private:QQ号；里面的块名和项名与上面的全局配置一致。写错的项会被忽略并在日志里提示。",
+    "editor_mode": true,
+    "editor_language": "yaml"
   },
   "friend_settings": {
     "description": "👤 私聊全局配置",

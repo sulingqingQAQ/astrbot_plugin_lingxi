@@ -333,6 +333,10 @@ _GATE = Block(
            "免打扰时段",
            "24 小时制，格式 开始-结束，如 1-7 表示凌晨 1 点到 7 点，23-6 可以跨午夜。这段时间里 bot 不会主动开口（空闲触发、追发、活跃度插话）。留空 = 不设免打扰。",
            pattern=r"\s*|\s*\d{1,2}\s*-\s*\d{1,2}\s*"),
+        _both("gate.quiet_applies_to_direct", "bool", False, "免打扰时段也管直接回复",
+              "默认关：免打扰时段只拦 bot 自己找话说（空闲触发、追发、活跃度插话），有人@它或私聊它，它照样回；定时唤醒也照样到点发。"
+              "打开后，免打扰时段里连这些也一律不回。",
+              new_private=True, new_group=True),
         _f("gate.max_unanswered", "int", legacy_default("friend_settings.schedule_settings.max_unanswered_times"),
            legacy_default("group_settings.schedule_settings.max_unanswered_times"), "最大未回复次数",
            "bot 连续主动发了这么多条、对方都没回，就暂停主动发言，直到对方再说话。0 = 不限制。调小：更不容易自说自话。",

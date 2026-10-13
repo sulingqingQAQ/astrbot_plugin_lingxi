@@ -49,6 +49,17 @@ class ContractsTest(unittest.TestCase):
         o2 = c.Outcome("hi", source=c.Source.IDLE, delivered=True)
         self.assertEqual((o2.source, o2.delivered), (c.Source.IDLE, True))
 
+    def test_v04_seedable_and_wait_forget(self):
+        # v0.4：可选 Seedable 协议（idle 实现它）；WaitAggregator 协议带 forget（InMemoryWaitAggregator 实现它）
+        from lx.events.wait import InMemoryWaitAggregator
+        from lx.triggers.idle import IdleSource
+
+        self.assertIn("seed", c.Seedable.__dict__)
+        self.assertIn("forget", c.WaitAggregator.__dict__)
+        for proto, impl in ((c.Seedable, IdleSource), (c.WaitAggregator, InMemoryWaitAggregator)):
+            for name in (n for n in proto.__dict__ if not n.startswith("_")):
+                self.assertTrue(callable(getattr(impl, name, None)), f"{impl.__name__} 缺 {name}")
+
     def test_mutable_defaults_not_shared(self):
         a, b = c.SessionState(), c.SessionState()
         a.status["x"] = 1
