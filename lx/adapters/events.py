@@ -9,9 +9,10 @@
 """
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable, List, Optional
 
-from ..contracts import SessionKey
+from ..contracts import ImageRef, Msg, SessionKey
 from ..session.key import from_umo
 
 
@@ -52,3 +53,109 @@ def is_command(event: Any) -> bool:
     params = _call(event, "get_extra", "handlers_parsed_params", {},
                    default={})
     return isinstance(params, dict) and bool(params)
+
+
+def _chain_of(event: Any) -> list:
+    chain = _call(event, "get_messages", default=None)
+    if chain is None:
+        msg_obj = _get(event, "message_obj", None)
+        chain = _get(msg_obj, "message", None)
+    if not chain:
+        return []
+    try:
+        return list(chain)
+    except TypeError:
+        return []
+
+
+def _msg_id_of(event: Any, clock: Callable[[], float]) -> str:
+    msg_obj = _get(event, "message_obj", None)
+    raw = _get(msg_obj, "message_id", None)
+    if raw is None or raw == "":
+        return f"nomid-{int(clock() * 1000)}"
+    try:
+        return str(raw)
+    except Exception:
+        return f"nomid-{int(clock() * 1000)}"
+
+
+def _ts_of(event: Any, clock: Callable[[], float]) -> float:
+    msg_obj = _get(event, "message_obj", None)
+    raw = _get(msg_obj, "timestamp", None)
+    if isinstance(raw, bool):
+        raw = None
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    try:
+        return float(clock())
+    except Exception:
+        return 0.0
+
+
+def _images_of(chain: list) -> List[ImageRef]:
+    images: List[ImageRef] = []
+    for comp in chain:
+        try:
+            if type(comp).__name__ != "Image":
+                continue
+            url = getattr(comp, "url", "") or ""
+            if not (isinstance(url, str) and url.strip()):
+                url = getattr(comp, "file", "") or ""
+            if isinstance(url, str) and url.strip():
+                images.append(ImageRef(url.strip()))
+        except Exception:
+            continue
+    return images
+
+
+def _quote_id_of(chain: list) -> Optional[str]:
+    for comp in chain:
+        try:
+            if type(comp).__name__ != "Reply":
+                continue
+            raw = getattr(comp, "id", "")
+            text = str(raw).strip() if raw is not None else ""
+            if text:
+                return text
+        except Exception:
+            continue
+    return None
+
+
+def msg_of(event: Any, *, self_id: str = "",
+           clock: Callable[[], float] = time.time) -> Msg:
+    """事件 → Msg（addressed 下一步再接，这里先填 None）。"""
+    chain = _chain_of(event)
+
+    speaker_id = _call(event, "get_sender_id", default="") or ""
+    try:
+        speaker_id = str(speaker_id)
+    except Exception:
+        speaker_id = ""
+    speaker_name = _call(event, "get_sender_name", default="") or ""
+    try:
+        speaker_name = str(speaker_name)
+    except Exception:
+        speaker_name = ""
+    if not speaker_name:
+        speaker_name = speaker_id
+
+    text = _get(event, "message_str", "")
+    if text is None:
+        text = ""
+    try:
+        text = str(text)
+    except Exception:
+        text = ""
+
+    return Msg(
+        id=_msg_id_of(event, clock),
+        ts=_ts_of(event, clock),
+        speaker_id=speaker_id,
+        speaker_name=speaker_name,
+        text=text,
+        is_bot=(speaker_id == self_id and self_id != ""),
+        quote_id=_quote_id_of(chain),
+        images=_images_of(chain),
+        addressed=None,  # 步骤3 接 addressed
+    )

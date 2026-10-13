@@ -8,12 +8,36 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from lx.adapters.events import is_command, session_key_of
+from lx.adapters.events import is_command, msg_of, session_key_of
 from lx.contracts import Scope
 
 SELF_ID = "10001"
 OTHER_ID = "10002"
 GROUP_ID = "900100200"
+
+
+# -- 同名小类（实现里用 type(comp).__name__ 判断） -----------------------------
+
+class At:
+    def __init__(self, qq) -> None:
+        self.qq = qq
+
+
+class Reply:
+    def __init__(self, id="", sender_id=None) -> None:
+        self.id = id
+        self.sender_id = sender_id
+
+
+class Image:
+    def __init__(self, url="", file="") -> None:
+        self.url = url
+        self.file = file
+
+
+class Plain:
+    def __init__(self, text="") -> None:
+        self.text = text
 
 
 # -- 假事件 ------------------------------------------------------------------
@@ -109,6 +133,82 @@ class TestIsCommand(unittest.TestCase):
 
     def test_missing_get_extra_is_not_command(self) -> None:
         self.assertFalse(is_command(SimpleNamespace()))
+
+
+# -- msg_of 基本字段 ----------------------------------------------------------
+
+class TestMsgOfFields(unittest.TestCase):
+    def test_basic_fields(self) -> None:
+        ev = _group_event(text="hello", message_id="m7", timestamp=1700000001.5,
+                          sender_id=OTHER_ID, sender_name="阿七")
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(msg.id, "m7")
+        self.assertEqual(msg.ts, 1700000001.5)
+        self.assertEqual(msg.speaker_id, OTHER_ID)
+        self.assertEqual(msg.speaker_name, "阿七")
+        self.assertEqual(msg.text, "hello")
+        self.assertFalse(msg.is_bot)
+        self.assertIsNone(msg.quote_id)
+        self.assertEqual(msg.images, [])
+
+    def test_sender_name_falls_back_to_id(self) -> None:
+        ev = _group_event(sender_id=OTHER_ID, sender_name="")
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(msg.speaker_name, OTHER_ID)
+
+    def test_none_text_becomes_empty(self) -> None:
+        ev = _group_event(text=None)
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).text, "")
+
+    def test_missing_message_id_uses_clock_fallback(self) -> None:
+        ev = _group_event()
+        del ev.message_obj.message_id
+        msg = msg_of(ev, self_id=SELF_ID, clock=lambda: 1700000002.0)
+        self.assertEqual(msg.id, "nomid-1700000002000")
+
+    def test_bad_timestamp_uses_clock(self) -> None:
+        for bad in (None, "x", 0, -5):
+            ev = _group_event(timestamp=bad)
+            msg = msg_of(ev, self_id=SELF_ID, clock=lambda: 1700000003.0)
+            self.assertEqual(msg.ts, 1700000003.0)
+
+    def test_is_bot(self) -> None:
+        ev = _group_event(sender_id=SELF_ID, sender_name="bot")
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertTrue(msg.is_bot)
+        self.assertEqual(msg.speaker_id, SELF_ID)
+
+    def test_is_bot_false_when_self_id_empty(self) -> None:
+        ev = _group_event(sender_id=OTHER_ID)
+        self.assertFalse(msg_of(ev).is_bot)
+
+
+# -- 图片与引用 ---------------------------------------------------------------
+
+class TestMsgOfImagesQuote(unittest.TestCase):
+    def test_image_url(self) -> None:
+        ev = _group_event(chain=[Image(url="http://x/1.png")])
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(len(msg.images), 1)
+        self.assertEqual(msg.images[0].url, "http://x/1.png")
+
+    def test_image_file_fallback(self) -> None:
+        ev = _group_event(chain=[Image(url="", file="file:///tmp/1.png")])
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(msg.images[0].url, "file:///tmp/1.png")
+
+    def test_image_empty_skipped(self) -> None:
+        ev = _group_event(chain=[Image(), Plain("hi")])
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).images, [])
+
+    def test_quote_id(self) -> None:
+        ev = _group_event(chain=[Reply(id=12345, sender_id=OTHER_ID)])
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(msg.quote_id, "12345")
+
+    def test_quote_empty_id_is_none(self) -> None:
+        ev = _group_event(chain=[Reply(id="")])
+        self.assertIsNone(msg_of(ev, self_id=SELF_ID).quote_id)
 
 
 if __name__ == "__main__":
