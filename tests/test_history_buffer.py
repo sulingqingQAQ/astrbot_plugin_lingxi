@@ -325,10 +325,14 @@ class TestMisc(unittest.TestCase):
         self.assertEqual(len(b.messages(_key("g2"))), 0)
         self.assertEqual(b.evict_idle(), 0)
 
-    def test_render_raises_not_implemented(self):
+    def test_render_returns_empty_view(self):
+        # A-2b 步骤 4：render 占位已换成真实现，空缓冲返回空视图
         b = _buf()
-        with self.assertRaises(NotImplementedError):
-            b.render(_key(), FakeCfg())
+        v = b.render(_key(), FakeCfg())
+        self.assertEqual(v.older, [])
+        self.assertEqual(v.new, [])
+        self.assertIsNone(v.focus)
+        self.assertEqual(v.text, "")
 
     def test_messages_returns_copy(self):
         b = _buf()

@@ -7,7 +7,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from lx.contracts import HistoryView, ImageRef, Msg
+from lx.contracts import HistoryView, ImageRef, Msg, Scope, SessionKey
+from lx.history.buffer import MemoryHistoryBuffer
 from lx.history.render import build_view, format_line
 
 TZ = timezone(timedelta(hours=8))
@@ -300,6 +301,28 @@ class TestBuildViewBudget(unittest.TestCase):
         self.assertEqual(v.older, [a, bot])
         self.assertEqual(v.new, [c])
         self.assertIn("--- 以下是你上次发言之后的新消息 ---", v.text.split("\n"))
+
+
+class TestBufferRenderWiring(unittest.TestCase):
+    def test_render_delegates_to_build_view(self):
+        key = SessionKey(Scope.GROUP, "g1", "plat")
+        b = MemoryHistoryBuffer(lambda k: cfg(), tz=TZ)
+        m1 = mk("m1", dt(13, "09:00"), text="第一")
+        m2 = mk("m2", dt(13, "09:05"), text="第二")
+        b.record(key, m1)
+        b.record(key, m2)
+        v = b.render(key, cfg())
+        expected = build_view([m1, m2], cfg(), TZ)
+        self.assertEqual(v.older, expected.older)
+        self.assertEqual(v.new, expected.new)
+        self.assertIs(v.focus, m2)
+        self.assertEqual(v.text, expected.text)
+        # 不修改缓冲
+        self.assertEqual([m.id for m in b.messages(key)], ["m1", "m2"])
+
+    def test_render_default_tz(self):
+        b = MemoryHistoryBuffer(lambda k: cfg())
+        self.assertEqual(b._tz, TZ)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,11 @@ from __future__ import annotations
 import bisect
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone, tzinfo
 from typing import Awaitable, Callable, Optional
 
 from ..contracts import Clock, HistoryView, Msg, ResolvedConfig, SessionKey
+from .render import build_view
 
 
 @dataclass
@@ -40,12 +42,14 @@ class MemoryHistoryBuffer:
         idle_ttl: float = 7200.0,
         puller: Optional[Callable[[SessionKey, int], Awaitable[list[Msg]]]] = None,
         log: Callable[[str], None] = lambda s: None,
+        tz: tzinfo = timezone(timedelta(hours=8)),
     ) -> None:
         self._cfg_provider = cfg_provider
         self._clock = clock
         self._idle_ttl = idle_ttl
         self._puller = puller
         self._log = log
+        self._tz = tz
         self._states: dict[SessionKey, _SessionState] = {}
 
     # -- 内部 --
@@ -166,7 +170,7 @@ class MemoryHistoryBuffer:
             return 0
 
     def render(self, key: SessionKey, cfg: ResolvedConfig) -> HistoryView:
-        raise NotImplementedError("A-2b")
+        return build_view(self.messages(key), cfg, self._tz)
 
     # -- 供 A-2b 和测试用的只读访问 --
     def messages(self, key: SessionKey) -> list[Msg]:
