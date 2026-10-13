@@ -47,7 +47,10 @@ from tools.ui.drive_frames import (  # noqa: E402
 ROOT = r"F:\Gemini\agent临时测试目录\claude\astrbot_rig_ui_browser"
 OUT_DIR = r"F:\Gemini\agent临时测试目录\claude\lingxi_plan\子代理_UI-6b"
 PLUGIN_NAME = base.PLUGIN_NAME
-PAGE_PATH = "/plugin-page/%s/lingxi" % PLUGIN_NAME
+# 宿主 WebUI 是 hash 路由（源码 index-*.js 里 history 是 hash 模式）：
+# 深链是 /#/plugin-page/<插件>/<页面>；直接开 /plugin-page/... 会被宿主当 404
+PAGE_ROUTE = "/plugin-page/%s/lingxi" % PLUGIN_NAME
+PAGE_URL_TAIL = "/#" + PAGE_ROUTE
 WEBUI_PORT = 16185
 WS_PORT = 16199
 SANDBOX = "allow-scripts allow-forms allow-downloads"
@@ -67,8 +70,39 @@ def _p(msg=""):
     print(_scrub(msg), flush=True)
 
 
+def _log_snippet(proc):
+    """失败时附的日志片段：只有隔离根日志里出了 Traceback 才附（INFO 行对页面问题没用）。"""
+    try:
+        with open(proc.log_path, "rb") as fh:
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        return "\n<读日志失败: %r>" % (e,)
+    lines = text.splitlines()
+    idx = [i for i, ln in enumerate(lines) if "Traceback" in ln]
+    if not idx:
+        return ""
+    lo = max(0, idx[0] - 5)
+    return "\n--- astrbot 日志（Traceback 附近）---\n" + "\n".join(lines[lo:lo + 40])
+
+
+# 诊断垫片（只在 --shim 模式、只注入测试用的 iframe 上下文，不改被测代码）：
+# 真宿主的 api:get / api:post 回传的是解包后的 data（r.data.data ?? r.data），
+# 而 pages/lingxi/app.js 的 apiCall 期望整个信封 {status:"ok", data}。
+# 垫片把 apiGet / apiPost 的返回包回信封，用来看“只修这一处之后后面还有没有别的问题”。
+_SHIM_JS = (
+    "(function(){var A=window.AstrBotPluginPage;"
+    "if(!A){return 'no-sdk';}if(A.__shim){return 'already';}"
+    "function wrap(n){var o=A[n];A[n]=function(e,p){"
+    "return o.call(A,e,p).then(function(d){return {status:'ok',data:d};});};}"
+    "wrap('apiGet');wrap('apiPost');A.__shim=true;return 'patched';})()"
+)
+
+
 class Ctx:
     def __init__(self):
+        self.shim = False
+        self.suffix = ""          # 垫片模式下结果名加后缀
+        self.shot_prefix = ""     # 垫片模式下截图名加前缀，不覆盖严格模式的图
         self.llm = None
         self.proc = None
         self.napcat = None
@@ -86,6 +120,7 @@ class Ctx:
         self.shots = {}           # 截图名 -> 统计
 
     def record(self, name, status, detail=""):
+        name = name + self.suffix
         self.results.append((name, status, detail))
         first = detail.splitlines()[0] if detail else ""
         _p("[%s] %s %s" % (status, name, first))
@@ -137,6 +172,21 @@ def _initial_config():
     return cfg
 
 
+def _clear_pwd_change_flag(cmd_config_path):
+    """隔离根自己的 cmd_config.json：关掉“强制改密码”标记。
+
+    模板里 dashboard.password_change_required 为真时，宿主登录后会弹一个
+    “修改账户”的模态框盖住所有页面（截图和真点击都会被它挡）。这是隔离根的夹具
+    设置，不是被测代码；改的只是本卡隔离根里的文件。
+    """
+    with open(cmd_config_path, encoding="utf-8-sig") as fh:
+        cfg = json.load(fh)
+    cfg.setdefault("dashboard", {})["password_change_required"] = False
+    with open(cmd_config_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+
 # -- 窗口里的常用动作 ------------------------------------------------------------
 
 async def _fctx(ctx):
@@ -150,8 +200,15 @@ async def _fctx(ctx):
 
 
 async def _shot(ctx, name):
+    name = ctx.shot_prefix + name
     path = os.path.join(OUT_DIR, name)
-    await ctx.fb.screenshot(path)
+    try:
+        await ctx.fb.screenshot(path)
+    except (TimeoutError, asyncio.TimeoutError):
+        # 探索时见过一次 captureScreenshot 卡 30 秒（之后同一页正常），重试一次
+        _p("screenshot 超时，重试一次")
+        await asyncio.sleep(1.0)
+        await ctx.fb.screenshot(path)
     st = png_stats(path)
     ctx.shots[name] = st
     _p("screenshot %s %dx%d unique_colors=%d mean_luma=%s"
@@ -269,29 +326,61 @@ async def _sc_B1(ctx):
         ctx.login_mode = "真登录页输入（CDP Input.insertText + 真鼠标点登录按钮）"
     finally:
         pw = ""
+    # 登录后宿主用前端路由跳走（hash 变化）；等一小会儿再记录落点
+    try:
+        await fb.wait_for("location.hash.indexOf('/auth/')<0&&location.hash!==''",
+                          timeout=8)
+    except TimeoutError:
+        pass
     where = await fb.eval(
-        "({path:location.pathname,body:document.body.innerText.slice(0,40).replace(/\\n/g,' / '),"
+        "({hash:location.hash,body:document.body.innerText.slice(0,40).replace(/\\n/g,' / '),"
         "changeHint:localStorage.getItem('change_pwd_hint')})")
-    ctx.note("登录后宿主落在 %s，页面开头=%r，change_pwd_hint=%r"
-             % (where["path"], where["body"], where["changeHint"]))
+    ctx.note("登录后宿主落在 hash=%r，页面开头=%r，change_pwd_hint=%r"
+             % (where["hash"], where["body"], where["changeHint"]))
 
 
 async def _sc_B2(ctx):
     """B2 打开插件页：导航到 history 模式路由，等 iframe 出现并加载完，截图。"""
     fb = ctx.fb
     ctx.err_mark = fb.mark()
-    await fb.goto(ctx.base + PAGE_PATH, wait_ms=300)
+    await fb.goto(ctx.base + PAGE_URL_TAIL, wait_ms=300)
     await fb.wait_for("!!document.querySelector('iframe')", timeout=30)
-    path = await fb.eval("location.pathname")
-    assert path == PAGE_PATH, "期望停在 %s，实际 %s（被路由守卫改走了？）" % (PAGE_PATH, path)
+    hash_ = await fb.eval("location.hash")
+    assert hash_ == "#" + PAGE_ROUTE, (
+        "期望停在 #%s，实际 %s（被路由守卫改走了？）" % (PAGE_ROUTE, hash_))
     sandbox = await fb.eval("document.querySelector('iframe').getAttribute('sandbox')")
     assert sandbox == SANDBOX, "iframe sandbox 期望 %r，实际 %r" % (SANDBOX, sandbox)
     ctx.fctx = await fb.wait_frame_context(timeout=30)
     f = ctx.fctx
     await fb.ctx_wait_for(f, "document.readyState==='complete'", timeout=30)
-    ctx.note("iframe 执行上下文：session=%s origin=%r frame=%s"
-             % (f["session"] or "页面会话（同进程）", f["origin"], safe_url(f["frame_url"])))
-    ctx.note("附着的子 target 会话：%r" % ({k or "-": v for k, v in fb.sessions.items()},))
+    ctx.note("iframe 执行上下文：%s，安全源=%r，frame=%s"
+             % ("独立进程（OOPIF，子 target 会话）" if f.get("oopif") else "与宿主同进程",
+                f["origin"], safe_url(f["frame_url"])))
+    # 沙箱证据：没有 same-origin 时 window.origin 是字符串 'null'
+    ctx.note("iframe 内 window.origin=%r" % (await fb.ctx_eval(f, "window.origin"),))
+    # 宿主侧边栏的“插件页面”分组里应有灵犀入口，链接指向同一路由
+    link = await fb.eval(
+        "(function(){var a=document.querySelector('a[href*=\"plugin-page/%s/lingxi\"]');"
+        "return a?a.getAttribute('href'):null;})()" % PLUGIN_NAME)
+    ctx.note("宿主侧边栏灵犀入口 href=%r" % (link,))
+    assert link == "#" + PAGE_ROUTE, (
+        "宿主侧边栏里期望有指向 #%s 的入口，实际 %r" % (PAGE_ROUTE, link))
+    if ctx.shim:
+        # 诊断垫片：包回信封，再真点“重试”让页面重新 boot
+        res = await fb.ctx_eval(f, _SHIM_JS)
+        ctx.note("垫片注入结果=%s；点击 #fatal 里的“重试”" % res)
+        try:
+            await fb.ctx_wait_for(
+                f, "!!document.querySelector('#fatal button')", timeout=10)
+            await fb.frame_click(f, "#fatal button")
+        except TimeoutError:
+            ctx.note("#fatal 里没有重试按钮（页面已经起来了？）")
+        try:
+            await fb.ctx_wait_for(
+                f, "!!(window.LX&&LX.state&&LX.state.config)", timeout=15)
+        except TimeoutError:
+            ctx.note("垫片 + 重试之后 15 秒内 LX.state.config 仍为空")
+        ctx.err_mark = fb.mark()
     # 等页面自己把标签画出来再截图（拿不到就照截，B3 会如实报）
     try:
         await fb.ctx_wait_for(
@@ -328,34 +417,57 @@ async def _sc_B3(ctx):
         "fatalHidden:fatal?fatal.classList.contains('hidden'):null,"
         "realSdk:!!(A&&typeof A.__setInitialContext==='function'),"
         "ctxPlugin:cx?cx.pluginName:null,ctxPage:cx?cx.pageName:null,"
-        "ctxDark:cx?cx.isDark:null,origin:location.origin,"
+        "ctxDark:cx?cx.isDark:null,origin:window.origin,"
         "hash:location.hash};})()"))
-    assert st["hasLX"], "iframe 里没有 window.LX"
-    assert st["meta"], "LX.state.meta 没加载（blocks 为空）"
-    assert st["cfg"], "LX.state.config 没加载（没有 revision）"
-    assert st["tabs"] == EXPECT_TABS, (
-        "标签栏期望 %r，实际 %r" % (EXPECT_TABS, st["tabs"]))
-    assert st["fatalText"] == "", (
-        "#fatal 期望为空，实际 %r（hidden=%r）" % (st["fatalText"], st["fatalHidden"]))
-    assert st["realSdk"], "AstrBotPluginPage 没有 __setInitialContext，不像真桥接 SDK"
-    assert st["ctxPlugin"] == PLUGIN_NAME and st["ctxPage"] == "lingxi", (
-        "宿主下发的上下文不对：pluginName=%r pageName=%r" % (st["ctxPlugin"], st["ctxPage"]))
-    ctx.note("iframe 内 location.origin=%r（沙箱无 same-origin 的预期值是 'null'）；"
-             "宿主下发 context：plugin=%s page=%s isDark=%r"
-             % (st["origin"], st["ctxPlugin"], st["ctxPage"], st["ctxDark"]))
+    # 逐项收集，不在第一处就停：交接里需要知道全部不符合的地方
+    bad = []
+    if not st["hasLX"]:
+        bad.append("iframe 里没有 window.LX")
+    if not st["meta"]:
+        bad.append("LX.state.meta 没加载（blocks 为空）")
+    if not st["cfg"]:
+        bad.append("LX.state.config 没加载（没有 revision）")
+    if st["tabs"] != EXPECT_TABS:
+        bad.append("标签栏期望 %r，实际 %r" % (EXPECT_TABS, st["tabs"]))
+    if st["fatalText"] != "":
+        bad.append("#fatal 期望为空，实际 %r（hidden=%r）"
+                   % (st["fatalText"], st["fatalHidden"]))
+    if not st["realSdk"]:
+        bad.append("AstrBotPluginPage 没有 __setInitialContext，不像真桥接 SDK")
+    if st["ctxPlugin"] != PLUGIN_NAME or st["ctxPage"] != "lingxi":
+        bad.append("宿主下发的上下文不对：pluginName=%r pageName=%r"
+                   % (st["ctxPlugin"], st["ctxPage"]))
+    ctx.note("B3 实测：hasLX=%r meta=%r config=%r 标签=%r 真SDK=%r "
+             "宿主 context：plugin=%s page=%s isDark=%r window.origin=%r"
+             % (st["hasLX"], st["meta"], st["cfg"], st["tabs"], st["realSdk"],
+                st["ctxPlugin"], st["ctxPage"], st["ctxDark"], st["origin"]))
     evs = fb.events_since(ctx.err_mark)
     if evs:
         lines = ["%s [%s] %s %s" % (e["where"], e["kind"], e["text"], e["at"])
                  for e in evs]
-        raise AssertionError(
-            "插件页加载以来共有 %d 条异常 / console.error / 网络失败：\n  %s"
-            % (len(evs), "\n  ".join(lines)))
+        bad.append("插件页加载以来共有 %d 条异常 / console.error / 网络失败：\n    %s"
+                   % (len(evs), "\n    ".join(lines)))
+    if bad:
+        raise AssertionError("%d 项不符合：\n  - %s" % (len(bad), "\n  - ".join(bad)))
+
+
+async def _need_loaded(ctx):
+    """B4..B6 的前置：页面真的把配置加载出来了；没有就明说，不去乱点。"""
+    f = await _fctx(ctx)
+    st = await ctx.fb.ctx_eval(
+        f, "({meta:!!(window.LX&&LX.state&&LX.state.meta),"
+        "cfg:!!(window.LX&&LX.state&&LX.state.config),"
+        "fatal:(document.getElementById('fatal')||{}).innerText||''})")
+    assert st["meta"] and st["cfg"], (
+        "前置不满足：页面没把配置加载出来（meta=%r config=%r，#fatal=%r），"
+        "没法在页面里操作；原因见 B3" % (st["meta"], st["cfg"], st["fatal"].strip()))
 
 
 async def _sc_B4(ctx):
     """B4 操作并保存：私聊 -> 改空闲基础间隔 -> 真点击保存 -> 清单 -> 确认 -> 落盘。"""
     fb = ctx.fb
     f = await _fctx(ctx)
+    await _need_loaded(ctx)
     await _show_tab(ctx, "private")
     info = await _field_info(ctx, "private", "idle.base_minutes")
     await _select_block(ctx, "private", info["block_index"], info["block_title"])
@@ -387,6 +499,7 @@ async def _sc_B5(ctx):
     """B5 三个文本框之一：私聊 -> 提示词块 -> 风格文本框 -> 保存 -> 落盘。"""
     fb = ctx.fb
     f = await _fctx(ctx)
+    await _need_loaded(ctx)
     await _show_tab(ctx, "private")
     info = await _field_info(ctx, "private", "prompt.style_text")
     await _select_block(ctx, "private", info["block_index"], info["block_title"])
@@ -406,6 +519,7 @@ async def _sc_B6(ctx):
     """B6 覆盖表标签：填合法 YAML -> “识别到 1 个会话” -> 保存 -> 落盘；关于 = 版本号。"""
     fb = ctx.fb
     f = await _fctx(ctx)
+    await _need_loaded(ctx)
     await _show_tab(ctx, "overrides")
     await fb.ctx_wait_for(f, "!!document.querySelector('#ov-text')", timeout=8)
     await fb.frame_fill(f, "#ov-text", OV_YAML)
@@ -444,62 +558,26 @@ async def _sc_B6(ctx):
     assert ver == EXPECT_VERSION, "关于页版本期望 %r，实际 %r" % (EXPECT_VERSION, ver)
 
 
-_JS_HEADER_CONTROLS = (
-    "(function(){var out=[];var bs=document.querySelectorAll("
-    "'header button, .v-app-bar button, .v-toolbar button');"
-    "for(var i=0;i<bs.length;i++){var b=bs[i];var r=b.getBoundingClientRect();"
-    "if(r.width<=0||r.height<=0){continue;}"
-    "var ic=b.querySelector('i,svg');"
-    "out.push({i:i,cls:ic?String(ic.className&&ic.className.baseVal!==undefined?"
-    "ic.className.baseVal:ic.className):'',aria:b.getAttribute('aria-label')||'',"
-    "title:b.getAttribute('title')||'',text:(b.innerText||'').trim().slice(0,20),"
-    "x:Math.round(r.x),y:Math.round(r.y)});}return out;})()"
-)
-
-
-async def _toggle_host_dark(ctx):
-    """切到宿主深色：优先点宿主头部的主题按钮（真点击），否则用系统深色模拟兜底。"""
-    fb = ctx.fb
-    ctrls = await fb.eval(_JS_HEADER_CONTROLS)
-    ctx.note("宿主头部可见按钮：%s" % json.dumps(
-        [{k: v for k, v in c.items() if k in ("cls", "aria", "title", "text")}
-         for c in ctrls], ensure_ascii=False))
-    pick = None
-    for c in ctrls:
-        blob = (c["cls"] + " " + c["aria"] + " " + c["title"]).lower()
-        if any(k in blob for k in ("weather-night", "white-balance-sunny",
-                                    "theme-light-dark", "brightness", "moon",
-                                    "sun")):
-            pick = c
-            break
-    if pick is not None:
-        # 给目标按钮打个临时标记，再用 CSS 选择器做真鼠标点击
-        await fb.eval(
-            "(function(){var bs=document.querySelectorAll("
-            "'header button, .v-app-bar button, .v-toolbar button');"
-            "bs[%d].setAttribute('data-ui6b-theme','1');})()" % pick["i"])
-        await fb.click('[data-ui6b-theme="1"]')
-        await asyncio.sleep(0.6)
-        return "点击宿主头部主题按钮（图标 %s）" % (pick["cls"] or pick["aria"])
-    return None
-
-
 async def _sc_B7(ctx):
     """B7 深色与手机：宿主深色下截图；窗口改 390x844 再截一张。"""
     fb = ctx.fb
     f = await _fctx(ctx)
-    light = ctx.shots.get("host_page_light.png")
+    light = ctx.shots.get(ctx.shot_prefix + "host_page_light.png")
     before = await fb.ctx_eval(f, "document.documentElement.getAttribute('data-theme')")
     ctx.note("深色前 iframe data-theme=%r" % (before,))
-    how = await _toggle_host_dark(ctx)
+    # 宿主的主题菜单（头部三点 -> 主题 -> 深色模式）是 hover 触发的嵌套菜单，
+    # 在无头 Edge 里真鼠标点它没能打开（试过几种点法，原因没查清）。
+    # 宿主主题默认“跟随系统”并监听 prefers-color-scheme（customizer / index 源码），
+    # 所以用模拟系统深色触发宿主自己的主题更新，再看它有没有把深色推给 iframe。
+    await fb.cmd("Emulation.setEmulatedMedia",
+                 features=[{"name": "prefers-color-scheme", "value": "dark"}])
+    how = "模拟系统深色（宿主跟随系统；头部主题菜单在无头里点不开，见交接）"
+    try:
+        await fb.ctx_wait_for(
+            f, "document.documentElement.getAttribute('data-theme')==='dark'", timeout=6)
+    except TimeoutError:
+        pass
     after = await fb.ctx_eval(f, "document.documentElement.getAttribute('data-theme')")
-    if after != "dark":
-        # 兜底：宿主默认跟系统，用模拟系统深色触发它自己的主题监听
-        await fb.cmd("Emulation.setEmulatedMedia",
-                     features=[{"name": "prefers-color-scheme", "value": "dark"}])
-        await asyncio.sleep(0.8)
-        after = await fb.ctx_eval(f, "document.documentElement.getAttribute('data-theme')")
-        how = (how + "；之后" if how else "") + "模拟系统深色（头部按钮没切成功或没找到）"
     ctx.note("B7 深色切换方式：%s；切换后 iframe data-theme=%r" % (how, after))
     assert after == "dark", (
         "宿主切深色后 iframe 的 data-theme 期望 'dark'，实际 %r（%s）" % (after, how))
@@ -561,11 +639,15 @@ SCENARIOS = [("B1", _sc_B1), ("B2", _sc_B2), ("B3", _sc_B3), ("B4", _sc_B4),
              ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7)]
 
 
-async def amain(only):
+async def amain(only, shim=False):
     os.makedirs(OUT_DIR, exist_ok=True)
     webui_port, ws_port = base._pick_ports()
     _p("ports: webui=%d ws=%d" % (webui_port, ws_port))
     ctx = Ctx()
+    if shim:
+        ctx.shim = True
+        ctx.suffix = " [shim]"
+        ctx.shot_prefix = "shim_"
     ctx.webui_port, ctx.ws_port = webui_port, ws_port
     ctx.base = "http://127.0.0.1:%d" % webui_port
     ctx.llm = FakeLLM(port=0)
@@ -581,6 +663,7 @@ async def amain(only):
                                 ws_port=ws_port, llm_base_url=ctx.llm.base_url,
                                 self_id=base.SELF_ID)
         ctx.password = base._set_dashboard_test_account(cmd_path)
+        _clear_pwd_change_flag(cmd_path)
         _p("dashboard test account ready")
         install_plugin(ROOT, pkg_dir, config=_initial_config())
         proc = AstrBotProc(ROOT, webui_port)
@@ -611,13 +694,11 @@ async def amain(only):
                 try:
                     await fn(ctx)
                 except AssertionError as e:
-                    ctx.record(name, "FAIL", str(e) + "\n--- astrbot log ---\n"
-                               + base._fail_log_snippet(proc))
+                    ctx.record(name, "FAIL", str(e) + _log_snippet(proc))
                     if name == "B1":
                         skip_reason = "前置 B1 登录失败"
                 except Exception as e:  # noqa: BLE001
-                    ctx.record(name, "ERROR", "%r\n--- astrbot log ---\n%s"
-                               % (e, base._fail_log_snippet(proc)))
+                    ctx.record(name, "ERROR", "%r%s" % (e, _log_snippet(proc)))
                     if name == "B1":
                         skip_reason = "前置 B1 登录出错"
                 else:
@@ -659,6 +740,8 @@ async def amain(only):
             _p("---- %s 详情 ----\n%s" % (name, detail))
     for p in (webui_port, ws_port):
         _p("port %d free: %s" % (p, base._port_free(p)))
+    _p("运行模式：%s" % ("诊断垫片 --shim（给 iframe 里的 apiGet/apiPost 包回信封）"
+                         if ctx.shim else "严格（不改任何被测行为）"))
     _p("登录方式：%s" % (ctx.login_mode or "（未完成）"))
     for name, st in ctx.shots.items():
         _p("截图 %s：%dx%d 颜色数>=%d 平均亮度 %s"
@@ -671,8 +754,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="UI-6b 配置面板真浏览器端到端验证")
     ap.add_argument("--only", nargs="*", default=[],
                     help="只跑指定场景名，如 --only B1 B2（B3 起依赖 B1/B2）")
+    ap.add_argument("--shim", action="store_true",
+                    help="诊断模式：给 iframe 里的 apiGet/apiPost 包回信封再点重试，"
+                         "看只修信封这一处之后还有没有别的问题（结果名带 [shim]）")
     args = ap.parse_args(argv)
-    return asyncio.run(amain(set(args.only)))
+    return asyncio.run(amain(set(args.only), shim=args.shim))
 
 
 if __name__ == "__main__":
