@@ -160,7 +160,46 @@ class NextReplySource:
     def on_message(
         self, key: SessionKey, msg: Any, cfg: ResolvedConfig, event: Any
     ) -> Optional[Trigger]:
-        return None
+        try:
+            if bool(getattr(msg, "is_bot", False)):
+                return None  # bot 自己的消息不记也不判
+            speaker = str(getattr(msg, "speaker_id", "") or "")
+            if not speaker:
+                return None
+            state = self._state_for(key)
+            try:
+                mark_now = self._clock()
+            except Exception as e:
+                self._log(f"[next_reply] 时钟失败 {key}: {e}")
+                mark_now = None
+            if mark_now is not None:
+                try:
+                    state.last_message_at_by_user[speaker] = float(mark_now)
+                except Exception as e:
+                    self._log(f"[next_reply] 记时间失败 {key}: {e}")
+            entries = self._entries.get(key)
+            if not entries:
+                return None
+            for entry in entries:
+                for group in entry.get("groups") or []:
+                    preds = group.get("predicates") or []
+                    if not preds:
+                        continue
+                    if any(p.get("seconds") is not None for p in preds):
+                        continue  # 带 time 型谓词的 group 归 due
+                    targets = {p.get("user_id") for p in preds}
+                    if speaker in targets or "all" in targets:
+                        self._entries.pop(key, None)
+                        return Trigger(
+                            source=Source.NEXT_REPLY,
+                            reason=entry["reason_tpl"],
+                            silent_ok=entry["silent_ok"],
+                            meta={"vars": {"note": group.get("natural", "")}},
+                        )
+            return None
+        except Exception as e:
+            self._log(f"[next_reply] on_message 异常 {key}: {e}")
+            return None
 
     # -- 计时型（定时驱动，不带 cfg） --
     def due(self, now: float) -> list[tuple[SessionKey, Trigger]]:

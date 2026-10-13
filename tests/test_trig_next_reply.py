@@ -122,5 +122,82 @@ class RegisterTest(unittest.TestCase):
         self.assertTrue(src.register(key, "id_alice1", cfg))
 
 
+class OnMessageTest(unittest.TestCase):
+    def test_id_hit_named_user(self):
+        src, _, cfg = make_source()
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        trig = src.on_message(key, make_msg("alice1"), cfg, None)
+        self.assertIsNotNone(trig)
+        self.assertEqual(trig.source, Source.NEXT_REPLY)
+        self.assertEqual(trig.reason, "TPL({{note}})")
+        self.assertTrue(trig.silent_ok)
+        self.assertIn("vars", trig.meta)
+        self.assertIn("note", trig.meta["vars"])
+        # 命中后 entry 清空
+        self.assertIsNone(src.on_message(key, make_msg("alice1"), cfg, None))
+        self.assertEqual(src.due(9_999_999.0), [])
+
+    def test_id_hit_all(self):
+        src, _, cfg = make_source()
+        key = make_key()
+        self.assertTrue(src.register(key, "id_all", cfg))
+        trig = src.on_message(key, make_msg("stranger9"), cfg, None)
+        self.assertIsNotNone(trig)
+
+    def test_id_miss_keeps_entry(self):
+        src, _, cfg = make_source()
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        self.assertIsNone(src.on_message(key, make_msg("bob2"), cfg, None))
+        # entry 保留：目标用户随后能命中
+        trig = src.on_message(key, make_msg("alice1"), cfg, None)
+        self.assertIsNotNone(trig)
+
+    def test_bot_message_ignored(self):
+        src, _, cfg = make_source()
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        self.assertIsNone(
+            src.on_message(key, make_msg("alice1", is_bot=True), cfg, None))
+        # bot 消息不记时间、不消耗 entry
+        state = src._states[key]
+        self.assertEqual(state.last_message_at_by_user, {})
+        trig = src.on_message(key, make_msg("alice1"), cfg, None)
+        self.assertIsNotNone(trig)
+
+    def test_nonbot_records_last_message_time(self):
+        src, clock, cfg = make_source(t=2_000_000.0)
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        clock.t = 2_000_060.0
+        self.assertIsNone(src.on_message(key, make_msg("bob2"), cfg, None))
+        self.assertEqual(
+            src._states[key].last_message_at_by_user.get("bob2"), 2_000_060.0)
+
+    def test_time_group_skipped_on_message(self):
+        src, _, cfg = make_source()
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1 & time_600s", cfg))
+        # 混合 group 含 time 谓词：消费点跳过
+        self.assertIsNone(src.on_message(key, make_msg("alice1"), cfg, None))
+        self.assertIn(key, src._entries)
+
+    def test_group_scope_hit(self):
+        src, _, cfg = make_source()
+        key = make_key("test-nextreply-g1", Scope.GROUP)
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        self.assertIsNotNone(
+            src.on_message(key, make_msg("alice1"), cfg, None))
+
+    def test_silent_ok_false_propagates(self):
+        src, _, cfg = make_source({"silence.next_reply": False})
+        key = make_key()
+        self.assertTrue(src.register(key, "id_alice1", cfg))
+        trig = src.on_message(key, make_msg("alice1"), cfg, None)
+        self.assertIsNotNone(trig)
+        self.assertFalse(trig.silent_ok)
+
+
 if __name__ == "__main__":
     unittest.main()
