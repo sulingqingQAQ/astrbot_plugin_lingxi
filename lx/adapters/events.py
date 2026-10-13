@@ -122,9 +122,35 @@ def _quote_id_of(chain: list) -> Optional[str]:
     return None
 
 
+def _addressed_of(event: Any, chain: list, self_id: str) -> Optional[str]:
+    if not _group_id_of(event):
+        return "private"
+    if not self_id:
+        return None
+    for comp in chain:
+        try:
+            if type(comp).__name__ == "At":
+                qq = getattr(comp, "qq", "")
+                if qq == "all" or str(qq or "") == "all":
+                    continue
+                if str(qq) == self_id:
+                    return "at"
+        except Exception:
+            continue
+    for comp in chain:
+        try:
+            if type(comp).__name__ == "Reply":
+                sender_id = getattr(comp, "sender_id", None)
+                if sender_id is not None and str(sender_id) == self_id:
+                    return "quote"
+        except Exception:
+            continue
+    return None
+
+
 def msg_of(event: Any, *, self_id: str = "",
            clock: Callable[[], float] = time.time) -> Msg:
-    """事件 → Msg（addressed 下一步再接，这里先填 None）。"""
+    """事件 → Msg（含 addressed；唤醒词由 DirectSource 再认，这里不判）。"""
     chain = _chain_of(event)
 
     speaker_id = _call(event, "get_sender_id", default="") or ""
@@ -157,5 +183,5 @@ def msg_of(event: Any, *, self_id: str = "",
         is_bot=(speaker_id == self_id and self_id != ""),
         quote_id=_quote_id_of(chain),
         images=_images_of(chain),
-        addressed=None,  # 步骤3 接 addressed
+        addressed=_addressed_of(event, chain, self_id),
     )

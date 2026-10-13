@@ -211,5 +211,105 @@ class TestMsgOfImagesQuote(unittest.TestCase):
         self.assertIsNone(msg_of(ev, self_id=SELF_ID).quote_id)
 
 
+# -- addressed ----------------------------------------------------------------
+
+class TestAddressed(unittest.TestCase):
+    def test_private(self) -> None:
+        ev = FakeEvent(umo="aiocqhttp:FriendMessage:10002", group_id="")
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).addressed, "private")
+
+    def test_at_self(self) -> None:
+        ev = _group_event(chain=[At(SELF_ID)])
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).addressed, "at")
+
+    def test_at_self_int_qq(self) -> None:
+        ev = _group_event(chain=[At(int(SELF_ID))])
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).addressed, "at")
+
+    def test_at_other_is_none(self) -> None:
+        ev = _group_event(chain=[At(OTHER_ID)])
+        self.assertIsNone(msg_of(ev, self_id=SELF_ID).addressed)
+
+    def test_at_all_is_none(self) -> None:
+        ev = _group_event(chain=[At("all")])
+        self.assertIsNone(msg_of(ev, self_id=SELF_ID).addressed)
+
+    def test_quote_self(self) -> None:
+        ev = _group_event(chain=[Reply(id="9", sender_id=SELF_ID)])
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).addressed, "quote")
+
+    def test_quote_other_is_none(self) -> None:
+        ev = _group_event(chain=[Reply(id="9", sender_id=OTHER_ID)])
+        self.assertIsNone(msg_of(ev, self_id=SELF_ID).addressed)
+
+    def test_at_wins_over_quote(self) -> None:
+        ev = _group_event(chain=[At(SELF_ID), Reply(id="9", sender_id=SELF_ID)])
+        self.assertEqual(msg_of(ev, self_id=SELF_ID).addressed, "at")
+
+    def test_plain_group_is_none(self) -> None:
+        self.assertIsNone(msg_of(_group_event(), self_id=SELF_ID).addressed)
+
+    def test_empty_self_id_skips_at_quote(self) -> None:
+        ev = _group_event(chain=[At(OTHER_ID)])
+        self.assertIsNone(msg_of(ev).addressed)
+        ev2 = _group_event(chain=[Reply(id="9", sender_id=OTHER_ID)])
+        self.assertIsNone(msg_of(ev2).addressed)
+
+
+# -- 容错 ---------------------------------------------------------------------
+
+class TestTolerance(unittest.TestCase):
+    def test_bare_object_does_not_raise(self) -> None:
+        msg = msg_of(SimpleNamespace(), clock=lambda: 1700000004.0)
+        self.assertEqual(msg.text, "")
+        self.assertEqual(msg.speaker_id, "")
+        self.assertEqual(msg.ts, 1700000004.0)
+        self.assertTrue(msg.id.startswith("nomid-"))
+        # 群号拿不到 = 按私聊算（卡里：get_group_id() 为空 → "private"）
+        self.assertEqual(msg.addressed, "private")
+
+    def test_exploding_event_does_not_raise(self) -> None:
+        class Boom:
+            @property
+            def unified_msg_origin(self):
+                raise RuntimeError("boom")
+
+            @property
+            def message_str(self):
+                raise RuntimeError("boom")
+
+            @property
+            def message_obj(self):
+                raise RuntimeError("boom")
+
+            def get_group_id(self):
+                raise RuntimeError("boom")
+
+            def get_sender_id(self):
+                raise RuntimeError("boom")
+
+            def get_sender_name(self):
+                raise RuntimeError("boom")
+
+            def get_messages(self):
+                raise RuntimeError("boom")
+
+            def get_extra(self, key=None, default=None):
+                raise RuntimeError("boom")
+
+        msg = msg_of(Boom(), clock=lambda: 1700000005.0)
+        self.assertEqual(msg.ts, 1700000005.0)
+        self.assertFalse(is_command(Boom()))
+        with self.assertRaises(ValueError):
+            session_key_of(Boom())
+
+    def test_chain_none_is_tolerated(self) -> None:
+        ev = _group_event()
+        ev.message_obj.message = None
+        msg = msg_of(ev, self_id=SELF_ID)
+        self.assertEqual(msg.images, [])
+        self.assertIsNone(msg.addressed)
+
+
 if __name__ == "__main__":
     unittest.main()
