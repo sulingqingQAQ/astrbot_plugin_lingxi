@@ -38,24 +38,18 @@ class KeysTest(unittest.TestCase):
         self.assertIs(keys.DEFAULTS["silence.followup"], True)
         self.assertIs(keys.DEFAULTS["silence.wake"], False)
 
-    def test_reason_templates_have_slots(self):
-        self.assertIn("{elapsed}", keys.DEFAULTS["idle.reason"])
-        self.assertIn("{note}", keys.DEFAULTS["wake.reason"])
-        self.assertIn("{when}", keys.DEFAULTS["wake.reason"])
+    def test_reason_templates_moved_to_spec(self):
+        # K-1：触发原因模板搬进规格表（prompt.reason_idle / prompt.reason_wake），
+        # keys.DEFAULTS 里不再留 idle.reason / wake.reason
+        self.assertNotIn("idle.reason", keys.DEFAULTS)
+        self.assertNotIn("wake.reason", keys.DEFAULTS)
+        self.assertNotIn("idle.reason", keys.HINTS)
+        self.assertNotIn("wake.reason", keys.HINTS)
 
     def test_every_key_has_hint(self):
         for path in keys.DEFAULTS:
             self.assertIn(path, keys.HINTS, f"缺 hint: {path}")
             self.assertTrue(keys.HINTS[path].strip(), f"空 hint: {path}")
-
-    def test_idle_reason_formats(self):
-        text = keys.DEFAULTS["idle.reason"].format(elapsed="30分钟")
-        self.assertIn("30分钟", text)
-
-    def test_wake_reason_formats(self):
-        text = keys.DEFAULTS["wake.reason"].format(note="开会", when="明天 8 点")
-        self.assertIn("开会", text)
-        self.assertIn("明天 8 点", text)
 
 
 if __name__ == "__main__":

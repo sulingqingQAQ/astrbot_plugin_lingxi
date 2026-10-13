@@ -27,10 +27,24 @@ import random
 import time
 from typing import Any, Callable, Optional
 
-from ..contracts import Outcome, ResolvedConfig, SessionKey, Source, StateStore, Trigger
+from ..config.spec import field as _spec_field
+from ..contracts import Outcome, ResolvedConfig, Scope, SessionKey, Source, StateStore, Trigger
 from .keys import DEFAULTS
 
 LogFn = Callable[[str], None]
+
+
+def _default_reason_idle() -> str:
+    """取不到配置时 prompt.reason_idle 的回退：规格表的私聊默认。"""
+    try:
+        f = _spec_field("prompt.reason_idle")
+        if f is not None:
+            default = f.default(Scope.PRIVATE)
+            if isinstance(default, str) and default:
+                return default
+    except Exception:
+        pass
+    return "安静一阵了，主动和对方说一句话。当前时间：{{current_time}}。"
 
 
 def _noop_log(_s: str) -> None:
@@ -38,7 +52,7 @@ def _noop_log(_s: str) -> None:
 
 
 def format_elapsed(seconds: float) -> str:
-    """可读时长（给 idle.reason 模板的 {elapsed} 用）。"""
+    """可读时长（给 prompt.reason_idle 模板 vars["elapsed"] 用）。"""
     total = max(0, int(seconds))
     if total < 60:
         return f"{total}秒"
@@ -215,11 +229,13 @@ class IdleSource:
             elapsed = now - anchor
             if elapsed >= wait:
                 try:
-                    template = self._cfg_value(cfg, "idle.reason")
-                    reason = template.format(elapsed=format_elapsed(elapsed))
+                    template = cfg.get("prompt.reason_idle", _default_reason_idle())
                 except Exception as e:
-                    self._log(f"[idle] 拼 reason 失败 {key}: {e}")
-                    reason = f"距离上一条消息已经过去 {format_elapsed(elapsed)}，一直没有人说话。"
+                    self._log(f"[idle] 读配置 prompt.reason_idle 失败，用默认 {key}: {e}")
+                    template = _default_reason_idle()
+                if not isinstance(template, str) or not template:
+                    template = _default_reason_idle()
+                reason = template  # 原样模板；渲染由提示词装配用 meta["vars"] 统一做
                 try:
                     silent_ok = bool(self._cfg_value(cfg, "silence.idle"))
                 except Exception:
@@ -228,7 +244,9 @@ class IdleSource:
                     source=Source.IDLE,
                     reason=reason,
                     silent_ok=silent_ok,
-                    meta={"elapsed_seconds": max(0, int(elapsed)), "retry": retry},
+                    meta={"elapsed_seconds": max(0, int(elapsed)), "retry": retry,
+                          "vars": {"elapsed": format_elapsed(elapsed),
+                                   "unanswered_count": retry}},
                 )))
         return out
 

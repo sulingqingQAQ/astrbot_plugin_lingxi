@@ -176,6 +176,12 @@
               "step": 10
             }
           },
+          "stop_at_max": {
+            "description": "到上限后彻底停",
+            "type": "bool",
+            "default": false,
+            "hint": "开后等待时长到上限就彻底停（chatluna 行为）；关则到上限后继续按上限间隔触发、靠闸门的“最大未回复次数”来停（旧 lingxi 行为）。"
+          },
           "seed_on_start": {
             "description": "启动即计时",
             "type": "bool",
@@ -274,6 +280,18 @@
               "max": 200,
               "step": 1
             }
+          },
+          "retry_seconds": {
+            "description": "没发出去隔多久重试（秒）",
+            "type": "int",
+            "default": 60,
+            "hint": "唤醒任务到点但没发出去时，隔多少秒后重试。调大：两次尝试之间等得更久；调小：更快补发。0 = 不等待直接重试。"
+          },
+          "max_attempts": {
+            "description": "最多尝试投递几次",
+            "type": "int",
+            "default": 3,
+            "hint": "一次唤醒任务最多尝试投递几次。超过这个次数还没发出去，就当这次已经完成：一次性任务直接删除，重复任务排到下一次。调大更执着，调小更容易放弃。"
           }
         }
       },
@@ -796,6 +814,24 @@
             "condition": {
               "paragraph_split": true
             }
+          },
+          "strip_period": {
+            "description": "去掉末尾句号",
+            "type": "bool",
+            "default": true,
+            "hint": "开启后，每条消息末尾的句号会被去掉（只去最后一个）。真人聊天几乎不用句号结尾，开着更像人。关掉则保留模型写的标点。"
+          },
+          "strip_markdown": {
+            "description": "去掉 Markdown 符号",
+            "type": "bool",
+            "default": true,
+            "hint": "开启后，每条消息里的 **加粗、反引号、标题井号这类 Markdown 符号会被去掉（代码块里的不动）。聊天框里直接显示这些符号会很出戏，开着更像人。"
+          },
+          "max_chars": {
+            "description": "单条消息最多多少字",
+            "type": "int",
+            "default": 0,
+            "hint": "单条消息最多多少字。超过后按句子重新切成多条发出，避免一条长消息刷屏。0 = 不限字数。调小切得更碎、更像连发，调大允许更长的单条。"
           }
         }
       },
@@ -1153,6 +1189,12 @@
               "step": 10
             }
           },
+          "stop_at_max": {
+            "description": "到上限后彻底停",
+            "type": "bool",
+            "default": false,
+            "hint": "开后等待时长到上限就彻底停（chatluna 行为）；关则到上限后继续按上限间隔触发、靠闸门的“最大未回复次数”来停（旧 lingxi 行为）。"
+          },
           "seed_on_start": {
             "description": "启动即计时",
             "type": "bool",
@@ -1251,6 +1293,18 @@
               "max": 200,
               "step": 1
             }
+          },
+          "retry_seconds": {
+            "description": "没发出去隔多久重试（秒）",
+            "type": "int",
+            "default": 60,
+            "hint": "唤醒任务到点但没发出去时，隔多少秒后重试。调大：两次尝试之间等得更久；调小：更快补发。0 = 不等待直接重试。"
+          },
+          "max_attempts": {
+            "description": "最多尝试投递几次",
+            "type": "int",
+            "default": 3,
+            "hint": "一次唤醒任务最多尝试投递几次。超过这个次数还没发出去，就当这次已经完成：一次性任务直接删除，重复任务排到下一次。调大更执着，调小更容易放弃。"
           }
         }
       },
@@ -1791,6 +1845,24 @@
             "condition": {
               "paragraph_split": true
             }
+          },
+          "strip_period": {
+            "description": "去掉末尾句号",
+            "type": "bool",
+            "default": true,
+            "hint": "开启后，每条消息末尾的句号会被去掉（只去最后一个）。真人聊天几乎不用句号结尾，开着更像人。关掉则保留模型写的标点。"
+          },
+          "strip_markdown": {
+            "description": "去掉 Markdown 符号",
+            "type": "bool",
+            "default": true,
+            "hint": "开启后，每条消息里的 **加粗、反引号、标题井号这类 Markdown 符号会被去掉（代码块里的不动）。聊天框里直接显示这些符号会很出戏，开着更像人。"
+          },
+          "max_chars": {
+            "description": "单条消息最多多少字",
+            "type": "int",
+            "default": 0,
+            "hint": "单条消息最多多少字。超过后按句子重新切成多条发出，避免一条长消息刷屏。0 = 不限字数。调小切得更碎、更像连发，调大允许更长的单条。"
           },
           "is_at": {
             "description": "回复时 @ 触发者",

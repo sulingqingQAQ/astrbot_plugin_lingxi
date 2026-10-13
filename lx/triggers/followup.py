@@ -8,8 +8,10 @@
 - 用户发言 → 取消待发（✔ 旧 :160-165、message_events.py:43-48）。
 - 追发送达 → chain+1（✔ 旧 :245-250）；用户发言后旧还把 chain 归零
   （message_events.py:51-52），新设计的归零点在正常回复后（卡要求，差异见交接）。
-- 模板渲染：显式替换、未知占位符保留（✔ 旧 :293-302）；``{time_since_last_chat}``
-  用旧 followup 口径（秒/分钟/小时，✔ 旧 :283-289），与 idle 的 ``format_elapsed`` 不同。
+- 模板：取 ``followup.templates`` 里选中的那条，原样放 ``Trigger.reason``，
+  渲染变量放 ``meta["vars"]``（``{now}`` 用旧 followup 口径，``{time_since_last_chat}``
+  用旧 followup 口径（秒/分钟/小时，✔ 旧 :283-289），与 idle 的 ``format_elapsed`` 不同；
+  实际替换由 ``lx.prompt.template.render_template`` 在装配时做，未知占位符保留）。
 - ``{now}``：旧用插件时区（✔ 旧 :275）；新签名无 tz 参数，用本机本地时间（差异见交接）。
 
 语义（任务卡）：
@@ -185,8 +187,9 @@ class FollowupSource:
         last_ai = outcome.text or ""
         self._pending[key] = _Pending(now + delay, chain, last_ai)
 
-    def _render(self, template: str, key: SessionKey, now: float,
-                last_ai: str) -> str:
+    def _vars_for(self, key: SessionKey, now: float,
+                  last_ai: str) -> dict[str, str]:
+        """触发原因模板的渲染变量（原样模板 + 这组 vars 由提示词装配统一渲染）。"""
         try:
             last_user = self._last_user(key) or ""
         except Exception as e:
@@ -198,16 +201,13 @@ class FollowupSource:
             last_ts = 0.0
         since = _format_since_last_chat(now - last_ts) if last_ts > 0 else "未知"
         now_str = datetime.fromtimestamp(now).strftime("%Y年%m月%d日 %H:%M")
-        prompt = template
-        for placeholder, value in (
-            ("{now}", now_str),
-            ("{last_user}", last_user),
-            ("{last_ai}", last_ai),
-            ("{time_since_last_chat}", since),
-            ("{umo}", str(key)),
-        ):
-            prompt = prompt.replace(placeholder, value)
-        return prompt
+        return {
+            "now": now_str,
+            "last_user": last_user,
+            "last_ai": last_ai,
+            "time_since_last_chat": since,
+            "umo": str(key),
+        }
 
     def due(self, now: float) -> list[tuple[SessionKey, Trigger]]:
         out: list[tuple[SessionKey, Trigger]] = []
@@ -230,7 +230,7 @@ class FollowupSource:
             except Exception as e:
                 self._log(f"[followup] 选模板失败 {key}: {e}")
                 template = templates[0]
-            reason = self._render(template, key, now, pend.last_ai)
+            reason = template  # 原样模板；渲染由提示词装配用 meta["vars"] 统一做
             try:
                 silent_ok = bool(self._cfg_value(cfg, "silence.followup"))
             except Exception:
@@ -239,6 +239,7 @@ class FollowupSource:
                 source=Source.FOLLOWUP,
                 reason=reason,
                 silent_ok=silent_ok,
-                meta={"chain": pend.chain},
+                meta={"chain": pend.chain,
+                      "vars": self._vars_for(key, now, pend.last_ai)},
             )))
         return out

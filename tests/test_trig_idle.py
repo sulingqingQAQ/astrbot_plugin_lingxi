@@ -9,6 +9,7 @@ import random
 import unittest
 
 from lx.contracts import Outcome, Scope, SessionKey, SessionState, Source
+from lx.prompt.template import render_template
 from lx.triggers import idle
 from lx.triggers.idle import IdleSource, format_elapsed
 
@@ -32,7 +33,7 @@ BASE_CFG = {
     "idle.jitter_percent": 0,
     "idle.max_minutes": 600,
     "idle.stop_at_max": False,
-    "idle.reason": "距离上一条消息已经过去 {elapsed}，一直没有人说话。",
+    "prompt.reason_idle": "距离上一条消息已经过去 {elapsed}，一直没有人说话。",
     "silence.idle": True,
 }
 
@@ -80,10 +81,32 @@ class IdleDueTest(unittest.TestCase):
         got_key, trig = got[0]
         self.assertEqual(got_key, key)
         self.assertEqual(trig.source, Source.IDLE)
-        self.assertIn("30分钟", trig.reason)
+        # K-1：reason 是原样模板，变量在 meta["vars"] 里
+        self.assertEqual(trig.reason, BASE_CFG["prompt.reason_idle"])
+        self.assertEqual(trig.meta["vars"]["elapsed"], "30分钟")
+        self.assertEqual(trig.meta["vars"]["unanswered_count"], 0)
         self.assertIs(trig.silent_ok, True)
         self.assertEqual(trig.meta["retry"], 0)
         self.assertEqual(trig.meta["elapsed_seconds"], 30 * 60)
+
+    def test_rendered_reason_matches_old_behavior(self):
+        # K-1 行为等价：原样模板 + vars 经 render_template 渲染 = 以前的直接渲染结果
+        src, _, clock = make_source()
+        key = make_key()
+        src.on_user_message(key)
+        _, trig = src.due(clock() + 30 * 60)[0]
+        rendered = render_template(trig.reason, trig.meta["vars"])
+        self.assertIn("30分钟", rendered)
+        self.assertEqual(rendered, BASE_CFG["prompt.reason_idle"].format(elapsed="30分钟"))
+
+    def test_vars_carry_unanswered_count(self):
+        src, store, clock = make_source()
+        key = make_key()
+        src.on_user_message(key)
+        store.get(key).unanswered = 2
+        _, trig = src.due(clock() + 2 * 60 * 60)[0]
+        self.assertEqual(trig.meta["vars"]["unanswered_count"], 2)
+        self.assertEqual(trig.reason, BASE_CFG["prompt.reason_idle"])
 
     def test_due_does_not_consume(self):
         src, _, clock = make_source()
