@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -198,3 +199,52 @@ class HarnessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealServiceHarnessTest(unittest.TestCase):
+    """默认（真 ConfigService + 生产适配层 LingxiWebApi）路径：七个接口都能通。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lx_ui_real_")
+        _write(os.path.join(self.tmp, "index.html"), "<html></html>")
+        self.h = Harness(self.tmp)
+        self.base = self.h.start() + "/astrbot_plugin_lingxi/api/"
+
+    def tearDown(self):
+        self.h.stop()
+
+    def test_default_service_is_real_and_goes_through_adapter(self):
+        self.assertIsNotNone(self.h.api)
+        self.assertEqual(type(self.h.service).__name__, "ConfigService")
+
+    def test_meta_config_save_roundtrip(self):
+        _, _, meta = _get_json(self.base + "meta")
+        self.assertEqual(meta["status"], "ok")
+        self.assertIn("prompt", [b["key"] for b in meta["data"]["blocks"]["group"]])
+        _, _, cfg = _get_json(self.base + "config")
+        rev = cfg["data"]["revision"]
+        _, saved = _post_json(self.base + "config/save", {
+            "revision": rev,
+            "changes": [{"scope": "group", "path": "prompt.style_text", "value": "合成风格"}]})
+        self.assertTrue(saved["data"]["saved"])
+        _, _, cfg2 = _get_json(self.base + "config")
+        self.assertEqual(cfg2["data"]["group"]["prompt"]["style_text"], "合成风格")
+        self.assertNotEqual(cfg2["data"]["revision"], rev)
+
+    def test_explain_choices_about_check(self):
+        _, _, ex = _get_json(self.base + "explain?scope=group&id=123456")
+        self.assertEqual(ex["status"], "ok")
+        self.assertIn("idle.base_minutes", ex["data"]["values"])
+        _, _, ch = _get_json(self.base + "choices")
+        self.assertTrue(ch["data"]["providers"])
+        _, _, ab = _get_json(self.base + "about")
+        self.assertEqual(ab["data"]["schema_version"], 2)
+        _, chk = _post_json(self.base + "overrides/check", {"text": "group:1:\n  idle:\n    enabled: true\n"})
+        self.assertTrue(chk["data"]["ok"])
+
+    def test_unknown_route_404(self):
+        try:
+            urllib.request.urlopen(self.base + "nope", timeout=10)
+            self.fail("应该 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)

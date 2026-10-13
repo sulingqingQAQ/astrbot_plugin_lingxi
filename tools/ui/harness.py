@@ -18,6 +18,7 @@ service 缺省：先试真服务（lx.webui.service.ConfigService + schema_expor
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import json
 import threading
@@ -126,13 +127,31 @@ def _default_service():
     except Exception:
         from .stub_service import StubService
         return StubService()
-    # 真服务存在时：空内存配置，起点是规格默认值（此分支目前走不到，
-    # lx/webui 由别的卡在做；保留以便真服务落地后自动切换）。
+    # 真服务：空内存配置，起点是规格默认值。
     from .stub_service import PLUGIN_VERSION
     from lx.webui.service import ConfigService
     conf = {}
     return ConfigService(conf, save=lambda: None, reload=lambda c: [],
                          plugin_version=PLUGIN_VERSION)
+
+
+def _make_api(service):
+    """真 ConfigService → 用生产用的 LingxiWebApi 适配层分发（夹具测的就是生产代码）；
+    StubService（自带 meta / choices 等方法）→ None，走老的按方法名分发。"""
+    if hasattr(service, "meta"):
+        return None
+    try:
+        from lx.adapters.webapi import LingxiWebApi
+        from lx.webui.schema_export import build_meta
+        from lx.config import spec as _spec
+    except Exception:
+        return None
+    from .stub_service import PLUGIN_VERSION
+    return LingxiWebApi(
+        service,
+        lambda: build_meta(PLUGIN_VERSION, _spec.SCHEMA_VERSION),
+        choices_provider=lambda: {"providers": ["demo-provider-1", "demo-provider-2"],
+                                  "personas": ["苏灵卿"]})
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -194,10 +213,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/__harness/state":
             with self._harness.lock:
-                try:
-                    data = self._harness.service.state()
-                except AttributeError:
-                    data = self._harness.service.config()
+                svc = self._harness.service
+                if hasattr(svc, "state"):
+                    data = svc.state()
+                elif hasattr(svc, "get_config"):
+                    data = svc.get_config()
+                else:
+                    data = svc.config()
             self._send_json(200, {"status": "ok", "data": data})
             return
         self._serve_static(path)
@@ -213,6 +235,10 @@ class _Handler(BaseHTTPRequestHandler):
                 reset = getattr(self._harness.service, "reset", None)
                 if callable(reset):
                     reset()
+                else:
+                    conf = getattr(self._harness.service, "_conf", None)
+                    if hasattr(conf, "clear"):
+                        conf.clear()
             self._send_json(200, {"status": "ok", "data": {"ok": True}})
             return
         if path.startswith(API_PREFIX):
@@ -246,6 +272,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- API 分发 --
     def _dispatch_api(self, route, payload, method):
+        api = self._harness.api
+        if api is not None:
+            handler = None
+            for r, h, _methods in api.routes():
+                if r == "api/" + route:
+                    handler = h
+                    break
+            if handler is None:
+                self._send_json(404, {"status": "error", "message": "没有这个接口：%s" % route})
+                return
+            args = payload if method == "GET" else {}
+            body = payload if method == "POST" else {}
+            with self._harness.lock:
+                try:
+                    res = asyncio.run(handler(args, body))
+                except Exception as e:  # 适配层本不该抛，兜底
+                    res = {"status": "error", "message": "%s：%s" % (type(e).__name__, e)}
+            self._send_json(200, res)
+            return
         names = _ROUTE_METHODS.get(route)
         if not names:
             self._send_json(404, {"status": "error", "message": "没有这个接口：%s" % route})
@@ -279,6 +324,7 @@ class Harness:
     def __init__(self, page_dir, service=None, port=0, host="127.0.0.1"):
         self.page_dir = Path(page_dir).resolve()
         self.service = service if service is not None else _default_service()
+        self.api = _make_api(self.service)
         self.host = host
         self.port = port
         self.lock = threading.Lock()
