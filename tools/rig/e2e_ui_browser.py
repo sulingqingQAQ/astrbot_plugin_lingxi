@@ -429,7 +429,9 @@ async def _sc_B3(ctx):
         bad.append("LX.state.config 没加载（没有 revision）")
     if st["tabs"] != EXPECT_TABS:
         bad.append("标签栏期望 %r，实际 %r" % (EXPECT_TABS, st["tabs"]))
-    if st["fatalText"] != "":
+    # 严格模式：#fatal 文本必须为空。只有 --shim 诊断模式放过“已收起但残留旧文字”：
+    # 那是我们为了绕开信封问题点了“重试”，页面 showFatal 收起时不清文字造成的
+    if st["fatalText"] != "" and not (ctx.shim and st["fatalHidden"]):
         bad.append("#fatal 期望为空，实际 %r（hidden=%r）"
                    % (st["fatalText"], st["fatalHidden"]))
     if not st["realSdk"]:
@@ -537,7 +539,7 @@ async def _sc_B6(ctx):
     await fb.ctx_wait_for(
         f, "document.querySelector('#dirty-count').innerText.indexOf('1 项未保存')>=0",
         timeout=8)
-    await _save_via_ui(ctx, "session_overrides")
+    await _save_via_ui(ctx, "分会话覆盖表已修改")
     want_has = ("group:%s:" % OV_GROUP, "base_minutes: 12")
     deadline = asyncio.get_running_loop().time() + 8
     while True:
@@ -613,6 +615,38 @@ async def _sc_B7(ctx):
         % (m["sw"], m["iw"]))
 
 
+# 宿主 WebUI 一打开就会联网做“检查更新”，没外网时它自己的日志里会带 Traceback。
+# 这类记录和灵犀无关，且随本机网络状态时有时无（UI-6a 没开浏览器所以没触发过）。
+# 只按“记录头里的模块名 + 文本里是外网域名且不提灵犀”窄匹配，其余一律算数。
+_HOST_NET_MODULES = ("core.zip_updater", "services.update_service", "api.updates",
+                     "t2i.network_strategy", "utils.llm_metadata")
+_HOST_NET_DOMAINS = ("api.soulter.top", "models.dev")
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_REC_HEAD = re.compile(r"^\[\d\d:\d\d:\d\d\.\d+\]")
+
+
+def _split_tracebacks(log_text):
+    """把日志切成记录，返回 (灵犀/未知来源的带 Traceback 记录头, 宿主外网失败记录头)。"""
+    records = []
+    for line in _ANSI.sub("", log_text).splitlines():
+        if _REC_HEAD.match(line) or not records:
+            records.append([line])
+        else:
+            records[-1].append(line)
+    own, host_net = [], []
+    for rec in records:
+        blob = "\n".join(rec)
+        if "Traceback" not in blob:
+            continue
+        head = rec[0]
+        is_host_net = (
+            any(m in head for m in _HOST_NET_MODULES)
+            and any(d in blob for d in _HOST_NET_DOMAINS)
+            and "astrbot_plugin_lingxi" not in blob and "lingxi" not in head)
+        (host_net if is_host_net else own).append(head)
+    return own, host_net
+
+
 def _post_B8(ctx, webui_port, ws_port):
     """B8 收尾：进程已停、端口已释放、日志无 Traceback、没有残留 Edge。"""
     assert base._port_free(webui_port), "收尾后 webui 端口 %d 还被占" % webui_port
@@ -624,8 +658,14 @@ def _post_B8(ctx, webui_port, ws_port):
             text = fh.read().decode("utf-8", errors="replace")
     except OSError as e:
         raise AssertionError("读不到隔离根日志 %s：%r" % (proc.log_path, e))
-    assert "Traceback" not in text, (
-        "隔离根日志期望无 Traceback，实际 %d 处" % text.count("Traceback"))
+    own, host_net = _split_tracebacks(text)
+    if host_net:
+        ctx.note("B8：日志里有 %d 条 Traceback 记录属于宿主 WebUI 的外网请求失败"
+                 "（更新检查 / 模型元数据，本机当时连不上外网），与灵犀无关，已单列：%s"
+                 % (len(host_net), " | ".join(h[:110] for h in host_net)))
+    assert not own, (
+        "隔离根日志期望无 Traceback，实际 %d 条记录带 Traceback：%s"
+        % (len(own), " | ".join(h[:160] for h in own)))
     left = leftover_edge_pids()
     assert not left, "还有带本卡 profile 前缀（%s）的 Edge 进程：%r" % (PROFILE_PREFIX, left)
     out = subprocess.run(["tasklist", "/FI", "PID eq %d" % ctx.astrbot_pid],

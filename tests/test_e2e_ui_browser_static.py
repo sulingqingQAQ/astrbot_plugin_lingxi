@@ -153,5 +153,81 @@ class E2EUIBrowserStaticTest(unittest.TestCase):
             self.fail("出现了未知的写文件调用：%r" % src[m.start():m.end() + 80])
 
 
+class HelperFunctionTest(unittest.TestCase):
+    """脚本里两个纯函数的行为（不起任何进程）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib
+        import sys
+        if REPO_ROOT not in sys.path:
+            sys.path.insert(0, REPO_ROOT)
+        cls.eb = importlib.import_module("tools.rig.e2e_ui_browser")
+        cls.df = importlib.import_module("tools.ui.drive_frames")
+
+    def test_split_tracebacks_separates_host_network_noise(self):
+        host = ("[02:40:59.653] [Core] [ERRO] [v4.28.1] [api.updates:61]: "
+                "Dashboard update operation failed: x\n"
+                "Traceback (most recent call last):\n"
+                "  File \"zip_updater.py\"\n"
+                "    response = await client.get('https://api.soulter.top/releases')\n")
+        own = ("[02:41:00.000] [astrbot_plugin_lingxi] [ERRO] [x:1]: boom\n"
+               "Traceback (most recent call last):\n"
+               "  File \"lx/adapters/webapi.py\", line 1\n")
+        plain = "[02:41:01.000] [Core] [INFO] [a:1]: ok\n"
+        mine, noise = self.eb._split_tracebacks(host + own + plain)
+        self.assertEqual(len(mine), 1)
+        self.assertIn("astrbot_plugin_lingxi", mine[0])
+        self.assertEqual(len(noise), 1)
+        self.assertIn("api.updates", noise[0])
+
+    def test_split_tracebacks_unknown_traceback_counts(self):
+        # 模块名对但不是外网域名：不能放过
+        text = ("[02:40:59.653] [Core] [ERRO] [api.updates:61]: failed\n"
+                "Traceback (most recent call last):\n  File \"a.py\"\nKeyError: 'x'\n")
+        mine, noise = self.eb._split_tracebacks(text)
+        self.assertEqual((len(mine), len(noise)), (1, 0))
+
+    def test_scrub_hides_token_query(self):
+        s = self.eb._scrub("GET /x?token=abc.def.ghi&theme=dark")
+        self.assertNotIn("abc.def.ghi", s)
+        self.assertIn("token=<已隐藏>", s)
+
+    def test_safe_url_drops_query_and_fragment(self):
+        self.assertEqual(self.df.safe_url("http://h/p/a?token=zzz#x"), "http://h/p/a")
+        self.assertEqual(self.df.safe_url(None), "")
+
+    def test_png_stats_uniform_vs_two_colors(self):
+        import struct
+        import tempfile
+        import zlib
+
+        def png(w, h, pix):
+            raw = b"".join(b"\x00" + b"".join(bytes(pix(x, y)) for x in range(w))
+                           for y in range(h))
+
+            def chunk(kind, body):
+                c = struct.pack(">I", len(body)) + kind + body
+                return c + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+            return (b"\x89PNG\r\n\x1a\n"
+                    + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+        with tempfile.TemporaryDirectory() as d:
+            a = os.path.join(d, "a.png")
+            b = os.path.join(d, "b.png")
+            with open(a, "wb") as f:
+                f.write(png(8, 6, lambda x, y: (255, 255, 255)))
+            with open(b, "wb") as f:
+                f.write(png(8, 6, lambda x, y: (0, 0, 0) if x < 4 else (255, 255, 255)))
+            sa = self.df.png_stats(a)
+            sb = self.df.png_stats(b)
+        self.assertEqual(sa["unique_colors"], 1)
+        self.assertEqual(sa["mean_luma"], 255.0)
+        self.assertEqual(sb["unique_colors"], 2)
+        self.assertTrue(0 < sb["mean_luma"] < 255)
+
+
 if __name__ == "__main__":
     unittest.main()
