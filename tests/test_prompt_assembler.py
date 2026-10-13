@@ -269,6 +269,41 @@ class SystemTailFilesTest(unittest.TestCase):
             self.assertIn("[名词表]\n合成名词解释", out)
             self.assertIn("[成员档案]\n合成成员档案", out)
 
+    def test_text_boxes_alone(self):
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。")
+        out = asm.build(_key(), trig, _hist(), {},
+                        {"prompt.style_text": "  合成风格文本  ",
+                         "prompt.glossary_text": "合成词 = 合成解释",
+                         "prompt.members_text": "合成成员甲：爱聊合成话题"}).system_tail
+        self.assertIn("合成风格文本", out)
+        self.assertNotIn("  合成风格文本", out)  # 首尾空白被去掉
+        self.assertIn("[名词表]\n合成词 = 合成解释", out)
+        self.assertIn("[成员档案]\n合成成员甲：爱聊合成话题", out)
+
+    def test_text_box_after_file_with_blank_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            g = os.path.join(d, "gloss.txt")
+            with open(g, "w", encoding="utf-8") as f:
+                f.write("文件里的合成名词")
+            asm = _asm()
+            trig = _trig(reason="事由{{current_time}}。")
+            out = asm.build(_key(), trig, _hist(), {},
+                            {"prompt.glossary_file": g,
+                             "prompt.glossary_text": "文本框里的合成名词"}).system_tail
+            self.assertIn("[名词表]\n文件里的合成名词\n\n文本框里的合成名词", out)
+
+    def test_blank_or_non_string_text_box_adds_nothing(self):
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。")
+        out = asm.build(_key(), trig, _hist(), {},
+                        {"prompt.style_text": "   \n ",
+                         "prompt.glossary_text": None,
+                         "prompt.members_text": 123}).system_tail
+        self.assertNotIn("[名词表]", out)
+        self.assertNotIn("[成员档案]", out)
+        self.assertNotIn("\n\n\n", out)
+
     def test_no_empty_blocks_no_stray_separators(self):
         asm = _asm()
         trig = _trig(reason="事由{{current_time}}。")

@@ -551,10 +551,22 @@ _PROMPT = Block(
               "自约触发的触发原因", "模型自己约好的开口时机到了时的触发原因。可用占位符：{{current_time}} 当前时间、{{note}} 当时约定的内容。", new_private=True, new_group=True),
         _both("prompt.reason_wake", "text", "这是你之前用定时唤醒工具给自己设的任务，现在到点了：{{note}}。当前时间：{{current_time}}。请按约定去做。",
               "定时唤醒的触发原因", "定时唤醒任务到点时的触发原因。可用占位符：{{current_time}} 当前时间、{{note}} 任务备注。", new_private=True, new_group=True),
+        _both("prompt.style_text", "text", "", "说话风格（直接填写）",
+              "直接在这里写你希望 bot 怎么说话：口癖、常用语气词、什么话不说……内容会追加到系统提示词末尾。"
+              "留空 = 不加。写得越长，每次请求越费 token，也会挤占聊天记录的空间，建议精简。"
+              "和下面的“风格文件路径”可以同时用，同时用时先放文件内容、再放这里的内容。", new_private=True, new_group=True),
         _both("prompt.style_file", "string", "", "风格文件路径",
               "一个文本文件的路径，内容会追加到系统提示词末尾，改了文件立即生效（热加载）。留空 = 不加。", new_private=True, new_group=True),
+        _both("prompt.glossary_text", "text", "", "名词表（直接填写）",
+              "直接在这里写群里的梗、黑话、专有名词，每行一条，如“难绷 = 无语、绷不住”。内容会跟着提示词一起给模型，带上“名词表”标题。"
+              "留空 = 不加。写太多会费 token，只写 bot 容易接不上的。"
+              "和下面的“名词表文件路径”可以同时用，同时用时先放文件内容、再放这里的内容。", new_private=True, new_group=True),
         _both("prompt.glossary_file", "string", "", "名词表文件路径",
               "一个文本文件的路径，放黑话、梗、专有名词的解释，会跟着提示词一起给模型。留空 = 不加。", new_private=True, new_group=True),
+        _both("prompt.members_text", "text", "", "成员档案（直接填写）",
+              "直接在这里写常聊的人，每人一两行，如昵称、怎么称呼、爱聊什么。内容会跟着提示词一起给模型，带上“成员档案”标题。"
+              "留空 = 不加。请用自己的话写，不要贴别人的原话。"
+              "和下面的“成员档案文件路径”可以同时用，同时用时先放文件内容、再放这里的内容。", new_private=True, new_group=True),
         _both("prompt.members_file", "string", "", "成员档案文件路径",
               "一个文本文件的路径，放常聊的人的简介，会跟着提示词一起给模型。留空 = 不加。", new_private=True, new_group=True),
     ),

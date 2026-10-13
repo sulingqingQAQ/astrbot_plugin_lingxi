@@ -206,15 +206,22 @@ class DefaultAssembler:
         "写空标签 <chat_status></chat_status> 表示清空旧便签；没必要记的就别写。"
     )
 
+    def _file_and_text(self, cfg: ResolvedConfig, file_key: str, text_key: str) -> str:
+        """文件内容在前、直接填写的文本框内容在后，两段之间空一行；哪个空就只留另一个。"""
+        parts = [self._files.read(cfg.get(file_key, ""))]
+        box = cfg.get(text_key, "")
+        parts.append(box.strip() if isinstance(box, str) else "")
+        return "\n\n".join(p for p in parts if p)
+
     def _build_system_tail(self, trigger: Trigger, cfg: ResolvedConfig) -> str:
         blocks: list[str] = []
-        style = self._files.read(cfg.get("prompt.style_file", ""))
+        style = self._file_and_text(cfg, "prompt.style_file", "prompt.style_text")
         if style:
             blocks.append(style)
-        glossary = self._files.read(cfg.get("prompt.glossary_file", ""))
+        glossary = self._file_and_text(cfg, "prompt.glossary_file", "prompt.glossary_text")
         if glossary:
             blocks.append(f"[名词表]\n{glossary}")
-        members = self._files.read(cfg.get("prompt.members_file", ""))
+        members = self._file_and_text(cfg, "prompt.members_file", "prompt.members_text")
         if members:
             blocks.append(f"[成员档案]\n{members}")
         tags = build_interaction_instructions(
