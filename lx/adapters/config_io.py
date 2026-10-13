@@ -13,6 +13,7 @@ from typing import Callable, MutableMapping, Optional
 
 from ..config import migrate as _migrate
 from ..config import legacy_map as _lm
+from ..config import overrides as _overrides
 from ..config import spec
 from ..config.resolver import ConfigResolver
 
@@ -113,7 +114,18 @@ def load_plugin_config(
             warnings.extend(_report_warnings(report))
             migrated = True
 
-        resolver = ConfigResolver.from_plugin_config(conf, {})
+        # 覆盖表：文本解析，有错 → 全部转 warning，错误项不生效，其余照常。
+        try:
+            text = conf.get("session_overrides") or ""
+        except Exception:
+            text = ""
+        try:
+            parsed, errors = _overrides.parse_overrides_text(text)
+        except Exception as e:
+            parsed, errors = {}, [f"覆盖表解析失败：{e}"]
+        for err in errors:
+            warnings.append(f"会话覆盖表：{err}")
+        resolver = ConfigResolver.from_plugin_config(conf, parsed)
         warnings.extend(resolver.warnings)
         return LoadedConfig(resolver=resolver, warnings=warnings, migrated=migrated, backup_path=backup_path)
     except Exception as e:  # 整个函数任何内部异常 → log + warning，退回默认值，不抛

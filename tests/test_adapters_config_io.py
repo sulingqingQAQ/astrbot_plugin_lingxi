@@ -138,6 +138,43 @@ class MigrateAndBackupTest(unittest.TestCase):
             self.assertEqual(len(backups), 1)
 
 
+class OverridesTextTest(unittest.TestCase):
+    def test_bad_entry_warns_good_part_applies(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            conf = FakeConf(make_old_conf())
+            config_io.load_plugin_config(conf, data_dir)
+            # 在迁移后的 conf 上加覆盖表：一好一坏
+            conf["session_overrides"] = json.dumps({
+                "group:12345678": {"context": {"max_messages": 80}},
+                "group:87654321": "not-a-mapping",
+            })
+            loaded2 = config_io.load_plugin_config(conf, data_dir)
+            self.assertFalse(loaded2.migrated)
+            self.assertTrue(loaded2.warnings, "坏条目应有 warning")
+            from lx.session.key import try_from_umo
+
+            key = try_from_umo("aiocqhttp:GroupMessage:12345678")
+            self.assertEqual(loaded2.resolver.resolve(key).get("context.max_messages"), 80)
+
+    def test_empty_conf_defaults(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            conf = FakeConf()
+            loaded = config_io.load_plugin_config(conf, data_dir)
+            # 空 dict：走迁移（ver=0），备份是 {}，resolver 是规格默认值
+            self.assertTrue(loaded.migrated)
+            self.assertIsNotNone(loaded.backup_path)
+            with open(loaded.backup_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {})
+            from lx.config.resolver import ConfigResolver
+            from lx.session.key import try_from_umo
+
+            fresh = ConfigResolver.from_plugin_config({}, None)
+            key = try_from_umo("aiocqhttp:GroupMessage:12345678")
+            self.assertEqual(
+                loaded.resolver.resolve(key).as_dict(), fresh.resolve(key).as_dict()
+            )
+
+
 class RobustnessTest(unittest.TestCase):
     def test_never_raises(self):
         with __import__("tempfile").TemporaryDirectory() as data_dir:
