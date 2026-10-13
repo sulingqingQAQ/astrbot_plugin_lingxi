@@ -220,6 +220,12 @@ class TestPull(unittest.TestCase):
         b = _buf({"context.history_pull": False}, puller=None)
         self.assertEqual(asyncio.run(b.pull(_key())), 0)
 
+    def test_pull_buffer_disabled_returns_zero(self):
+        b, seen, _ = self._buf_pull([_msg("m1", 100.0)], cfg={"context.enabled": False})
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+        self.assertEqual(b.messages(_key()), [])
+        self.assertNotIn("count", seen)  # 连 puller 都不该调
+
     def test_pull_no_puller_returns_zero(self):
         b = _buf({"context.history_pull": True})
         self.assertEqual(asyncio.run(b.pull(_key())), 0)

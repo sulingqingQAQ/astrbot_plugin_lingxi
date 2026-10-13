@@ -133,6 +133,8 @@ class MemoryHistoryBuffer:
             cfg = self._cfg_provider(key)
             if not cfg.get("context.history_pull", False):
                 return 0
+            if not cfg.get("context.enabled", True):  # 缓冲没开：record 是空操作，回拉也不该往里塞
+                return 0
             if self._puller is None:
                 return 0
             st = self._states.get(key)
