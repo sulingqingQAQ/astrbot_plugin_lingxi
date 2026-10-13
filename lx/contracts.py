@@ -118,7 +118,8 @@ class Source(str, Enum):
 @dataclass
 class Trigger:
     source: Source
-    reason: str  # 进提示词的"触发原因"文本，来自可编辑模板
+    reason: str  # 进提示词的"触发原因"文本，来自可编辑模板。约定：**原样模板文本**（占位符 {{current_time}} 等不替换），
+    #   渲染要用的变量放 meta["vars"]（dict），由 PromptAssembler 统一调 lx/prompt/template.render_template 渲染（它会补 current_time）。
     silent_ok: bool  # 这一次允许模型沉默吗（来自配置"沉默"块）
     event: Any = None  # E 路径持有的 AstrMessageEvent；T 路径为 None。核心逻辑只当不透明对象传递
     # v0.5 约定 meta["wait"] = {"seconds": N, "mode": "latest" | "merge"}：事件触发源（direct / wait / interval / activity）要求 adapters 在锁外先等 N 秒再放行。
