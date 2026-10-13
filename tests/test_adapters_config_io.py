@@ -175,6 +175,46 @@ class OverridesTextTest(unittest.TestCase):
             )
 
 
+class LegacyJsonImportTest(unittest.TestCase):
+    def _old_json(self):
+        return {"aiocqhttp:GroupMessage:12345678": {"schedule_settings": {"quiet_hours": "0-6"}}}
+
+    def test_import_when_conf_empty(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "session_overrides.json"), "w", encoding="utf-8") as f:
+                json.dump(self._old_json(), f, ensure_ascii=False)
+            conf = FakeConf(make_old_conf())
+            loaded = config_io.load_plugin_config(conf, data_dir)
+            text = conf.get("session_overrides") or ""
+            self.assertIn("12345678", text)
+            self.assertIn("0-6", text)
+            from lx.session.key import try_from_umo
+
+            key = try_from_umo("aiocqhttp:GroupMessage:12345678")
+            self.assertEqual(loaded.resolver.resolve(key).get("gate.quiet_hours"), "0-6")
+            # 旧文件不删除
+            self.assertTrue(os.path.exists(os.path.join(data_dir, "session_overrides.json")))
+
+    def test_no_overwrite_when_conf_has_text(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "session_overrides.json"), "w", encoding="utf-8") as f:
+                json.dump(self._old_json(), f, ensure_ascii=False)
+            conf = FakeConf(make_old_conf())
+            conf["session_overrides"] = json.dumps({"group:99999999": {"context": {"max_messages": 11}}})
+            loaded = config_io.load_plugin_config(conf, data_dir)
+            self.assertIn("99999999", conf["session_overrides"])
+            self.assertTrue(any("没有导入" in w for w in loaded.warnings), loaded.warnings)
+
+    def test_broken_json_warns(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "session_overrides.json"), "w", encoding="utf-8") as f:
+                f.write("{not json")
+            conf = FakeConf(make_old_conf())
+            loaded = config_io.load_plugin_config(conf, data_dir)
+            self.assertTrue(loaded.migrated, "文件损坏不影响其余迁移")
+            self.assertTrue(loaded.warnings)
+
+
 class RobustnessTest(unittest.TestCase):
     def test_never_raises(self):
         with __import__("tempfile").TemporaryDirectory() as data_dir:

@@ -13,6 +13,7 @@ from typing import Callable, MutableMapping, Optional
 
 from ..config import migrate as _migrate
 from ..config import legacy_map as _lm
+from ..config import migrate_overrides as _mig_ov
 from ..config import overrides as _overrides
 from ..config import spec
 from ..config.resolver import ConfigResolver
@@ -113,6 +114,40 @@ def load_plugin_config(
                     warnings.append(msg)
             warnings.extend(_report_warnings(report))
             migrated = True
+
+            # 旧 session_overrides.json（在 data_dir 下，若存在）：导入成覆盖表文本。
+            # 仅当 conf 里为空时写入，已有内容不覆盖；不删除旧文件；读不了/非法 → warning。
+            legacy_path = os.path.join(data_dir, "session_overrides.json")
+            if os.path.exists(legacy_path):
+                try:
+                    with open(legacy_path, encoding="utf-8") as f:
+                        old_json = json.load(f)
+                    old_table, old_notes = _mig_ov.migrate_session_overrides(old_json)
+                    for note in old_notes:
+                        warnings.append(f"旧会话覆盖：{note}")
+                    try:
+                        cur = conf.get("session_overrides")
+                        has_text = bool(cur.strip()) if isinstance(cur, str) else bool(cur)
+                    except Exception:
+                        has_text = False
+                    if has_text:
+                        warnings.append("旧 session_overrides.json 没有导入：配置里已有会话覆盖表内容，不覆盖")
+                    else:
+                        text = _mig_ov.format_overrides_text(old_table)
+                        if text:
+                            conf["session_overrides"] = text
+                            # 导入写在 save 之后，需再存一次，否则下次启动（已是新版本、不再迁移）会丢。
+                            if saver is not None:
+                                try:
+                                    saver()
+                                except Exception as e:
+                                    msg = f"新配置已在内存里生效，但保存到磁盘失败：{e}"
+                                    log(msg)
+                                    warnings.append(msg)
+                except Exception as e:
+                    msg = f"旧 session_overrides.json 读不了，没有导入：{e}"
+                    log(msg)
+                    warnings.append(msg)
 
         # 覆盖表：文本解析，有错 → 全部转 warning，错误项不生效，其余照常。
         try:
