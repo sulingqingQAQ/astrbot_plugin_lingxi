@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from ..contracts import Assembled, HistoryView, ResolvedConfig, SessionKey, Source, Trigger
 from ..history.render import format_line
+from ..pure.tags import build_interaction_instructions
 from .template import format_current_time, render_template
 
 _TZE = timezone(timedelta(hours=8))
@@ -186,9 +187,60 @@ class DefaultAssembler:
 
         return "\n\n".join(b for b in blocks if b)
 
-    # -- system_tail / model_rounds（第 3 步补）-------------------
+    # -- system_tail / model_rounds ------------------------------
+    # 自约 / 便签说明复用旧实现的中文静态串，原样拷自
+    # core/group_chime.py:_NEXT_REPLY_HINT（79-86 行）与
+    # _CHAT_STATUS_HINT（92-97 行），行为保持一致。
+    _NEXT_REPLY_HINT = (
+        '<next_reply 约定下次发言（可选）>: 回复末尾单独一行写 <next_reply reason="..." />，'
+        "表达你想要的下次触发时机；这行会被摘除，对方看不到，不确定时就别写。"
+        "reason 里可以用 | 分隔多个备选（任一满足即触发），组内用 & 连接（需全部满足）。"
+        '可选写法: time_600s=群里再安静600秒; time_600s_id_123456=用户123456先发新消息、'
+        '之后TA安静600秒; time_600s_id_123456_max_1800s=同上但最多等1800秒; '
+        'id_123456=用户123456一发消息我就接话。示例: <next_reply reason="time_600s_id_123456" />'
+    )
+    _CHAT_STATUS_HINT = (
+        "（情景便签，可选）: 回复里可以写 <chat_status>一句话情景备注</chat_status>，"
+        "记下你觉得下次开口时需要想起来的事（聊到哪了/刚立的约定/你正打算做什么）。"
+        "标签不会发出去；下次触发时内容会以「群聊情景便签」回给你，话题翻篇会自动作废。"
+        "写空标签 <chat_status></chat_status> 表示清空旧便签；没必要记的就别写。"
+    )
+
     def _build_system_tail(self, trigger: Trigger, cfg: ResolvedConfig) -> str:
-        return ""
+        blocks: list[str] = []
+        style = self._files.read(cfg.get("prompt.style_file", ""))
+        if style:
+            blocks.append(style)
+        glossary = self._files.read(cfg.get("prompt.glossary_file", ""))
+        if glossary:
+            blocks.append(f"[名词表]\n{glossary}")
+        members = self._files.read(cfg.get("prompt.members_file", ""))
+        if members:
+            blocks.append(f"[成员档案]\n{members}")
+        tags = build_interaction_instructions(
+            mention_parse=bool(cfg.get("speech.is_at", False)),
+            include_sender_id=bool(cfg.get("context.include_sender_id", True)),
+        ).strip()
+        if tags:
+            blocks.append(tags)
+        if trigger.silent_ok:
+            if bool(cfg.get("silence.refuse_tag_enabled", True)):
+                blocks.append("这次如果你觉得不该开口，就只输出 <refuse/>，不要输出别的字。")
+            else:
+                blocks.append("这次如果你觉得不该开口，就输出空内容。")
+        if bool(cfg.get("trigger.next_reply_enabled", True)) and bool(
+                cfg.get("trigger.next_reply_hint", True)):
+            blocks.append(self._NEXT_REPLY_HINT)
+        if bool(cfg.get("context.status_note_enabled", True)) and bool(
+                cfg.get("context.status_note_hint", True)):
+            blocks.append(self._CHAT_STATUS_HINT)
+        return "\n\n".join(b for b in blocks if b)
 
     def _build_model_rounds(self, cfg: ResolvedConfig) -> Optional[int]:
-        return None
+        try:
+            n = int(cfg.get("context.model_rounds", 0))
+        except (TypeError, ValueError):
+            return None
+        except Exception:
+            return None
+        return n if n > 0 else None

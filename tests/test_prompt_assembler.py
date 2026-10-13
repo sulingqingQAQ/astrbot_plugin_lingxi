@@ -234,5 +234,139 @@ class UserTextStatusNotesTest(unittest.TestCase):
         self.assertEqual(trig.meta, meta_snap)
 
 
+class SystemTailFilesTest(unittest.TestCase):
+    def test_style_file_verbatim_without_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "style.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("合成风格：口语化、简短。")
+            asm = _asm()
+            trig = _trig(reason="事由{{current_time}}。")
+            out = asm.build(_key(), trig, _hist(), {},
+                            {"prompt.style_file": p}).system_tail
+            self.assertIn("合成风格：口语化、简短。", out)
+
+    def test_missing_style_file_no_block(self):
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。")
+        out = asm.build(_key(), trig, _hist(), {},
+                        {"prompt.style_file": "/no/such/file.txt"}).system_tail
+        self.assertNotIn("名词表", out)
+
+    def test_glossary_and_members_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            g = os.path.join(d, "gloss.txt")
+            m = os.path.join(d, "members.txt")
+            with open(g, "w", encoding="utf-8") as f:
+                f.write("合成名词解释")
+            with open(m, "w", encoding="utf-8") as f:
+                f.write("合成成员档案")
+            asm = _asm()
+            trig = _trig(reason="事由{{current_time}}。")
+            out = asm.build(_key(), trig, _hist(), {},
+                            {"prompt.glossary_file": g,
+                             "prompt.members_file": m}).system_tail
+            self.assertIn("[名词表]\n合成名词解释", out)
+            self.assertIn("[成员档案]\n合成成员档案", out)
+
+    def test_no_empty_blocks_no_stray_separators(self):
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。")
+        out = asm.build(_key(), trig, _hist(), {},
+                        {"trigger.next_reply_enabled": False,
+                         "context.status_note_enabled": False}).system_tail
+        # 缺省无文件 + 两个可选说明关闭 → 只剩标签说明一块
+        self.assertNotIn("[名词表]", out)
+        self.assertNotIn("[成员档案]", out)
+        self.assertNotIn("\n\n\n", out)
+        self.assertFalse(out.startswith("\n"))
+        self.assertFalse(out.endswith("\n"))
+
+
+class SystemTailHintsTest(unittest.TestCase):
+    def _tail(self, cfg):
+        asm = _asm()
+        return asm.build(_key(), _trig(reason="事由{{current_time}}。"),
+                         _hist(), {}, cfg).system_tail
+
+    def test_interaction_instructions_always_present(self):
+        out = self._tail({})
+        self.assertIn("Quote", out)
+        self.assertIn("Refuse", out)
+
+    def test_mention_part_needs_at_and_sender_id(self):
+        out = self._tail({"speech.is_at": True,
+                          "context.include_sender_id": True})
+        self.assertIn("Mention", out)
+        out2 = self._tail({"speech.is_at": False})
+        self.assertNotIn("Mention", out2)
+
+    def test_silence_three_cases(self):
+        asm = _asm()
+        mk = lambda silent, cfg: asm.build(
+            _key(), _trig(reason="事由{{current_time}}。", silent_ok=silent),
+            _hist(), {}, cfg).system_tail
+        self.assertNotIn("不该开口", mk(False, {}))
+        self.assertIn("这次如果你觉得不该开口，就只输出 <refuse/>，不要输出别的字。",
+                      mk(True, {}))
+        self.assertIn("这次如果你觉得不该开口，就输出空内容。",
+                      mk(True, {"silence.refuse_tag_enabled": False}))
+
+    def test_next_reply_hint_switch(self):
+        self.assertIn("next_reply", self._tail({}))
+        self.assertNotIn("next_reply",
+                         self._tail({"trigger.next_reply_enabled": False}))
+        self.assertNotIn("next_reply",
+                         self._tail({"trigger.next_reply_hint": False}))
+
+    def test_status_hint_switch(self):
+        self.assertIn("chat_status", self._tail({}))
+        self.assertNotIn("chat_status",
+                         self._tail({"context.status_note_enabled": False}))
+        self.assertNotIn("chat_status",
+                         self._tail({"context.status_note_hint": False}))
+
+
+class ModelRoundsTest(unittest.TestCase):
+    def _rounds(self, cfg):
+        asm = _asm()
+        return asm.build(_key(), _trig(reason="事由{{current_time}}。"),
+                         _hist(), {}, cfg).model_rounds
+
+    def test_missing_is_none(self):
+        self.assertIsNone(self._rounds({}))
+
+    def test_int_value(self):
+        self.assertEqual(self._rounds({"context.model_rounds": 5}), 5)
+
+    def test_str_value_coerced(self):
+        self.assertEqual(self._rounds({"context.model_rounds": "3"}), 3)
+
+    def test_bad_value_is_none(self):
+        self.assertIsNone(self._rounds({"context.model_rounds": "合成文本"}))
+        self.assertIsNone(self._rounds({"context.model_rounds": None}))
+
+    def test_zero_and_negative_are_none(self):
+        self.assertIsNone(self._rounds({"context.model_rounds": 0}))
+        self.assertIsNone(self._rounds({"context.model_rounds": -2}))
+
+
+class FallbackTest(unittest.TestCase):
+    def test_cfg_error_returns_raw_reason(self):
+        logs = []
+
+        class BadCfg(dict):
+            def get(self, path, default=None):
+                raise RuntimeError("合成配置故障")
+
+        asm = _asm(log=logs.append)
+        reason = "原始触发原因{{current_time}}。"
+        out = asm.build(_key(), _trig(reason=reason), _hist(), {}, BadCfg())
+        self.assertEqual(out.system_tail, "")
+        self.assertEqual(out.user_text, reason)
+        self.assertIsNone(out.model_rounds)
+        self.assertTrue(logs)
+
+
 if __name__ == "__main__":
     unittest.main()
