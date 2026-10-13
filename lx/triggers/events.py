@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Sequence
 
@@ -290,3 +291,180 @@ class IntervalSource(_CfgHelper):
 
     def on_replied(self, key: SessionKey, outcome: Any) -> None:
         self._counts[key] = 0
+
+
+@dataclass
+class _ActivityState:
+    """某群会话的活跃度状态（对标旧 ChimeGroupState 的接话侧字段）。"""
+
+    timestamps: list[float] = field(default_factory=list)  # 消息到达时刻，升序，最多 WINDOW_SIZE 条
+    msgs_since_judge: int = 0
+    last_judge_ts: float = 0.0
+    score: float = 0.0
+    score_updated_at: float = 0.0
+    threshold: float = -1.0  # -1 = 未初始化
+    last_reply_at: float = 0.0
+    hourly: dict[str, int] = field(default_factory=dict)
+    daily: dict[str, int] = field(default_factory=dict)
+
+
+class _DefaultCfg:
+    """规格默认兜底的 ResolvedConfig（on_replied 拿不到 cfg 时用）。"""
+
+    def __init__(self, scope: Scope) -> None:
+        self._scope = scope
+
+    def get(self, path: str, default: Any = None) -> Any:
+        value = _spec_default(path, self._scope)
+        return default if value is None else value
+
+
+class ActivitySource(_CfgHelper):
+    """活跃度触发（只对群聊；私聊直接 None 且不记账）。``id = Source.ACTIVITY``。
+
+    照搬旧 ``core/group_chime.py`` 的流程：先无条件记账（追加时刻、+1），再按
+    总开关→配额→判定节流→分数门槛的顺序过闸门，通过才更新 ``last_judge_ts`` 并返回。
+
+    门槛归位注：旧代码在记账后用"最后一条消息距今"判断归位——此时最后一条恒为刚记的
+    当前消息，该分支实际恒为假。这里用追加前最后一条与现在的间隔（即"群安静了多久"），
+    否则卡要求的"安静 10 分钟归位"无从成立。差异见交接。
+
+    ``on_replied`` 签名里没有 cfg：用该会话最后一次 ``on_message`` 见过的 cfg，
+    没见过则用规格默认（同样记 log 容错）。旧代码用 monotonic 计判定间隔，
+    这里统一用 clock()（墙钟），便于假时钟测试；差异见交接。
+    """
+
+    id: Source = Source.ACTIVITY
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        tz: Any = _DEFAULT_TZ,
+        log: Optional[LogFn] = None,
+    ) -> None:
+        self._clock = clock
+        self._tz = tz
+        self._log: LogFn = _new_log(log)
+        self._states: dict[SessionKey, _ActivityState] = {}
+        self._cfgs: dict[SessionKey, ResolvedConfig] = {}
+
+    def _hour_day(self, now: float) -> tuple[str, str]:
+        moment = datetime.fromtimestamp(now, self._tz)
+        return moment.strftime("%Y-%m-%d %H"), moment.strftime("%Y-%m-%d")
+
+    def on_message(self, key: SessionKey, msg: Msg, cfg: ResolvedConfig,
+                   event: Any) -> Optional[Trigger]:
+        if msg.is_bot:
+            return None
+        if key.scope != Scope.GROUP:
+            return None
+        try:
+            now = self._clock()
+        except Exception as e:
+            self._log(f"[events] activity 时钟失败 {key}: {e}")
+            return None
+        state = self._states.get(key)
+        if state is None:
+            state = _ActivityState()
+            self._states[key] = state
+        # 归位用"追加前最后一条距今"（见类文档）。
+        gap = now - state.timestamps[-1] if state.timestamps else float("inf")
+        state.timestamps.append(now)
+        overflow = len(state.timestamps) - WINDOW_SIZE
+        if overflow > 0:
+            del state.timestamps[:overflow]
+        state.msgs_since_judge += 1
+        self._cfgs[key] = cfg
+        scope = key.scope
+        # 闸门 1：总开关
+        if not self._cfg(cfg, "activity.enabled", scope, "bool"):
+            return None
+        # 闸门 2：小时 / 日配额（只管靠活跃度插话的次数；过期键顺手清掉）
+        hour_key, day_key = self._hour_day(now)
+        state.hourly = {k: v for k, v in state.hourly.items() if k == hour_key}
+        state.daily = {k: v for k, v in state.daily.items() if k == day_key}
+        max_hour = self._cfg(cfg, "activity.max_per_hour", scope, "int")
+        if max_hour > 0 and state.hourly.get(hour_key, 0) >= max_hour:
+            return None
+        max_day = self._cfg(cfg, "activity.max_per_day", scope, "int")
+        if max_day > 0 and state.daily.get(day_key, 0) >= max_day:
+            return None
+        # 闸门 3：判定节流（纯计时 + 消息积压）
+        judge_cd = self._cfg(cfg, "activity.judge_cooldown_seconds", scope, "float")
+        min_msgs = self._cfg(cfg, "activity.min_messages_since_last", scope, "int")
+        if not (now - state.last_judge_ts >= judge_cd
+                and state.msgs_since_judge >= min_msgs):
+            return None
+        # 闸门 4：分数门槛（关掉 score_enabled 则每次过节流都触发）
+        if self._cfg(cfg, "activity.score_enabled", scope, "bool"):
+            skip = self._cfg(cfg, "activity.skip_threshold", scope, "float")
+            if state.threshold < 0:
+                state.threshold = skip
+            elif gap >= THRESHOLD_RESET_TIME:
+                state.threshold = skip
+            score, updated_at = calculate_activity_score(
+                state.timestamps, state.last_reply_at, 0,
+                state.score, state.score_updated_at, now,
+            )
+            state.score = score
+            state.score_updated_at = updated_at
+            if score < state.threshold:
+                return None
+        # 通过
+        state.last_judge_ts = now
+        state.msgs_since_judge = 0
+        meta: dict[str, Any] = {"vars": {"score": state.score}}
+        wait = self._cfg(cfg, "trigger.wait_seconds", scope, "int")
+        if wait > 0:
+            meta["wait"] = {"seconds": wait, "mode": "latest"}
+        return Trigger(
+            source=Source.ACTIVITY,
+            reason=self._cfg(cfg, "prompt.reason_activity", scope, "str"),
+            silent_ok=self._cfg(cfg, "silence.activity", scope, "bool"),
+            event=event,
+            meta=meta,
+        )
+
+    def due(self, now: float) -> list:
+        return []
+
+    def on_user_message(self, key: SessionKey) -> None:
+        return None
+
+    def on_replied(self, key: SessionKey, outcome: Any) -> None:
+        cfg = self._cfgs.get(key)
+        if cfg is None:
+            cfg = _DefaultCfg(key.scope)
+        if not self._cfg(cfg, "activity.enabled", key.scope, "bool"):
+            return
+        silent = bool(getattr(outcome, "silent", False))
+        delivered = getattr(outcome, "delivered", None)
+        if silent or delivered is False:
+            return
+        state = self._states.get(key)
+        if state is None:
+            state = _ActivityState()
+            self._states[key] = state
+        try:
+            now = self._clock()
+        except Exception as e:
+            self._log(f"[events] activity 时钟失败 {key}: {e}")
+            return
+        scope = key.scope
+        # 自罚：开口一次压低自己的分
+        penalty = self._cfg(cfg, "activity.cooldown_penalty", scope, "float")
+        state.score = max(0.0, state.score - penalty)
+        state.score_updated_at = now
+        # 抬门槛：说得越勤越难再达标
+        lower = self._cfg(cfg, "activity.skip_threshold", scope, "float")
+        upper = self._cfg(cfg, "activity.max_threshold", scope, "float")
+        step = (upper - lower) * THRESHOLD_STEP_RATIO
+        if state.threshold < 0:
+            state.threshold = lower
+        state.threshold = clamp(state.threshold + step, min(lower, upper), max(lower, upper))
+        state.last_reply_at = now
+        # 配额只管"靠活跃度插话"
+        if getattr(outcome, "source", None) == Source.ACTIVITY:
+            hour_key, day_key = self._hour_day(now)
+            state.hourly[hour_key] = state.hourly.get(hour_key, 0) + 1
+            state.daily[day_key] = state.daily.get(day_key, 0) + 1
