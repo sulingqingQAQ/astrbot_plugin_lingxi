@@ -47,3 +47,78 @@ def make_send_text(
             return False
 
     return send_text
+
+
+def parse_onebot_message(rec: Mapping[str, Any], self_id: str) -> Optional[Msg]:
+    """把 OneBot v11 的一条历史消息记录转成 Msg；转不出返回 None。
+
+    字段：message_id→id（字符串）；time→ts（秒，取不到 0.0）；
+    sender.user_id→speaker_id；sender.card 非空优先否则 sender.nickname→speaker_name；
+    is_bot = (speaker_id == self_id)。
+    message 可能是段列表（text→拼文本；image→ImageRef(data.url 或 data.file)；
+    reply→quote_id = str(data.id)；at→文本里补 @昵称或qq；face/其他→忽略），
+    也可能是字符串（原样当文本）。没有 message_id，或解析不出任何文本也无图片 → None。
+    """
+    if not isinstance(rec, Mapping):
+        return None
+    raw_id = rec.get("message_id")
+    if raw_id is None or (isinstance(raw_id, str) and not raw_id.strip()):
+        return None
+    try:
+        ts = float(rec.get("time"))
+    except (TypeError, ValueError):
+        ts = 0.0
+
+    sender = rec.get("sender") or {}
+    if not isinstance(sender, Mapping):
+        sender = {}
+    speaker_id = str(sender.get("user_id") or "")
+    card = str(sender.get("card") or "").strip()
+    nickname = str(sender.get("nickname") or "").strip()
+    speaker_name = card or nickname
+
+    text_parts: list[str] = []
+    images: list[ImageRef] = []
+    quote_id: Optional[str] = None
+
+    content = rec.get("message")
+    if isinstance(content, str):
+        text_parts.append(content)
+    elif isinstance(content, (list, tuple)):
+        for seg in content:
+            if not isinstance(seg, Mapping):
+                continue
+            seg_type = str(seg.get("type") or "")
+            data = seg.get("data") or {}
+            if not isinstance(data, Mapping):
+                data = {}
+            if seg_type == "text":
+                text_parts.append(str(data.get("text") or ""))
+            elif seg_type == "image":
+                url = str(data.get("url") or data.get("file") or "").strip()
+                if url:
+                    images.append(ImageRef(url=url))
+            elif seg_type == "reply" and quote_id is None:
+                rid = data.get("id")
+                if rid is not None and str(rid).strip():
+                    quote_id = str(rid)
+            elif seg_type == "at":
+                name = str(data.get("nickname") or data.get("name") or "").strip()
+                target = name or str(data.get("qq") or data.get("target") or "").strip()
+                if target:
+                    text_parts.append(f"@{target}")
+            # face / 其他段：忽略
+
+    text = "".join(text_parts).strip()
+    if not text and not images:
+        return None
+    return Msg(
+        id=str(raw_id),
+        ts=ts,
+        speaker_id=speaker_id,
+        speaker_name=speaker_name,
+        text=text,
+        is_bot=bool(speaker_id) and speaker_id == str(self_id),
+        quote_id=quote_id,
+        images=images,
+    )

@@ -6,7 +6,7 @@
 import asyncio
 import unittest
 
-from lx.adapters.platform_io import make_send_text
+from lx.adapters.platform_io import make_send_text, parse_onebot_message
 from lx.contracts import Scope, SessionKey
 
 
@@ -72,6 +72,93 @@ class MakeSendTextTest(unittest.TestCase):
         for blank in ("", "   ", "\n\t "):
             self.assertFalse(_run(send_text(self._key(), blank, None)))
         self.assertEqual(ctx.calls, [])
+
+
+def _rec(**kw):
+    """合成一条 OneBot v11 历史记录（含默认 sender / message_id / time）。"""
+    base = {
+        "message_id": 764201,
+        "time": 1799999000,
+        "sender": {"user_id": 412001, "nickname": "合成昵称甲", "card": ""},
+        "message": [{"type": "text", "data": {"text": "合成文本"}}],
+    }
+    base.update(kw)
+    return base
+
+
+class ParseOnebotMessageTest(unittest.TestCase):
+    SELF = "998877"
+
+    def test_segments_text_image_reply_at(self):
+        rec = _rec(
+            message=[
+                {"type": "text", "data": {"text": "合成甲"}},
+                {"type": "image", "data": {"url": "https://合成.invalid/甲.png"}},
+                {"type": "reply", "data": {"id": 555001}},
+                {"type": "at", "data": {"qq": 412002, "nickname": "合成昵称乙"}},
+                {"type": "face", "data": {"id": 178}},
+                {"type": "unknown_seg", "data": {"x": 1}},
+            ]
+        )
+        msg = parse_onebot_message(rec, self.SELF)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.id, "764201")
+        self.assertEqual(msg.ts, 1799999000.0)
+        self.assertEqual(msg.speaker_id, "412001")
+        self.assertEqual(msg.speaker_name, "合成昵称甲")
+        self.assertFalse(msg.is_bot)
+        self.assertEqual(msg.quote_id, "555001")
+        self.assertIn("合成甲", msg.text)
+        self.assertIn("@合成昵称乙", msg.text)
+        self.assertEqual(len(msg.images), 1)
+        self.assertEqual(msg.images[0].url, "https://合成.invalid/甲.png")
+
+    def test_image_file_fallback_and_at_qq(self):
+        rec = _rec(
+            message=[
+                {"type": "image", "data": {"file": "合成file标识"}},
+                {"type": "at", "data": {"qq": "412003"}},
+            ]
+        )
+        msg = parse_onebot_message(rec, self.SELF)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.images[0].url, "合成file标识")
+        self.assertIn("@412003", msg.text)
+
+    def test_string_message(self):
+        rec = _rec(message="合成纯字符串")
+        msg = parse_onebot_message(rec, self.SELF)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.text, "合成纯字符串")
+        self.assertEqual(msg.images, [])
+        self.assertIsNone(msg.quote_id)
+
+    def test_card_priority_and_is_bot(self):
+        rec = _rec(
+            sender={"user_id": int(self.SELF), "nickname": "合成昵称丙", "card": "合成群名片丙"},
+        )
+        msg = parse_onebot_message(rec, self.SELF)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.speaker_name, "合成群名片丙")
+        self.assertTrue(msg.is_bot)
+
+    def test_missing_message_id_returns_none(self):
+        rec = _rec()
+        del rec["message_id"]
+        self.assertIsNone(parse_onebot_message(rec, self.SELF))
+
+    def test_no_text_no_image_returns_none(self):
+        rec = _rec(message=[{"type": "face", "data": {"id": 66}}])
+        self.assertIsNone(parse_onebot_message(rec, self.SELF))
+        rec2 = _rec(message="   ")
+        self.assertIsNone(parse_onebot_message(rec2, self.SELF))
+
+    def test_missing_time_defaults_zero(self):
+        rec = _rec()
+        del rec["time"]
+        msg = parse_onebot_message(rec, self.SELF)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.ts, 0.0)
 
 
 if __name__ == "__main__":
