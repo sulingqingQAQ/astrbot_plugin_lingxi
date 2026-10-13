@@ -1,219 +1,79 @@
-/* UI-4b：分会话覆盖 / 试算 / 关于标签样式（复用 app.css 的变量）。
- * 纯静态，无外部资源；深色走 :root[data-theme="dark"] 的变量，手机宽度走媒体查询。 */
+/* 分会话覆盖 / 试算 / 关于标签样式（UI-4b，DIAG-4a 重绘）。
+ * 只用 app.css 的令牌，不写死色值；纯静态，无外部资源；手机宽度走文件末尾的媒体查询。 */
 
+/* ---- 覆盖表编辑区 ---- */
 #ov-text {
-  width: 100%;
-  min-height: 16em;
-  resize: vertical;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, "Noto Sans Mono", monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre;
+  width: 100%; min-height: 16em; resize: vertical; white-space: pre;
+  font-family: var(--font-mono); font-size: var(--fs-13); line-height: 1.65;
+  background: var(--surface-2); tab-size: 2;
 }
+.ov-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); margin-top: var(--sp-3); }
+.ov-meta { margin-right: auto; font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
+.ov-meta.over { color: var(--danger); font-weight: 600; }
 
-.ov-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  margin-top: 10px;
-}
-
-.ov-meta {
-  margin-right: auto;
-  font-size: 12.5px;
-}
-
-.ov-meta.over {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-.ov-result {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-
-.ov-errors {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ov-err {
-  color: var(--danger);
-}
-
-.ov-ok {
-  color: var(--ok);
-  font-weight: 600;
-}
-
+/* ---- 检查结果 ---- */
+.ov-result { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); font-size: var(--fs-13); }
+.ov-result:empty { display: none; }
+.ov-errors { display: flex; flex-direction: column; gap: 6px; }
+.ov-err { color: var(--text); }
+span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
+.ov-ok { display: flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; }
+.ov-sessions { display: flex; flex-direction: column; gap: 6px; }
 .ov-session {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px var(--sp-2);
+  padding: 8px var(--sp-3); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md);
   overflow-wrap: anywhere;
 }
+.ov-empty { padding: 2px 0; }
 
-.ov-example {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 12.5px;
-  overflow-x: auto;
-  white-space: pre;
-  max-width: 100%;
-}
-
-#ov-help {
-  margin-top: 10px;
-}
-
+/* ---- 怎么写（折叠） ---- */
+#ov-help { margin-top: var(--sp-4); border-top: 1px solid var(--border); padding-top: var(--sp-2); }
 #ov-help summary {
-  cursor: pointer;
-  color: var(--accent);
-  font-size: 13px;
+  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none;
+  min-height: 32px; color: var(--accent-text); font-weight: 500; font-size: var(--fs-13);
+}
+#ov-help summary::-webkit-details-marker { display: none; }
+#ov-help summary::before {
+  content: ""; width: 7px; height: 7px; flex: none; margin: 0 3px 2px 1px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--t-fast) ease;
+}
+#ov-help[open] > summary::before { transform: rotate(45deg); }
+#ov-help p { margin: var(--sp-2) 0; font-size: var(--fs-13); }
+.ov-example {
+  margin: var(--sp-2) 0; padding: var(--sp-3); max-width: 100%; overflow-x: auto; white-space: pre;
+  background: var(--sunken); border: 1px solid var(--border); border-radius: var(--r-md);
+  font-family: var(--font-mono); font-size: var(--fs-12); line-height: 1.6;
 }
 
-#ov-help p {
-  margin: 8px 0;
-  font-size: 13px;
-}
+/* 提示行（试算脏提示、保存被拒提示）：用 .alert 的长相，只补间距 */
+.warn-line { margin-top: var(--sp-3); }
 
-/* 黄色提示行（试算脏提示、保存被拒提示） */
-.warn-line {
-  margin-top: 10px;
-  padding: 6px 10px;
-  font-size: 13px;
-  color: var(--warn);
-  background: var(--accent-soft);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
+/* ---- 试算 ---- */
+#ex-scope { flex: 0 0 auto; min-width: 96px; }
+#ex-id { flex: 1 1 220px; }
+.ex-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); margin: var(--sp-3) 0; min-height: 28px; }
+.ex-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: var(--fs-13); overflow-wrap: anywhere; }
+.ex-bar .ex-only { margin-left: auto; }
+.ex-empty { padding: var(--sp-5) var(--sp-4); }
+.ex-table tr.ex-row[data-source="override"] > td:nth-child(2) { font-weight: 600; }
+.ex-table tr.ex-row > td:first-child { white-space: nowrap; }
 
-.ex-head {
-  margin-top: 10px;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
+/* ---- 关于 ---- */
+.kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-3); }
+.kv { padding: var(--sp-3) var(--sp-4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); min-width: 0; }
+.kv-label { font-size: var(--fs-12); color: var(--text-2); margin-bottom: 2px; }
+.kv-value { display: block; font-size: var(--fs-16); font-weight: 600; overflow-wrap: anywhere; }
+.about-card .group-title:first-of-type { margin-top: var(--sp-5); }
+.about-body { font-size: var(--fs-13); overflow-wrap: anywhere; }
+.about-body .table-wrap { margin-top: 0; }
+.about-empty { padding: var(--sp-4); }
+.about-note { margin-top: var(--sp-5); }
 
-.ex-only {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.ex-table {
-  width: 100%;
-  margin-top: 8px;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.ex-table th,
-.ex-table td {
-  border: 1px solid var(--border);
-  padding: 5px 8px;
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-.ex-block th {
-  background: var(--accent-soft);
-  font-weight: 600;
-}
-
-.ex-row td:first-child {
-  white-space: nowrap;
-}
-
-/* 来源徽标：三种颜色要有区分度（浅色实底白字，深色用变量提亮） */
-.src-default,
-.src-global,
-.src-override {
-  display: inline-block;
-  font-size: 11.5px;
-  border-radius: 4px;
-  padding: 0 6px;
-  white-space: nowrap;
-  color: #fff;
-}
-
-.src-default {
-  background: #8a94a0;
-}
-
-.src-global {
-  background: #3b6fd8;
-}
-
-.src-override {
-  background: #197a42; /* 白字对比度 > 5:1（原 #1f8a4c 约 4.4） */
-}
-
-:root[data-theme="dark"] .src-default {
-  background: #6b7480;
-}
-
-:root[data-theme="dark"] .src-global {
-  background: #7aa2f7;
-  color: #16181c;
-}
-
-:root[data-theme="dark"] .src-override {
-  background: #5bc48a;
-  color: #16181c;
-}
-
-.about-row {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  margin-bottom: 8px;
-  font-size: 13px;
-}
-
-.about-label {
-  flex-shrink: 0;
-  color: var(--muted);
-}
-
-/* 值很长（配置路径、备份文件名）时允许在任意位置换行，不被 overflow-x:clip 裁掉 */
-.about-row > span:not(.about-label) {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-#about-backups .ex-table {
-  margin-top: 0;
-}
-
-/* 手机宽度：行内控件允许换行，表格横向滚动不撑破页面 */
 @media (max-width: 700px) {
-  .ov-row {
-    align-items: stretch;
-  }
-
-  .ov-row button {
-    flex: 1 1 auto;
-  }
-
-  .ov-meta {
-    flex: 1 1 100%;
-  }
-
-  .ex-table {
-    display: block;
-    overflow-x: auto;
-  }
-
-  .about-row {
-    flex-wrap: wrap;
-  }
+  .ov-row > button { flex: 1 1 auto; }
+  .ov-meta { flex: 1 1 100%; }
+  #ex-id { flex-basis: 100%; }
+  .ex-bar .ex-only { margin-left: 0; }
+  .kv-grid { grid-template-columns: minmax(0, 1fr); }
 }
