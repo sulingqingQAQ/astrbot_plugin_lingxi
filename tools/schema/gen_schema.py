@@ -39,7 +39,7 @@ OUT_PATH = os.path.join(_ROOT, "lx", "config", "generated", "_conf_schema.v2.jso
 
 _OVERRIDES_HINT = (
     "给个别会话单独改设置，只写要改的项，没写的沿用上面的全局配置。格式是 YAML（也可以写 JSON）：\n"
-    "group:683511242:\n  context:\n    max_messages: 80\n  idle:\n    enabled: true\n"
+    "group:900100200:\n  context:\n    max_messages: 80\n  idle:\n    enabled: true\n"
     "private:10001:\n  base:\n    take_over: true\n"
     "键写 group:群号 或 private:QQ号；里面的块名和项名与上面的全局配置一致。写错的项会被忽略并在日志里提示。"
 )

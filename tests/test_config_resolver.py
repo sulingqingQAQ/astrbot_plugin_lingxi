@@ -10,7 +10,7 @@ from lx.config.resolver import ConfigResolver, ResolvedConfig
 from lx.contracts import Scope, SessionKey
 from lx.session.key import from_umo
 
-G = SessionKey(Scope.GROUP, "683511242", "aiocqhttp")
+G = SessionKey(Scope.GROUP, "900100200", "aiocqhttp")
 G2 = SessionKey(Scope.GROUP, "900000001", "aiocqhttp")
 P = SessionKey(Scope.PRIVATE, "10001", "aiocqhttp")
 P2 = SessionKey(Scope.PRIVATE, "10002", "aiocqhttp")
@@ -65,7 +65,7 @@ class FourLayerTest(unittest.TestCase):
             private={"context": {"max_messages": 50, "inject_messages": 10}, "idle": {"base_minutes": 45}},
             group={"context": {"max_messages": 300}, "activity": {"enabled": True}},
             overrides={
-                "group:683511242": {"context": {"max_messages": 80}},
+                "group:900100200": {"context": {"max_messages": 80}},
                 "private:10001": {"context": {"inject_messages": 5}},
             },
         )
@@ -102,12 +102,12 @@ class FourLayerTest(unittest.TestCase):
         self.assertEqual(r.resolve(SessionKey(Scope.PRIVATE, "555", "p")).get("context.max_messages"), 7)
 
     def test_platform_name_ignored_when_matching(self):
-        other = SessionKey(Scope.GROUP, "683511242", "another_bot")
+        other = SessionKey(Scope.GROUP, "900100200", "another_bot")
         self.assertEqual(self.r.resolve(other).get("context.max_messages"), 80)
 
     def test_isolated_group_session_uses_group_override(self):
         # unique_session：同一个群里不同发言人的会话键相同，群覆盖都能命中
-        key = from_umo("aiocqhttp:GroupMessage:10001_683511242")
+        key = from_umo("aiocqhttp:GroupMessage:10001_900100200")
         self.assertEqual(self.r.resolve(key).get("context.max_messages"), 80)
 
     def test_all_four_layers_in_one_field(self):
@@ -147,7 +147,7 @@ class FourLayerTest(unittest.TestCase):
         self.assertEqual(r.warnings, [])
 
     def test_override_key_as_full_umo(self):
-        r = ConfigResolver(overrides={"aiocqhttp:GroupMessage:683511242": {"context": {"max_messages": 12}}})
+        r = ConfigResolver(overrides={"aiocqhttp:GroupMessage:900100200": {"context": {"max_messages": 12}}})
         self.assertEqual(r.resolve(G).get("context.max_messages"), 12)
 
     def test_P1_4_override_key_private_message_umo(self):
@@ -215,8 +215,8 @@ class WarningsTest(unittest.TestCase):
         self.assertEqual(r.resolve(G).get("context.max_messages"), 200)
 
     def test_bad_override_key_warned(self):
-        r = ConfigResolver(overrides={"683511242": {"context": {"max_messages": 80}}, "weird:x": {}, 5: {}})
-        self.assertTrue(any("683511242" in w for w in r.warnings), r.warnings)
+        r = ConfigResolver(overrides={"900100200": {"context": {"max_messages": 80}}, "weird:x": {}, 5: {}})
+        self.assertTrue(any("900100200" in w for w in r.warnings), r.warnings)
         # 没有 group:/private: 前缀的裸 ID 分不清是群还是人，不生效
         self.assertEqual(r.resolve(G).get("context.max_messages"), 200)
 
@@ -267,7 +267,7 @@ class WhitelistTest(unittest.TestCase):
         self.assertFalse(r.is_enabled(G))
 
     def test_listed_ids_enabled(self):
-        r = ConfigResolver(private={"whitelist": {"enabled": True, "ids": ["10001"]}}, group={"whitelist": {"enabled": True, "ids": [683511242]}})
+        r = ConfigResolver(private={"whitelist": {"enabled": True, "ids": ["10001"]}}, group={"whitelist": {"enabled": True, "ids": [900100200]}})
         self.assertTrue(r.is_enabled(P))
         self.assertFalse(r.is_enabled(P2))
         self.assertTrue(r.is_enabled(G))
@@ -287,7 +287,7 @@ class WhitelistTest(unittest.TestCase):
     def test_entries_may_be_full_umo(self):
         r = ConfigResolver(
             private={"whitelist": {"enabled": True, "ids": ["default:FriendMessage:10001"]}},
-            group={"whitelist": {"enabled": True, "ids": ["aiocqhttp:GroupMessage:683511242"]}},
+            group={"whitelist": {"enabled": True, "ids": ["aiocqhttp:GroupMessage:900100200"]}},
         )
         self.assertTrue(r.is_enabled(P))
         self.assertTrue(r.is_enabled(G))
@@ -295,18 +295,18 @@ class WhitelistTest(unittest.TestCase):
     def test_P1_4_legacy_message_types_in_entries(self):
         r = ConfigResolver(
             private={"whitelist": {"enabled": True, "ids": ["default:PrivateMessage:10001"]}},
-            group={"whitelist": {"enabled": True, "ids": ["default:GuildMessage:683511242"]}},
+            group={"whitelist": {"enabled": True, "ids": ["default:GuildMessage:900100200"]}},
         )
         self.assertTrue(r.is_enabled(P))
         self.assertTrue(r.is_enabled(G))
 
     def test_isolated_group_key_matches_group_whitelist(self):
-        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["683511242"]}})
-        self.assertTrue(r.is_enabled(from_umo("aiocqhttp:GroupMessage:10001_683511242")))
+        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["900100200"]}})
+        self.assertTrue(r.is_enabled(from_umo("aiocqhttp:GroupMessage:10001_900100200")))
 
     def test_entry_in_isolated_form_still_matches(self):
         # 用户从隔离会话里 /sid 复制出 发送者_群号
-        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["aiocqhttp:GroupMessage:10001_683511242"]}})
+        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["aiocqhttp:GroupMessage:10001_900100200"]}})
         self.assertTrue(r.is_enabled(G))
 
     def test_wrong_scope_entry_ignored_with_warning(self):
@@ -326,8 +326,8 @@ class WhitelistTest(unittest.TestCase):
 
     def test_base_enabled_false_in_override_disables_session(self):
         r = ConfigResolver(
-            group={"whitelist": {"enabled": True, "ids": ["683511242", "900000001"]}},
-            overrides={"group:683511242": {"base": {"enabled": False}}},
+            group={"whitelist": {"enabled": True, "ids": ["900100200", "900000001"]}},
+            overrides={"group:900100200": {"base": {"enabled": False}}},
         )
         self.assertFalse(r.is_enabled(G))
         self.assertTrue(r.is_enabled(G2))
@@ -337,7 +337,7 @@ class WhitelistTest(unittest.TestCase):
         self.assertFalse(r.is_enabled(G))
 
     def test_override_base_enabled_true_does_not_bypass_whitelist(self):
-        r = ConfigResolver(overrides={"group:683511242": {"base": {"enabled": True}}})
+        r = ConfigResolver(overrides={"group:900100200": {"base": {"enabled": True}}})
         self.assertFalse(r.is_enabled(G))  # 白名单默认开且为空
 
 
@@ -373,7 +373,7 @@ class TakesOverTest(unittest.TestCase):
         self.assertFalse(r.takes_over(P))
 
     def test_group_never_taken_over(self):
-        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["683511242"]}})
+        r = ConfigResolver(group={"whitelist": {"enabled": True, "ids": ["900100200"]}})
         self.assertFalse(r.takes_over(G))
 
 

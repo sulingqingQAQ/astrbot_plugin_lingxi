@@ -121,7 +121,7 @@ class HandEditedTest(unittest.TestCase):
         "followup_settings.prompt_templates": ["合成追发一", "合成追发二"],
         # ---- 群聊
         "group_settings.enable": True,
-        "group_settings.session_list": ["default:GroupMessage:683511242"],
+        "group_settings.session_list": ["default:GroupMessage:900100200"],
         "group_settings.group_idle_trigger_minutes": 12,
         "group_settings.group_idle_max_minutes": 720,
         "group_settings.schedule_settings.max_unanswered_times": 1,
@@ -168,7 +168,7 @@ class HandEditedTest(unittest.TestCase):
     def test_group_values(self):
         g = self.grp
         self.assertIs(g["idle.enabled"], True)
-        self.assertEqual(g["whitelist.ids"], ["683511242"])
+        self.assertEqual(g["whitelist.ids"], ["900100200"])
         self.assertIs(g["whitelist.enabled"], True)
         self.assertEqual(g["idle.base_minutes"], 12)
         self.assertEqual(g["idle.max_minutes"], 720)
@@ -201,7 +201,7 @@ class HandEditedTest(unittest.TestCase):
     def test_end_to_end_through_resolver(self):
         res = ConfigResolver.from_plugin_config(self.new)
         priv = SessionKey(Scope.PRIVATE, "10001", "aiocqhttp")
-        grp = SessionKey(Scope.GROUP, "683511242", "aiocqhttp")
+        grp = SessionKey(Scope.GROUP, "900100200", "aiocqhttp")
         self.assertEqual(res.warnings, [])
         self.assertTrue(res.is_enabled(priv))
         self.assertTrue(res.is_enabled(grp))
@@ -340,9 +340,9 @@ class CrossKeyRulesTest(unittest.TestCase):
         self.assertEqual(new["group"]["whitelist"]["ids"], ["g-9"])
 
     def test_isolated_form_in_old_group_list_resolves_to_real_group(self):
-        old = self.conf(group_settings__session_list=["aiocqhttp:GroupMessage:10001_683511242"])
+        old = self.conf(group_settings__session_list=["aiocqhttp:GroupMessage:10001_900100200"])
         new, _ = mg.migrate_legacy(old)
-        self.assertEqual(new["group"]["whitelist"]["ids"], ["683511242"])
+        self.assertEqual(new["group"]["whitelist"]["ids"], ["900100200"])
 
     def test_wrong_scope_and_junk_entries_dropped_with_note(self):
         old = self.conf(friend_settings__session_list=["default:GroupMessage:999", "   ", "10001", "10001"])

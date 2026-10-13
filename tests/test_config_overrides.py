@@ -12,7 +12,7 @@ from lx.contracts import Scope, SessionKey
 
 YAML_TEXT = """\
 # 给个别会话单独改设置
-group:683511242:
+group:900100200:
   context:
     max_messages: 80
   idle:
@@ -23,12 +23,12 @@ private:10001:
 """
 
 EXPECTED = {
-    "group:683511242": {"context": {"max_messages": 80}, "idle": {"enabled": True}},
+    "group:900100200": {"context": {"max_messages": 80}, "idle": {"enabled": True}},
     "private:10001": {"base": {"take_over": True}},
 }
 
 JSON_TEXT = """{
-  "group:683511242": {"context": {"max_messages": 80}, "idle": {"enabled": true}},
+  "group:900100200": {"context": {"max_messages": 80}, "idle": {"enabled": true}},
   "private:10001": {"base": {"take_over": true}}
 }"""
 
@@ -56,9 +56,9 @@ class BasicParseTest(unittest.TestCase):
         self.assertEqual((d, errs), ({"group:1": {"context.max_messages": 5}}, []))
 
     def test_numeric_session_keys_become_strings(self):
-        d, errs = ov.parse_overrides_text("683511242:\n  context:\n    max_messages: 5\n")
+        d, errs = ov.parse_overrides_text("900100200:\n  context:\n    max_messages: 5\n")
         self.assertEqual(errs, [])
-        self.assertEqual(list(d), ["683511242"])  # 缺 group:/private: 前缀是解析器的事，这里只保证键是字符串
+        self.assertEqual(list(d), ["900100200"])  # 缺 group:/private: 前缀是解析器的事，这里只保证键是字符串
 
     def test_session_with_nothing_under_it_is_empty_override(self):
         d, errs = ov.parse_overrides_text("group:1:\n")
@@ -77,7 +77,7 @@ class BasicParseTest(unittest.TestCase):
         d, errs = ov.parse_overrides_text(YAML_TEXT)
         r = ConfigResolver(overrides=d)
         self.assertEqual(errs, [])
-        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "683511242", "p")).get("context.max_messages"), 80)
+        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "900100200", "p")).get("context.max_messages"), 80)
         self.assertEqual(r.warnings, [])
 
 

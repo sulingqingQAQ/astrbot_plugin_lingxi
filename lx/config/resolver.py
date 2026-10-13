@@ -3,7 +3,7 @@
 输入全是普通 dict，不依赖 WebUI 怎么存（覆盖表怎么从 WebUI 字段读出来是 adapters 的事，见 overrides.py）：
 - private / group：全局私聊、全局群聊配置，`{块: {键: 值}}`；可以只写一部分，缺的用规格表默认值。
   里面的 `whitelist` 块是白名单（开关 + ID 列表），不参与分会话覆盖。
-- overrides：覆盖表，`{"group:683511242": {"context": {"max_messages": 80}}}`，**稀疏**，只写要改的项，逐字段覆盖。
+- overrides：覆盖表，`{"group:900100200": {"context": {"max_messages": 80}}}`，**稀疏**，只写要改的项，逐字段覆盖。
   键写 `group:群号` / `private:QQ号`，也可以直接写完整 UMO；值里可以写嵌套 dict，也可以写 `"context.max_messages": 80`。
 - whitelist：可选，`{"private": {"enabled":..,"ids":[..]}, "group": {...}}`，给了就盖过全局块里的 `whitelist`。
 

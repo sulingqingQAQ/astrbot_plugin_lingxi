@@ -48,8 +48,8 @@ class FromUmoTest(unittest.TestCase):
         self.assertEqual(key, SessionKey(Scope.PRIVATE, "10001", "aiocqhttp"))
 
     def test_group(self):
-        key = from_umo("aiocqhttp:GroupMessage:683511242")
-        self.assertEqual(key, SessionKey(Scope.GROUP, "683511242", "aiocqhttp"))
+        key = from_umo("aiocqhttp:GroupMessage:900100200")
+        self.assertEqual(key, SessionKey(Scope.GROUP, "900100200", "aiocqhttp"))
 
     def test_P1_4_private_message_routes_to_private(self):
         # DSH P1-4：旧代码把 PrivateMessage 认成会话类型，却因 "Friend" in msg_type 为假而路由不到私聊配置
@@ -97,9 +97,9 @@ class UniqueSessionTest(unittest.TestCase):
 
     def test_isolated_session_id_digits_heuristic(self):
         # 没有任何额外信息时，纯数字 `发送者_群号` 视为被隔离（QQ 号和群号都不含下划线）
-        key = from_umo("aiocqhttp:GroupMessage:10001_683511242")
+        key = from_umo("aiocqhttp:GroupMessage:10001_900100200")
         self.assertEqual(key.scope, Scope.GROUP)
-        self.assertEqual(key.id, "683511242")
+        self.assertEqual(key.id, "900100200")
 
     def test_group_id_from_event_wins(self):
         # adapters 手里有事件：event.get_group_id() 是权威，不靠猜
@@ -112,8 +112,8 @@ class UniqueSessionTest(unittest.TestCase):
         self.assertEqual(key.id, "BBBB2222")
 
     def test_isolated_flag_false_never_strips(self):
-        key = from_umo("aiocqhttp:GroupMessage:10001_683511242", isolated=False)
-        self.assertEqual(key.id, "10001_683511242")
+        key = from_umo("aiocqhttp:GroupMessage:10001_900100200", isolated=False)
+        self.assertEqual(key.id, "10001_900100200")
 
     def test_lark_percent_form(self):
         key = from_umo("lark:GroupMessage:ou_abc%oc_group9", isolated=True)
@@ -129,15 +129,15 @@ class UniqueSessionTest(unittest.TestCase):
         self.assertEqual(key.id, "10001_20002")
 
     def test_same_group_different_speakers_same_key(self):
-        a = from_umo("aiocqhttp:GroupMessage:10001_683511242")
-        b = from_umo("aiocqhttp:GroupMessage:10002_683511242")
-        c = from_umo("aiocqhttp:GroupMessage:683511242")
+        a = from_umo("aiocqhttp:GroupMessage:10001_900100200")
+        b = from_umo("aiocqhttp:GroupMessage:10002_900100200")
+        c = from_umo("aiocqhttp:GroupMessage:900100200")
         self.assertEqual(a, b)
         self.assertEqual(a, c)
 
     def test_strip_isolation_function(self):
-        self.assertEqual(strip_isolation("10001_683511242"), "683511242")
-        self.assertEqual(strip_isolation("683511242"), "683511242")
+        self.assertEqual(strip_isolation("10001_900100200"), "900100200")
+        self.assertEqual(strip_isolation("900100200"), "900100200")
         self.assertEqual(strip_isolation("x_y"), "x_y")
         self.assertEqual(strip_isolation("x_y", isolated=True), "y")
         self.assertEqual(strip_isolation("a%b", isolated=True), "b")
@@ -149,10 +149,10 @@ class ToUmoTest(unittest.TestCase):
         self.assertEqual(to_umo(SessionKey(Scope.PRIVATE, "10001", "aiocqhttp")), "aiocqhttp:FriendMessage:10001")
 
     def test_group(self):
-        self.assertEqual(to_umo(SessionKey(Scope.GROUP, "683511242", "aiocqhttp")), "aiocqhttp:GroupMessage:683511242")
+        self.assertEqual(to_umo(SessionKey(Scope.GROUP, "900100200", "aiocqhttp")), "aiocqhttp:GroupMessage:900100200")
 
     def test_roundtrip(self):
-        for umo in ("aiocqhttp:FriendMessage:10001", "aiocqhttp:GroupMessage:683511242", "p:GroupMessage:!r:s.org"):
+        for umo in ("aiocqhttp:FriendMessage:10001", "aiocqhttp:GroupMessage:900100200", "p:GroupMessage:!r:s.org"):
             self.assertEqual(to_umo(from_umo(umo)), umo)
 
     def test_legacy_types_normalized_on_output(self):
@@ -162,8 +162,8 @@ class ToUmoTest(unittest.TestCase):
 
     def test_isolated_group_key_gives_group_umo(self):
         # 隔离会话的 key 用真群号；to_umo 给出"群本身"的 UMO（aiocqhttp.send_by_session 对群会话取 split("_")[-1]，两种形式都能发到群里）
-        key = from_umo("aiocqhttp:GroupMessage:10001_683511242")
-        self.assertEqual(to_umo(key), "aiocqhttp:GroupMessage:683511242")
+        key = from_umo("aiocqhttp:GroupMessage:10001_900100200")
+        self.assertEqual(to_umo(key), "aiocqhttp:GroupMessage:900100200")
 
     def test_missing_platform_raises(self):
         with self.assertRaises(SessionKeyError):
@@ -183,11 +183,11 @@ class NormalizeSessionRefTest(unittest.TestCase):
         self.assertEqual(normalize_session_ref("default:FriendMessage:10001"), (Scope.PRIVATE, "10001"))
 
     def test_full_umo_group_isolated_form(self):
-        self.assertEqual(normalize_session_ref("default:GroupMessage:10001_683511242"), (Scope.GROUP, "683511242"))
+        self.assertEqual(normalize_session_ref("default:GroupMessage:10001_900100200"), (Scope.GROUP, "900100200"))
 
     def test_int_value_accepted(self):
         # YAML / JSON 里用户可能写成数字
-        self.assertEqual(normalize_session_ref(683511242), (None, "683511242"))
+        self.assertEqual(normalize_session_ref(900100200), (None, "900100200"))
 
     def test_blank_and_garbage(self):
         self.assertIsNone(normalize_session_ref(""))
