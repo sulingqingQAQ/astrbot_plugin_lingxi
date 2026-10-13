@@ -143,7 +143,24 @@ def _default_service():
                          plugin_version=PLUGIN_VERSION)
 
 
-def _make_api(service):
+def _make_diag(service):
+    """真 ConfigService → 真 DiagService + 灌了合成历史的真 DiagRecorder（DIAG-2）。
+    返回 (diag_service, recorder, expect, tmp_dir)；任何一步失败返回 (None, None, None, None)。"""
+    try:
+        import tempfile
+        from lx.webui.diag_service import DiagService
+        from .diag_seed import seed, fake_state
+        tmp = tempfile.mkdtemp(prefix="lx_ui_diag_")
+        rec, clock, expect = seed(tmp)
+        svc = DiagService(rec, service, state_provider=fake_state,
+                          env_provider=lambda: {"timezone": "UTC+8", "astrbot_version": "夹具"},
+                          clock=clock)
+        return svc, rec, expect, tmp
+    except Exception:
+        return None, None, None, None
+
+
+def _make_api(service, diag_service=None):
     """真 ConfigService → 用生产用的 LingxiWebApi 适配层分发（夹具测的就是生产代码）；
     StubService（自带 meta / choices 等方法）→ None，走老的按方法名分发。"""
     if hasattr(service, "meta"):
@@ -159,7 +176,8 @@ def _make_api(service):
         service,
         lambda: build_meta(PLUGIN_VERSION, _spec.SCHEMA_VERSION),
         choices_provider=lambda: {"providers": ["demo-provider-1", "demo-provider-2"],
-                                  "personas": ["苏灵卿"]})
+                                  "personas": ["苏灵卿"]},
+        diag_service=diag_service)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -332,7 +350,14 @@ class Harness:
     def __init__(self, page_dir, service=None, port=0, host="127.0.0.1"):
         self.page_dir = Path(page_dir).resolve()
         self.service = service if service is not None else _default_service()
-        self.api = _make_api(self.service)
+        # 诊断：真服务路径上挂一个灌了合成历史的真记录器；diag_rec / diag_expect 给场景脚本直接用
+        self.diag_rec = None
+        self.diag_expect = None
+        self._diag_tmp = None
+        diag_service = None
+        if not hasattr(self.service, "meta"):
+            diag_service, self.diag_rec, self.diag_expect, self._diag_tmp = _make_diag(self.service)
+        self.api = _make_api(self.service, diag_service)
         self.host = host
         self.port = port
         self.lock = threading.Lock()
@@ -366,6 +391,16 @@ class Harness:
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
+        if self.diag_rec is not None:
+            try:
+                self.diag_rec.close()
+            except Exception:
+                pass
+            self.diag_rec = None
+        if self._diag_tmp:
+            import shutil
+            shutil.rmtree(self._diag_tmp, ignore_errors=True)
+            self._diag_tmp = None
 
 
 def main(argv=None):
