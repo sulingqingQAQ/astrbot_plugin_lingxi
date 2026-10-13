@@ -467,5 +467,291 @@ class TestOnMessageWait(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(resolves), 2)
 
 
+# -- on_llm_request -------------------------------------------------------------
+
+class TestOnLlmRequest(unittest.TestCase):
+    def test_no_turn_returns_untouched(self):
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        req = FakeReq(system_prompt="旧", contexts=[{"role": "user"}])
+        import asyncio as _a
+        _a.new_event_loop().run_until_complete(h.on_llm_request(ev, req))
+        self.assertEqual(req.system_prompt, "旧")
+        self.assertEqual(req.extra_user_content_parts, [])
+        self.assertEqual(req.contexts, [{"role": "user"}])
+
+    def _run(self, h, ev, req):
+        import asyncio as _a
+        _a.new_event_loop().run_until_complete(h.on_llm_request(ev, req))
+
+    def test_append_tail_and_no_duplicate(self):
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        asm = _asm(system_tail="尾部A", user_text="")
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": asm})
+        req = FakeReq(system_prompt="旧提示")
+        self._run(h, ev, req)
+        self.assertEqual(req.system_prompt, "旧提示\n尾部A")
+        self._run(h, ev, req)
+        self.assertEqual(req.system_prompt, "旧提示\n尾部A")
+
+    def test_empty_tail_not_appended(self):
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm(system_tail="")})
+        req = FakeReq(system_prompt="旧")
+        self._run(h, ev, req)
+        self.assertEqual(req.system_prompt, "旧")
+
+    def test_user_text_uses_factory(self):
+        made = []
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: made.append(t) or ("PART", t))
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm(user_text="本轮文本")})
+        req = FakeReq()
+        self._run(h, ev, req)
+        self.assertEqual(made, ["本轮文本"])
+        self.assertEqual(req.extra_user_content_parts, [("PART", "本轮文本")])
+
+    def test_model_rounds_none_keeps_contexts(self):
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm(model_rounds=None)})
+        ctx = [{"role": "user", "content": "a"},
+               {"role": "assistant", "content": "b"}]
+        req = FakeReq(contexts=ctx)
+        self._run(h, ev, req)
+        self.assertEqual(req.contexts, ctx)
+
+    def test_model_rounds_positive_trims(self):
+        c = _components()
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm(model_rounds=1)})
+        ctx = [{"role": "user", "content": "第一轮"},
+               {"role": "assistant", "content": "回一"},
+               {"role": "user", "content": "第二轮"}]
+        req = FakeReq(contexts=ctx)
+        self._run(h, ev, req)
+        self.assertEqual(len(req.contexts), 1)
+        self.assertEqual(req.contexts[0]["content"], "第二轮")
+
+
+# -- on_decorating_result / on_after_sent -------------------------------------
+
+def _parsed(text=None, parts=(), silent=False, needs_retry=False):
+    from lx.brain.outcome import ParsedReply
+    from lx.contracts import Outcome
+    outcome = Outcome(text=text, silent=silent, reason="合成")
+    return ParsedReply(outcome=outcome, parts=list(parts),
+                       needs_retry=needs_retry)
+
+
+class TestOnDecoratingResult(unittest.IsolatedAsyncioTestCase):
+    def _handler(self, c=None, logs=None):
+        c = c or _components()
+        h = EHandlers(c, plain_factory=lambda t: Plain(t),
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      log=(logs.append if logs is not None else (lambda s: None)))
+        return c, h
+
+    def _event_with_turn(self, chain, key=None):
+        from lx.contracts import Scope as _Scope
+        key = key or SessionKey(_Scope.GROUP, GROUP_ID, "aiocqhttp")
+        trig = _trigger()
+        ev = _group_event(result=FakeResult(chain=chain))
+        ev.set_extra("lingxi.turn", {"key": key, "trigger": trig,
+                                     "asm": _asm()})
+        return ev, key, trig
+
+    async def test_no_turn_returns(self):
+        c, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("hi")]))
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev._result.chain[0].text, "hi")
+        self.assertEqual(c.brain.reported, [])
+
+    async def test_none_result_registers_unsent(self):
+        brain = FakeBrain()
+        empty = _parsed(text=None, parts=[], silent=True)
+        def _finish(key, trigger, raw):
+            brain.finished.append((key, trigger, raw))
+            return empty
+        brain.finish = _finish  # type: ignore[method-assign]
+        c = _components(brain=brain)
+        c, h = self._handler(c)
+        ev = _group_event(result=None)
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        await h.on_decorating_result(ev)
+        self.assertEqual(brain.finished[-1][2], None)
+        self.assertEqual(brain.reported[-1][2], empty)
+        self.assertFalse(brain.reported[-1][3])
+
+    async def test_silent_clears_chain_and_reports_false(self):
+        brain = FakeBrain()
+        silent = _parsed(text=None, parts=[], silent=True)
+        def _finish(key, trigger, raw):
+            return silent
+        brain.finish = _finish  # type: ignore[method-assign]
+        c = _components(brain=brain)
+        c, h = self._handler(c)
+        ev, _key, _trig = self._event_with_turn([Plain("模型说了啥")])
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev._result.chain, [])
+        self.assertFalse(brain.reported[-1][3])
+
+    async def test_needs_retry_only_logs(self):
+        logs: list = []
+        brain = FakeBrain()
+        retry = _parsed(text=None, parts=[], silent=False, needs_retry=True)
+        def _finish(key, trigger, raw):
+            return retry
+        brain.finish = _finish  # type: ignore[method-assign]
+        c = _components(brain=brain)
+        c, h = self._handler(c, logs)
+        ev, _key, _trig = self._event_with_turn([Plain("空")])
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev._result.chain, [])
+        self.assertTrue(any("重试" in s or "retry" in s.lower() for s in logs))
+
+    async def test_normal_replaces_plain_keeps_others(self):
+        brain = FakeBrain()
+        parsed = _parsed(text="a\nb", parts=["a", "b"])
+        def _finish(key, trigger, raw):
+            assert raw == "旧一旧二"
+            return parsed
+        brain.finish = _finish  # type: ignore[method-assign]
+        c = _components(brain=brain)
+        c, h = self._handler(c)
+        at = At(qq="10002")
+        ev, _key, _trig = self._event_with_turn(
+            [Plain("旧一"), at, Plain("旧二")])
+        await h.on_decorating_result(ev)
+        self.assertEqual(len(ev._result.chain), 2)
+        self.assertEqual(ev._result.chain[0].text, "a\nb")
+        self.assertIs(ev._result.chain[1], at)
+        self.assertIs(ev.get_extra("lingxi.parsed"), parsed)
+        self.assertEqual(brain.reported, [])
+
+    async def test_busy_removed(self):
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        def _finish(key, trigger, raw):
+            return parsed
+        brain.finish = _finish  # type: ignore[method-assign]
+        from lx.contracts import Scope as _Scope
+        key = SessionKey(_Scope.GROUP, GROUP_ID, "aiocqhttp")
+        busy = {key}
+        c = _components(brain=brain, busy=busy)
+        c, h = self._handler(c)
+        h._busy_since[key] = 1.0
+        ev = _group_event(result=FakeResult(chain=[Plain("x")]))
+        ev.set_extra("lingxi.turn", {"key": key, "trigger": _trigger(),
+                                     "asm": _asm()})
+        await h.on_decorating_result(ev)
+        self.assertNotIn(key, busy)
+        self.assertNotIn(key, h._busy_since)
+
+
+class TestOnAfterSent(unittest.IsolatedAsyncioTestCase):
+    async def test_reports_once_and_clears(self):
+        brain = FakeBrain()
+        c = _components(brain=brain)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        parsed = _parsed(text="a", parts=["a"])
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        ev.set_extra("lingxi.parsed", parsed)
+        await h.on_after_sent(ev)
+        self.assertEqual(brain.reported[-1][2], parsed)
+        self.assertTrue(brain.reported[-1][3])
+        self.assertIsNone(ev.get_extra("lingxi.turn"))
+        self.assertIsNone(ev.get_extra("lingxi.parsed"))
+        await h.on_after_sent(ev)
+        self.assertEqual(len(brain.reported), 1)
+
+    async def test_missing_parsed_no_report(self):
+        brain = FakeBrain()
+        c = _components(brain=brain)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event()
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        await h.on_after_sent(ev)
+        self.assertEqual(brain.reported, [])
+
+
+# -- busy 过期与异常安全 -------------------------------------------------------
+
+class TestBusyAndSafety(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_busy_swept_with_log(self):
+        logs: list = []
+        brain = FakeBrain()
+        brain.prepare_result = _prepared(allowed=True, asm=_asm())
+        c = _components(brain=brain,
+                        router=FakeRouter(trigger=_trigger()))
+        old_key = SessionKey(Scope.GROUP, "oldgroup", "aiocqhttp")
+        c.busy.add(old_key)
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      clock=lambda: 1000.0, busy_ttl=180.0,
+                      log=logs.append)
+        h._busy_since[old_key] = 1000.0 - 500.0
+        ev = _group_event()
+        await _collect(h.on_message(ev))
+        self.assertNotIn(old_key, c.busy)
+        self.assertTrue(any("busy" in s for s in logs))
+
+    async def test_prepare_raises_neither_raises_nor_stops(self):
+        class BoomBrain(FakeBrain):
+            def prepare(self, key, trigger):
+                raise RuntimeError("合成闸门故障")
+        c = _components(router=FakeRouter(trigger=_trigger()),
+                        brain=BoomBrain())
+        logs: list = []
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      log=logs.append)
+        ev = _group_event()
+        out = await _collect(h.on_message(ev))
+        self.assertEqual(out, [])
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertTrue(logs)
+
+    async def test_hook_exception_never_leaks(self):
+        class BoomBrain(FakeBrain):
+            def finish(self, key, trigger, raw):
+                raise RuntimeError("合成解析故障")
+        c = _components(brain=BoomBrain())
+        h = EHandlers(c, plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t))
+        ev = _group_event(result=FakeResult(chain=[Plain("x")]))
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        await h.on_decorating_result(ev)  # 不抛
+        await h.on_after_sent(ev)  # 不抛
+        self.assertEqual(ev.stop_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

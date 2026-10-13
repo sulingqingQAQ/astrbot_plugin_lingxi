@@ -236,25 +236,175 @@ class EHandlers:
             _safe_log(self._log, "[handlers] 清扫陈旧 busy %d 个" % len(stale))
 
     async def on_llm_request(self, event: Any, req: Any) -> None:
-        """普通 async def（硬约束：不能 yield）。"""
+        """普通 async def（硬约束：不能 yield）。只拼装，不改 prompt。"""
         try:
-            pass
+            try:
+                turn = event.get_extra("lingxi.turn")
+            except Exception:
+                return
+            if not isinstance(turn, dict):
+                return
+            asm = turn.get("asm")
+            if asm is None:
+                return
+            tail = getattr(asm, "system_tail", "") or ""
+            try:
+                current = req.system_prompt
+            except Exception:
+                current = ""
+            if not isinstance(current, str):
+                try:
+                    current = str(current or "")
+                except Exception:
+                    current = ""
+            if isinstance(tail, str) and tail and tail not in current:
+                try:
+                    req.system_prompt = (current or "") + "\n" + tail
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 写 system_prompt 失败：%r" % (e,))
+            user_text = getattr(asm, "user_text", "") or ""
+            if isinstance(user_text, str) and user_text:
+                try:
+                    part = self._text_part_factory(user_text)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 构造临时 part 失败：%r" % (e,))
+                    part = None
+                if part is not None:
+                    try:
+                        req.extra_user_content_parts.append(part)
+                    except Exception as e:
+                        _safe_log(self._log, "[handlers] 追加临时 part 失败：%r" % (e,))
+            rounds = getattr(asm, "model_rounds", None)
+            if isinstance(rounds, bool):
+                rounds = None
+            if isinstance(rounds, int) and rounds > 0:
+                try:
+                    req.contexts = trim_rounds(req.contexts, rounds)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 裁剪 contexts 失败：%r" % (e,))
         except Exception as e:
             _safe_log(self._log, "[handlers] on_llm_request 异常：%r" % (e,))
         return
 
     async def on_decorating_result(self, event: Any) -> None:
-        """普通 async def。"""
+        """普通 async def。拿文本 → finish → 改链 / 清链 → 登记。"""
         try:
-            pass
+            try:
+                turn = event.get_extra("lingxi.turn")
+            except Exception:
+                return
+            if not isinstance(turn, dict):
+                return
+            key = turn.get("key")
+            trigger = turn.get("trigger")
+            if key is None or trigger is None:
+                return
+            try:
+                self._c.busy.discard(key)
+            except Exception:
+                pass
+            try:
+                self._busy_since.pop(key, None)
+            except Exception:
+                pass
+            try:
+                result = event.get_result()
+            except Exception as e:
+                _safe_log(self._log, "[handlers] get_result 失败：%r" % (e,))
+                return
+            chain = getattr(result, "chain", None) if result is not None else None
+            if not chain:
+                parsed = self._c.brain.finish(key, trigger, None)
+                try:
+                    self._c.brain.report(key, trigger, parsed, False)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+                return
+            try:
+                items = list(chain)
+            except TypeError:
+                items = []
+            raw = ""
+            for comp in items:
+                try:
+                    if type(comp).__name__ == "Plain":
+                        raw += getattr(comp, "text", "") or ""
+                except Exception:
+                    continue
+            parsed = self._c.brain.finish(key, trigger, raw)
+            if getattr(parsed, "needs_retry", False):
+                _safe_log(self._log, "[handlers] 需要重试但 E 路径无法重试，已跳过")
+            outcome = getattr(parsed, "outcome", None)
+            silent = bool(getattr(outcome, "silent", False))
+            parts = getattr(parsed, "parts", None) or []
+            if silent or not parts:
+                try:
+                    result.chain = []
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 清空 chain 失败：%r" % (e,))
+                try:
+                    self._c.brain.report(key, trigger, parsed, False)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+                return
+            try:
+                text = "\n".join(parts)
+            except Exception:
+                text = ""
+            try:
+                first = self._plain_factory(text)
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 构造 Plain 失败：%r" % (e,))
+                return
+            rest = []
+            for comp in items:
+                try:
+                    if type(comp).__name__ != "Plain":
+                        rest.append(comp)
+                except Exception:
+                    continue
+            try:
+                result.chain = [first] + rest
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 写回 chain 失败：%r" % (e,))
+                return
+            try:
+                event.set_extra("lingxi.parsed", parsed)
+            except Exception as e:
+                _safe_log(self._log, "[handlers] set_extra 失败：%r" % (e,))
         except Exception as e:
             _safe_log(self._log, "[handlers] on_decorating_result 异常：%r" % (e,))
         return
 
     async def on_after_sent(self, event: Any) -> None:
-        """普通 async def。"""
+        """普通 async def。成功送达才登记 True，且只登记一次。"""
         try:
-            pass
+            try:
+                turn = event.get_extra("lingxi.turn")
+            except Exception:
+                return
+            try:
+                parsed = event.get_extra("lingxi.parsed")
+            except Exception:
+                return
+            if not isinstance(turn, dict) or parsed is None:
+                return
+            key = turn.get("key")
+            trigger = turn.get("trigger")
+            if key is None or trigger is None:
+                return
+            try:
+                self._c.brain.report(key, trigger, parsed, True)
+            except Exception as e:
+                _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+            try:
+                event.set_extra("lingxi.turn", None)
+            except Exception:
+                pass
+            try:
+                event.set_extra("lingxi.parsed", None)
+            except Exception:
+                pass
         except Exception as e:
             _safe_log(self._log, "[handlers] on_after_sent 异常：%r" % (e,))
         return
