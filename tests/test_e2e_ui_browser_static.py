@@ -229,5 +229,33 @@ class HelperFunctionTest(unittest.TestCase):
         self.assertTrue(0 < sb["mean_luma"] < 255)
 
 
+class DiagB9StaticTest(unittest.TestCase):
+    """DIAG-3m：B9（诊断标签）的静态约束。真跑要起隔离 AstrBot，见 e2e_ui_browser.py 文件头。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _read(SCRIPT)
+
+    def test_b9_registered_and_tabs_expectation_updated(self):
+        self.assertIn("def _sc_B9(", self.src)
+        self.assertIn('("B9", _sc_B9)', self.src)
+        self.assertIn('EXPECT_TABS = ["私聊", "群聊", "分会话覆盖", "诊断", "关于"]', self.src)
+
+    def test_b9_downloads_into_isolated_root_via_cdp(self):
+        self.assertRegex(self.src, r'(?m)^DL_DIR\s*=\s*os\.path\.join\(ROOT,')
+        self.assertIn("setDownloadBehavior", self.src)
+
+    def test_b9_checks_default_bundle_has_no_reply_text(self):
+        body = self.src[self.src.index("async def _sc_B9("):]
+        body = body[:body.index("\n# 宿主 WebUI 一打开")]
+        for need in ('data-result=\\"delivered\\"', "diag-event-text", "diag-opt-text", "B9_REPLY not in blob",
+                     'b"PK"', "diag.json", "summary.md"):
+            self.assertIn(need, body, "B9 缺少检查：%s" % need)
+
+    def test_b9_runs_standalone_and_header_mentions_it(self):
+        self.assertIn("def _open_plugin_page(", self.src)
+        self.assertIn("B9（DIAG-3m）", self.src.split('"""', 2)[1])
+
+
 if __name__ == "__main__":
     unittest.main()
