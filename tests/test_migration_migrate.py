@@ -288,7 +288,7 @@ class PerKeyPerturbationTest(unittest.TestCase):
             r = next(r for r in report.results if r.legacy == entry.legacy)
             self.assertTrue(r.applied and r.changed_from_default, entry.legacy)
             checked += 1
-        self.assertGreaterEqual(checked, 110)  # 188 个里 117 个以上是简单搬运（其余是合并 / 联动 / 保留 / 丢弃）
+        self.assertGreaterEqual(checked, 110)  # 188 个里 116 个是简单搬运（其余是合并 / 联动 / 保留 / 丢弃）
 
 
 class CrossKeyRulesTest(unittest.TestCase):
