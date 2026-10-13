@@ -201,6 +201,14 @@ def _group3_config():
     }
 
 
+def _group4_config():
+    """组4群聊唤醒词：组3配置基础上显式打开唤醒词触发（F3）。"""
+    cfg = _group3_config()
+    cfg["group"]["trigger"]["keyword_enabled"] = True
+    cfg["group"]["trigger"]["wake_keywords"] = ["小苏"]
+    return cfg
+
+
 # -- 场景 ----------------------------------------------------------------------
 
 async def _sc_A(ctx, proc):
@@ -372,12 +380,41 @@ async def _sc_F2(ctx):
     assert reqs == [], "期望假 LLM 无请求，实际 %d 条" % len(reqs)
 
 
+async def _sc_F3(ctx):
+    """F3 唤醒词触发：不 @ 但含唤醒词 -> 回且请求有 [触发原因]；
+    再发一条无 @ 无唤醒词 -> 零发出零请求。"""
+    ctx.llm.script(["在呢。"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "小苏在吗", at_self=False)
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert texts and texts[0] == "在呢", (
+        "期望收到 '在呢'（句号被兜底去掉），实际=%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert len(reqs) == 1, "期望假 LLM 恰收到 1 条请求，实际 %d" % len(reqs)
+    users = _user_texts(reqs[0].get("messages"))
+    assert any("[触发原因]" in t for t in users), (
+        "期望请求里有 [触发原因]，实际=%r" % (users,))
+
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "今天天气真不错",
+                                at_self=False)
+    await asyncio.sleep(15)
+    sent2 = ctx.napcat.sent()
+    assert sent2 == [], (
+        "期望不回（sent 为空），实际发出 %d 条：%r"
+        % (len(sent2), [s["text"] for s in sent2]))
+    reqs2 = ctx.llm.requests()
+    assert reqs2 == [], "期望假 LLM 无请求，实际 %d 条" % len(reqs2)
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
       ("G", _sc_G), ("H", _sc_H)]),
     ("组2私聊不接管", _group2_config, [("E", _sc_E)]),
     ("组3群聊", _group3_config, [("F1", _sc_F1), ("F2", _sc_F2)]),
+    ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
 ]
 
 
@@ -450,7 +487,6 @@ async def amain(only):
         ctx.llm.stop()
         print("llm stopped", flush=True)
 
-    ctx.record("F3", "SKIP", "未做：要改配置，留给下一轮")
     print("", flush=True)
     print("名字 | 结果 | 说明", flush=True)
     print("---|---|---", flush=True)
