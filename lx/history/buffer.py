@@ -127,6 +127,42 @@ class MemoryHistoryBuffer:
             self._log(f"evict_idle 失败: {e!r}")
             return 0
 
+    async def pull(self, key: SessionKey) -> int:
+        """重启回拉，每个会话每次启动只拉一次，返回真正新增的条数。"""
+        try:
+            cfg = self._cfg_provider(key)
+            if not cfg.get("context.history_pull", False):
+                return 0
+            if self._puller is None:
+                return 0
+            st = self._states.get(key)
+            if st is not None and st.pulled:
+                return 0
+            try:
+                count = int(cfg.get("context.history_pull_count", 50))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                count = 50
+            incoming = await self._puller(key, count)
+        except Exception as e:
+            self._log(f"pull 回拉失败: {e!r}")
+            return 0
+        try:
+            st = self._state_for(key)
+            cleared = st.cleared_at
+            max_n = _max_messages(cfg)
+            added = 0
+            for m in incoming or []:
+                if cleared is not None and m.ts <= cleared:
+                    continue  # 用户清过历史，旧内容不再拉回来
+                if self._insert(st, m, max_n):
+                    added += 1
+            st.last_active = self._clock()
+            st.pulled = True
+            return added
+        except Exception as e:
+            self._log(f"pull 合并失败: {e!r}")
+            return 0
+
     def render(self, key: SessionKey, cfg: ResolvedConfig) -> HistoryView:
         raise NotImplementedError("A-2b")
 

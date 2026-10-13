@@ -1,8 +1,6 @@
 """A-2a 步骤 1 测试：record（记录/去重/排序/容量/开关）与 patch_image（P1-3）。
-
-全合成数据（发言人"甲""乙"、QQ 号 "u1"、文本"合成…"），不含真实群聊内容。
-先写测试再写实现；假时钟 FakeClock；unittest。
 """
+import asyncio
 import unittest
 
 from lx.contracts import ImageRef, Msg, Scope, SessionKey
@@ -199,6 +197,143 @@ class TestClearEvict(unittest.TestCase):
         b.clear(_key(), "合成原因")
         clock.advance(200.0)
         self.assertEqual(b.evict_idle(), 1)
+        self.assertIsNone(b.cleared_at(_key()))
+
+
+class TestPull(unittest.TestCase):
+    def _buf_pull(self, msgs=None, cfg=None, clock=None, logs=None, fail=False):
+        logs_list = logs if logs is not None else []
+        seen = {}
+
+        async def puller(key, count):
+            seen["count"] = count
+            if fail:
+                raise RuntimeError("合成拉取故障")
+            return list(msgs or [])
+
+        b = MemoryHistoryBuffer(
+            lambda key: FakeCfg({"context.history_pull": True, **(cfg or {})}),
+            clock=clock or FakeClock(), log=logs_list.append, puller=puller)
+        return b, seen, logs_list
+
+    def test_pull_disabled_returns_zero(self):
+        b = _buf({"context.history_pull": False}, puller=None)
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+
+    def test_pull_no_puller_returns_zero(self):
+        b = _buf({"context.history_pull": True})
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+
+    def test_pull_merges_sorted_and_counts_new_only(self):
+        clock = FakeClock()
+        b, seen, _ = self._buf_pull(
+            [_msg("m0", 50.0), _msg("m1", 100.0, text="合成新版"),
+             _msg("m2", 200.0)], clock=clock)
+        b.record(_key(), _msg("m1", 100.0, text="合成旧版"))
+        added = asyncio.run(b.pull(_key()))
+        self.assertEqual(added, 2)  # m1 已存在不算
+        got = b.messages(_key())
+        self.assertEqual([m.id for m in got], ["m0", "m1", "m2"])
+        self.assertEqual(got[1].text, "合成新版")  # 同 id 被后到版本替换
+
+    def test_pull_once_only(self):
+        b, _, _ = self._buf_pull([_msg("m1", 100.0)])
+        self.assertEqual(asyncio.run(b.pull(_key())), 1)
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+
+    def test_pull_filters_cleared(self):
+        clock = FakeClock(now=2000.0)
+        b, _, _ = self._buf_pull(
+            [_msg("m旧", 100.0), _msg("m新", 3000.0)], clock=clock)
+        b.record(_key(), _msg("m本地", 1500.0))
+        b.clear(_key(), "合成原因")  # cleared_at=2000
+        added = asyncio.run(b.pull(_key()))
+        self.assertEqual(added, 1)
+        self.assertEqual([m.id for m in b.messages(_key())], ["m新"])
+
+    def test_pull_error_not_marked_retry_ok(self):
+        clock = FakeClock()
+        logs = []
+        calls = []
+
+        async def flaky(key, count):
+            calls.append(count)
+            if len(calls) == 1:
+                raise RuntimeError("合成拉取故障")
+            return [_msg("m1", 100.0)]
+
+        b = MemoryHistoryBuffer(
+            lambda key: FakeCfg({"context.history_pull": True}),
+            clock=clock, log=logs.append, puller=flaky)
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)  # 失败不标记
+        self.assertTrue(logs)
+        self.assertEqual(asyncio.run(b.pull(_key())), 1)  # 下次还能试
+
+    def test_pull_success_empty_marks(self):
+        b, _, _ = self._buf_pull([])
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)  # 0 条也算拉过
+
+    def test_pull_uses_configured_count(self):
+        b, seen, _ = self._buf_pull([], cfg={"context.history_pull_count": 17})
+        asyncio.run(b.pull(_key()))
+        self.assertEqual(seen["count"], 17)
+
+    def test_pull_default_count_50(self):
+        b, seen, _ = self._buf_pull([])
+        asyncio.run(b.pull(_key()))
+        self.assertEqual(seen["count"], 50)
+
+    def test_pull_respects_capacity(self):
+        b, _, _ = self._buf_pull(
+            [_msg(f"m{i}", 100.0 + i) for i in range(5)],
+            cfg={"context.max_messages": 3})
+        self.assertEqual(asyncio.run(b.pull(_key())), 5)
+        self.assertEqual([m.id for m in b.messages(_key())], ["m2", "m3", "m4"])
+
+    def test_clear_resets_pulled(self):
+        clock = FakeClock(now=1000.0)
+        calls = []
+
+        async def puller(key, count):
+            calls.append(1)
+            return [_msg(f"m{len(calls)}", clock.now + len(calls))]
+
+        b = MemoryHistoryBuffer(
+            lambda key: FakeCfg({"context.history_pull": True}),
+            clock=clock, log=lambda s: None, puller=puller)
+        self.assertEqual(asyncio.run(b.pull(_key())), 1)
+        b.clear(_key(), "合成原因")  # cleared_at=1000，已回拉标记清掉
+        # 新消息 ts(1002) > cleared_at(1000)：可再拉一次
+        self.assertEqual(asyncio.run(b.pull(_key())), 1)
+        self.assertEqual(asyncio.run(b.pull(_key())), 0)
+
+
+class TestMisc(unittest.TestCase):
+    def test_sessions_isolated(self):
+        b = _buf()
+        b.record(_key("g1"), _msg("m1", 100.0))
+        b.record(_key("g1", platform="其他平台"), _msg("m9", 100.0))
+        b.record(SessionKey(Scope.PRIVATE, "g1", "plat"), _msg("m8", 100.0))
+        self.assertEqual([m.id for m in b.messages(_key("g1"))], ["m1"])
+        self.assertEqual(len(b.messages(_key("g2"))), 0)
+        self.assertEqual(b.evict_idle(), 0)
+
+    def test_render_raises_not_implemented(self):
+        b = _buf()
+        with self.assertRaises(NotImplementedError):
+            b.render(_key(), FakeCfg())
+
+    def test_messages_returns_copy(self):
+        b = _buf()
+        b.record(_key(), _msg("m1", 100.0))
+        got = b.messages(_key())
+        got.append(_msg("m伪", 50.0))
+        self.assertEqual([m.id for m in b.messages(_key())], ["m1"])
+
+    def test_cleared_at_none_initially(self):
+        b = _buf()
+        b.record(_key(), _msg("m1", 100.0))
         self.assertIsNone(b.cleared_at(_key()))
 
 
