@@ -9,7 +9,6 @@
   var TALL_TEXT_SUFFIXES = [".style_text", ".glossary_text", ".members_text"];
 
   var DEBOUNCE_MS = 150;
-  var NARROW_HINT = 700;
 
   function isTallPath(path) {
     for (var i = 0; i < TALL_TEXT_SUFFIXES.length; i++) {
@@ -56,16 +55,21 @@
     return String(value);
   }
 
+  function sanitizeId(s) {
+    return String(s).replace(/[^A-Za-z0-9_-]/g, "-");
+  }
+
   /* 每个 scope 一份 UI 状态。 */
   var views = {};
   function viewOf(scope) {
     if (!views[scope]) {
       views[scope] = {
         scope: scope, root: null, blockKey: null, search: "", onlyChanged: false,
-        fields: {},  /* path -> {wrap, badgeNew, badgeDirty, resetBtn, errEl} */
-        blockBtns: {}, /* key -> {btn, count} */
-        blockSelect: null, itemsHost: null, navHost: null, emptyEl: null,
-        searchInput: null, onlyChangedInput: null
+        fields: {},  /* path -> rec */
+        blockBtns: {},
+        blockSelect: null, itemsHost: null, navHost: null,
+        searchInput: null, onlyChangedInput: null,
+        localErr: {} /* path -> 本地校验文字（如数字非法），优先于服务端错误显示 */
       };
     }
     return views[scope];
@@ -97,11 +101,302 @@
     return n;
   }
 
-  /* ---- 项标题行（骨架）：之后控件会在此基础上逐类型补 ---- */
-  function renderFieldHead(LX, view, block, field) {
+  /* 条件显示：condition=[[name,value],…]，同块内这些项当前值都等于给定值才显示。 */
+  function condVisible(LX, scope, block, field) {
+    var cond = field.condition;
+    if (!cond || !cond.length) return true;
+    for (var i = 0; i < cond.length; i++) {
+      var name = cond[i][0];
+      var want = cond[i][1];
+      var full = block.key + "." + name;
+      if (!deepEqual(LX.getValue(scope, full), want)) return false;
+    }
+    return true;
+  }
+
+  function debounce(fn, ms) {
+    var timer = null;
+    return function () {
+      var args = arguments;
+      var self = this;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () {
+        timer = null;
+        fn.apply(self, args);
+      }, ms);
+    };
+  }
+
+  /* ---- 控件 ---- */
+
+  function markControl(el) {
+    el.setAttribute("data-role", "control");
+    return el;
+  }
+
+  function buildBool(LX, view, block, field, box) {
+    var input = markControl(document.createElement("input"));
+    input.type = "checkbox";
+    input.checked = !!LX.getValue(view.scope, field.path);
+    input.addEventListener("change", function () {
+      LX.setValue(view.scope, field.path, input.checked);
+    });
+    box.appendChild(input);
+    return { controls: [input] };
+  }
+
+  function buildNumber(LX, view, block, field, box) {
+    var type = field.type;
+    var input = markControl(document.createElement("input"));
+    input.type = "number";
+    if (field.lo !== null && field.lo !== undefined) input.min = String(field.lo);
+    if (field.hi !== null && field.hi !== undefined) input.max = String(field.hi);
+    var step = (field.slider && field.slider[2] !== undefined) ? field.slider[2] : (type === "int" ? 1 : "any");
+    input.step = String(step);
+    var cur = LX.getValue(view.scope, field.path);
+    if (typeof cur === "number") input.value = String(cur);
+    var slider = null;
+    if (field.slider) {
+      slider = markControl(document.createElement("input"));
+      slider.type = "range";
+      slider.min = String(field.slider[0]);
+      slider.max = String(field.slider[1]);
+      slider.step = String(field.slider[2]);
+      if (typeof cur === "number") slider.value = String(cur);
+      slider.setAttribute("aria-label", (field.title || field.path) + "滑块");
+    }
+    var viewRef = view;
+    var pathRef = field.path;
+    var scopeRef = view.scope;
+    function pushValid(num) {
+      delete viewRef.localErr[pathRef];
+      LX.setValue(scopeRef, pathRef, num);
+    }
+    function pushInvalid() {
+      viewRef.localErr[pathRef] = "应该是一个数字";
+      var rec = viewRef.fields[pathRef];
+      if (rec) rec.errEl.textContent = "应该是一个数字";
+    }
+    input.addEventListener("input", function () {
+      var raw = input.value;
+      if (raw === "" || raw === null) { pushInvalid(); return; }
+      var num = Number(raw);
+      if (!isFinite(num)) { pushInvalid(); return; }
+      if (type === "int" && Math.round(num) !== num) { pushInvalid(); return; }
+      if (slider && document.activeElement !== slider) slider.value = String(num);
+      pushValid(num);
+    });
+    input.addEventListener("change", function () {
+      var rec = viewRef.fields[pathRef];
+      if (rec) syncControl(LX, viewRef, rec);
+    });
+    if (slider) {
+      slider.addEventListener("input", function () {
+        var num = Number(slider.value);
+        if (document.activeElement !== input) input.value = String(num);
+        pushValid(num);
+      });
+    }
+    box.appendChild(input);
+    if (slider) box.appendChild(slider);
+    var list = slider ? [input, slider] : [input];
+    return { controls: list };
+  }
+
+  function buildStringOptions(LX, view, block, field, box) {
+    var sel = markControl(document.createElement("select"));
+    var opts = field.options || [];
+    var labels = field.labels || [];
+    for (var i = 0; i < opts.length; i++) {
+      var opt = document.createElement("option");
+      opt.value = opts[i];
+      opt.textContent = (labels[i] !== undefined && labels[i] !== null) ? labels[i] : opts[i];
+      sel.appendChild(opt);
+    }
+    var cur = LX.getValue(view.scope, field.path);
+    sel.value = (cur === null || cur === undefined) ? "" : String(cur);
+    sel.addEventListener("change", function () {
+      LX.setValue(view.scope, field.path, sel.value);
+    });
+    box.appendChild(sel);
+    return { controls: [sel] };
+  }
+
+  function buildStringDatalist(LX, view, block, field, box) {
+    var input = markControl(document.createElement("input"));
+    input.type = "text";
+    var choices = (LX.state.choices || {});
+    var list = field.special === "select_persona" ? (choices.personas || []) : (choices.providers || []);
+    var dlId = "lx-dl-" + sanitizeId(view.scope) + "-" + sanitizeId(field.path);
+    var dl = document.createElement("datalist");
+    dl.id = dlId;
+    for (var i = 0; i < list.length; i++) {
+      var opt = document.createElement("option");
+      opt.value = String(list[i]);
+      dl.appendChild(opt);
+    }
+    input.setAttribute("list", dlId);
+    var cur = LX.getValue(view.scope, field.path);
+    input.value = (cur === null || cur === undefined) ? "" : String(cur);
+    var push = debounce(function () {
+      LX.setValue(view.scope, field.path, input.value);
+    }, DEBOUNCE_MS);
+    input.addEventListener("input", push);
+    box.appendChild(input);
+    box.appendChild(dl);
+    return { controls: [input] };
+  }
+
+  function buildStringText(LX, view, block, field, box) {
+    var input = markControl(document.createElement("input"));
+    input.type = "text";
+    var cur = LX.getValue(view.scope, field.path);
+    input.value = (cur === null || cur === undefined) ? "" : String(cur);
+    var push = debounce(function () {
+      LX.setValue(view.scope, field.path, input.value);
+    }, DEBOUNCE_MS);
+    input.addEventListener("input", push);
+    box.appendChild(input);
+    return { controls: [input] };
+  }
+
+  function buildText(LX, view, block, field, box) {
+    var tall = isTallPath(field.path);
+    var area = markControl(document.createElement("textarea"));
+    area.rows = tall ? 12 : 5;
+    if (tall) area.className = "form-tall";
+    var cur = LX.getValue(view.scope, field.path);
+    area.value = (cur === null || cur === undefined) ? "" : String(cur);
+    var count = null;
+    if (tall) {
+      count = LX.el("span", { class: "field-count muted", text: String(area.value.length) + " 字" });
+    }
+    var push = debounce(function () {
+      if (count) count.textContent = String(area.value.length) + " 字";
+      LX.setValue(view.scope, field.path, area.value);
+    }, DEBOUNCE_MS);
+    area.addEventListener("input", function () {
+      if (count) count.textContent = String(area.value.length) + " 字";
+      push();
+    });
+    box.appendChild(area);
+    if (count) box.appendChild(count);
+    return { controls: [area], countEl: count, countKind: "chars" };
+  }
+
+  function parseListLines(raw) {
+    var parts = String(raw === null || raw === undefined ? "" : raw).split("\n");
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var t = parts[i].replace(/^\s+|\s+$/g, "");
+      if (t !== "") out.push(t);
+    }
+    return out;
+  }
+
+  function buildList(LX, view, block, field, box) {
+    var area = markControl(document.createElement("textarea"));
+    area.rows = 5;
+    var cur = LX.getValue(view.scope, field.path);
+    var arr = Array.isArray(cur) ? cur : [];
+    area.value = arr.join("\n");
+    var count = LX.el("span", { class: "field-count muted", text: String(arr.length) + " 项" });
+    var push = debounce(function () {
+      var parsed = parseListLines(area.value);
+      count.textContent = String(parsed.length) + " 项";
+      LX.setValue(view.scope, field.path, parsed);
+    }, DEBOUNCE_MS);
+    area.addEventListener("input", function () {
+      count.textContent = String(parseListLines(area.value).length) + " 项";
+      push();
+    });
+    box.appendChild(area);
+    box.appendChild(count);
+    var hint = LX.el("div", { class: "field-hint", text: "每行一项，空行会被忽略" });
+    box.appendChild(hint);
+    return { controls: [area], countEl: count, countKind: "items" };
+  }
+
+  function buildControl(LX, view, block, field, box) {
+    var t = field.type;
+    if (t === "bool") return buildBool(LX, view, block, field, box);
+    if (t === "int" || t === "float") return buildNumber(LX, view, block, field, box);
+    if (t === "string") {
+      if (field.options) return buildStringOptions(LX, view, block, field, box);
+      if (field.special === "select_provider" || field.special === "select_persona") {
+        return buildStringDatalist(LX, view, block, field, box);
+      }
+      return buildStringText(LX, view, block, field, box);
+    }
+    if (t === "text") return buildText(LX, view, block, field, box);
+    if (t === "list") return buildList(LX, view, block, field, box);
+    var fallback = markControl(document.createElement("input"));
+    fallback.type = "text";
+    var cur = LX.getValue(view.scope, field.path);
+    fallback.value = (cur === null || cur === undefined) ? "" : String(cur);
+    var push = debounce(function () {
+      LX.setValue(view.scope, field.path, fallback.value);
+    }, DEBOUNCE_MS);
+    fallback.addEventListener("input", push);
+    box.appendChild(fallback);
+    return { controls: [fallback] };
+  }
+
+  /* 把控件值同步为 LX.getValue（聚焦中的控件不动，避免输入法/光标被打断）。 */
+  function syncControl(LX, view, rec) {
+    var v = LX.getValue(view.scope, rec.field.path);
+    var ctrls = rec.built ? rec.built.controls : [];
+    for (var i = 0; i < ctrls.length; i++) {
+      var c = ctrls[i];
+      if (document.activeElement === c) continue;
+      if (c.type === "checkbox") {
+        c.checked = !!v;
+      } else if (c.tagName === "SELECT") {
+        c.value = (v === null || v === undefined) ? "" : String(v);
+      } else if (c.type === "number" || c.type === "range") {
+        c.value = (typeof v === "number") ? String(v) : "";
+      } else if (c.tagName === "TEXTAREA" && rec.built && rec.built.countKind === "items") {
+        c.value = Array.isArray(v) ? v.join("\n") : "";
+      } else {
+        c.value = (v === null || v === undefined) ? "" : String(v);
+      }
+    }
+    if (rec.built && rec.built.countEl) {
+      if (rec.built.countKind === "chars") {
+        rec.built.countEl.textContent = String(ctrls.length ? ctrls[0].value.length : 0) + " 字";
+      } else if (rec.built.countKind === "items") {
+        var n = Array.isArray(v) ? v.length : 0;
+        rec.built.countEl.textContent = String(n) + " 项";
+      }
+    }
+  }
+
+  function refreshField(LX, view, rec) {
+    var scope = view.scope;
+    var path = rec.field.path;
+    var dirty = LX.isDirty(scope, path);
+    rec.badgeDirty.classList.toggle("hidden", !dirty);
+    rec.resetBtn.disabled = deepEqual(LX.getValue(scope, path), rec.field.default);
+    var local = view.localErr[path];
+    var serverErr = LX.getError(scope, path);
+    rec.errEl.textContent = local || serverErr || "";
+    var vis = condVisible(LX, scope, blockOfKey(scope, rec.blockKey), rec.field);
+    rec.wrap.style.display = vis ? "" : "none";
+    syncControl(LX, view, rec);
+  }
+
+  function blockOfKey(scope, key) {
+    var blocks = blocksOf(scope);
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].key === key) return blocks[i];
+    }
+    return { key: key, fields: [] };
+  }
+
+  /* ---- 项 ---- */
+  function renderField(LX, view, block, field) {
     var wrap = LX.el("div", { class: "field", dataset: { scope: view.scope, path: field.path } });
-    var title = LX.el("span", { class: "field-title", text: field.title || field.path });
-    wrap.appendChild(title);
+    wrap.appendChild(LX.el("span", { class: "field-title", text: field.title || field.path }));
     var badgeNew = LX.el("span", { class: "badge badge-new" + (field.new_default ? "" : " hidden"), text: "新默认待定" });
     var badgeDirty = LX.el("span", {
       class: "badge badge-dirty" + (LX.isDirty(view.scope, field.path) ? "" : " hidden"),
@@ -110,22 +405,31 @@
     wrap.appendChild(badgeNew);
     wrap.appendChild(badgeDirty);
     if (field.hint) wrap.appendChild(LX.el("div", { class: "field-hint", text: field.hint }));
-    var defLine = LX.el("div", { class: "field-default muted", text: "默认：" + fmtDefault(field.default) });
-    wrap.appendChild(defLine);
+    var box = LX.el("div", { class: "field-control" });
+    wrap.appendChild(box);
+    var built = buildControl(LX, view, block, field, box);
+    wrap.appendChild(LX.el("div", { class: "field-default muted", text: "默认：" + fmtDefault(field.default) }));
     var cur = LX.getValue(view.scope, field.path);
     var resetBtn = LX.el("button", {
       class: "small secondary field-reset", text: "恢复默认",
       disabled: deepEqual(cur, field.default)
     });
     resetBtn.addEventListener("click", function () {
+      delete view.localErr[field.path];
       LX.setValue(view.scope, field.path, field.default);
     });
     wrap.appendChild(resetBtn);
     var errEl = LX.el("div", { class: "field-error" });
+    var local = view.localErr[field.path];
     var serverErr = LX.getError(view.scope, field.path);
-    if (serverErr) errEl.textContent = serverErr;
+    if (local || serverErr) errEl.textContent = local || serverErr;
     wrap.appendChild(errEl);
-    view.fields[field.path] = { wrap: wrap, badgeNew: badgeNew, badgeDirty: badgeDirty, resetBtn: resetBtn, errEl: errEl, field: field, blockKey: block.key };
+    var rec = {
+      wrap: wrap, badgeNew: badgeNew, badgeDirty: badgeDirty,
+      resetBtn: resetBtn, errEl: errEl, field: field, blockKey: block.key, built: built
+    };
+    if (!condVisible(LX, view.scope, block, field)) wrap.style.display = "none";
+    view.fields[field.path] = rec;
     return wrap;
   }
 
@@ -157,11 +461,12 @@
     while (nav.firstChild) nav.removeChild(nav.firstChild);
     view.blockBtns = {};
     var blocks = visibleBlocks(view);
+    var cur = currentBlock(view);
     for (var i = 0; i < blocks.length; i++) {
       (function (block) {
         var n = dirtyCountInBlock(view.scope, block);
         var btn = LX.el("button", {
-          class: "block-btn" + (currentBlock(view) && currentBlock(view).key === block.key ? " active" : "")
+          class: "block-btn" + (cur && cur.key === block.key ? " active" : "")
         });
         btn.appendChild(LX.el("span", { class: "block-btn-title", text: block.title || block.key }));
         var count = LX.el("span", { class: "block-count" + (n > 0 ? "" : " hidden"), text: String(n) });
@@ -180,7 +485,7 @@
         var opt = document.createElement("option");
         opt.value = blocks[k].key;
         opt.textContent = blocks[k].title || blocks[k].key;
-        if (currentBlock(view) && currentBlock(view).key === blocks[k].key) opt.selected = true;
+        if (cur && cur.key === blocks[k].key) opt.selected = true;
         view.blockSelect.appendChild(opt);
       }
     }
@@ -198,15 +503,12 @@
     }
     if (!shown) {
       if (!vis.length) {
-        var empty = LX.el("div", { class: "form-empty muted", text: "没有匹配的项" });
-        host.appendChild(empty);
-        view.emptyEl = empty;
+        host.appendChild(LX.el("div", { class: "form-empty muted", text: "没有匹配的项" }));
         return;
       }
       view.blockKey = vis[0].key;
       shown = vis[0];
     }
-    view.emptyEl = null;
     var head = LX.el("div", { class: "block-head" });
     head.appendChild(LX.el("h3", { text: shown.title || shown.key }));
     if (shown.hint) head.appendChild(LX.el("div", { class: "block-hint muted", text: shown.hint }));
@@ -219,7 +521,7 @@
     for (var j = 0; j < fields.length; j++) {
       if (!matchField(fields[j], view.search, view.onlyChanged, view.scope)) continue;
       any = true;
-      host.appendChild(renderFieldHead(LX, view, shown, fields[j]));
+      host.appendChild(renderField(LX, view, shown, fields[j]));
     }
     if (!any) {
       host.appendChild(LX.el("div", { class: "form-empty muted", text: "没有匹配的项" }));
@@ -273,7 +575,7 @@
       rootEl.appendChild(sel);
       view.blockSelect = sel;
       var layout = LX.el("div", { class: "form-layout" });
-      var nav = LX.el("nav", { class: "block-nav", dataset: {} });
+      var nav = LX.el("nav", { class: "block-nav" });
       nav.setAttribute("aria-label", "配置块导航");
       layout.appendChild(nav);
       view.navHost = nav;
@@ -291,7 +593,7 @@
     if (!dirty) return false;
     var hit = false;
     dirty.forEach(function (item, key) {
-      if (key === scope + ":" + item.path || key.indexOf(scope + ":") === 0) hit = true;
+      if (key.indexOf(scope + ":") === 0) hit = true;
     });
     return hit;
   }
@@ -311,6 +613,7 @@
       onShow: function () {},
       isDirty: function () { return isDirtyScope("group"); }
     });
+    /* onReload：整体重绘并保持当前块与搜索词。 */
     LX.onReload(function () {
       ["private", "group"].forEach(function (scope) {
         var view = views[scope];
@@ -322,20 +625,27 @@
         renderAll(LX, view);
       });
     });
+    /* onChange：只更新受影响的徽标 / 重置按钮 / 错误文字 / 条件显隐 / 块导航徽标，不整体重绘。 */
     LX.onChange(function (scope, path) {
-      [scope].forEach(function () {});
       ["private", "group"].forEach(function (sc) {
         var view = views[sc];
         if (!view || !view.root) return;
         if (scope !== null && scope !== undefined && sc !== scope) return;
         Object.keys(view.fields).forEach(function (fp) {
-          if (path !== null && path !== undefined && fp !== path) return;
-          var rec = view.fields[fp];
-          var dirty = LX.isDirty(sc, fp);
-          rec.badgeDirty.classList.toggle("hidden", !dirty);
-          rec.resetBtn.disabled = deepEqual(LX.getValue(sc, fp), rec.field.default);
-          var serverErr = LX.getError(sc, fp);
-          rec.errEl.textContent = serverErr || "";
+          if (path !== null && path !== undefined && fp !== path) {
+            /* 同块内条件依赖项也要跟着更新显隐（条件值变了）。 */
+            var rec = view.fields[fp];
+            var vis = condVisible(LX, sc, blockOfKey(sc, rec.blockKey), rec.field);
+            rec.wrap.style.display = vis ? "" : "none";
+            return;
+          }
+          refreshField(LX, view, view.fields[fp]);
+        });
+        /* 条件目标项实时显隐：该 scope 当前块下所有已渲染项重算一次。 */
+        Object.keys(view.fields).forEach(function (fp) {
+          var rec2 = view.fields[fp];
+          var vis2 = condVisible(LX, sc, blockOfKey(sc, rec2.blockKey), rec2.field);
+          rec2.wrap.style.display = vis2 ? "" : "none";
         });
         renderNav(LX, view);
       });
