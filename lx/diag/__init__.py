@@ -4,14 +4,22 @@
 这里不被 lx 其它包 import，所以不装 diag 时零开销。
 """
 
-from .mask import HIDDEN, mask_digits, mask_id, redact_config
+from .bundle import FORMAT, build_bundle, build_zip, render_summary_md
+from .mask import HIDDEN, is_secret_key, mask_digits, mask_id, redact_config
 from .recorder import DiagRecorder, classify_level
+from .state import collect_state
 
 __all__ = [
     "DiagRecorder",
+    "FORMAT",
     "HIDDEN",
+    "build_bundle",
+    "build_zip",
     "classify_level",
+    "collect_state",
+    "is_secret_key",
     "mask_digits",
     "mask_id",
     "redact_config",
+    "render_summary_md",
 ]

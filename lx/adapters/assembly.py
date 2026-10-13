@@ -51,11 +51,16 @@ class Components:
     speaker: Any = None
     brain: Any = None
     busy: set = field(default_factory=set)
+    diag: Any = None  # 可选诊断记录器（lx.diag.DiagRecorder）；None = 不记
 
 
 def build_components(conf, data_dir: str, *, save, send_text, puller, bot_id: str, bot_name: str,
-                     tz=None, clock: Clock = time.time, rng=None, log=lambda s: None) -> Components:
-    """按任务卡 AD-4a 接线。任何一步构造失败都抛出去（load_plugin_config 本身不抛）。"""
+                     tz=None, clock: Clock = time.time, rng=None, log=lambda s: None,
+                     diag=None) -> Components:
+    """按任务卡 AD-4a 接线。任何一步构造失败都抛出去（load_plugin_config 本身不抛）。
+
+    ``diag`` 可选：诊断记录器，传给 Brain 并挂到 ``Components.diag``（EHandlers 经它计数）；缺省不记。
+    """
     if tz is None:
         tz = timezone(timedelta(hours=8))
     loaded = load_plugin_config(conf, data_dir, save, clock, log)
@@ -110,12 +115,12 @@ def build_components(conf, data_dir: str, *, save, send_text, puller, bot_id: st
     speaker = BasicSpeaker(send_text, rng=rng, log=log)
     brain = Brain(resolver=resolver, history=history, gates=gates, assembler=assembler,
                   ticker=ticker, notes=notes, next_reply=next_reply, store=store,
-                  bot_id=bot_id, bot_name=bot_name, clock=clock, log=log)
+                  bot_id=bot_id, bot_name=bot_name, clock=clock, log=log, diag=diag)
 
     c = Components(resolver=resolver, warnings=warnings, store=store, history=history,
                    wait=wait, gates=gates, router=router, idle=idle, followup=followup,
                    wake=wake, next_reply=next_reply, ticker=ticker, assembler=assembler,
-                   notes=notes, speaker=speaker, brain=brain, busy=busy)
+                   notes=notes, speaker=speaker, brain=brain, busy=busy, diag=diag)
     c._log = log  # type: ignore[attr-defined]
     return c
 

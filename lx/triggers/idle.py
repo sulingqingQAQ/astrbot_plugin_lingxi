@@ -257,6 +257,35 @@ class IdleSource:
                 )))
         return out
 
+    def stats(self) -> dict[str, Any]:
+        """诊断用只读摘要：锚点数、已算好等待时长的会话数、最近一个到期还剩几秒。
+
+        只用现成的锚点和已缓存的等待时长估算（不读配置、不改任何状态）；
+        还没算过等待时长的会话估不出来，不计入 ``next_due_in``。任何情况都不抛。
+        """
+        try:
+            anchors = list(self._anchors.items())
+            waits = dict(self._waits)
+        except Exception:
+            return {"anchors": 0, "waits": 0, "next_due_in": None}
+        next_due: Optional[float] = None
+        try:
+            now = self._clock()
+            for key, anchor in anchors:
+                wait = waits.get(key)
+                if wait is None:
+                    continue
+                left = max(0.0, float(anchor) + float(wait) - now)
+                if next_due is None or left < next_due:
+                    next_due = left
+        except Exception:
+            next_due = None
+        return {
+            "anchors": len(anchors),
+            "waits": len(waits),
+            "next_due_in": None if next_due is None else round(next_due, 1),
+        }
+
     def on_replied(self, key: SessionKey, outcome: Outcome) -> None:
         """IDLE 源的回复（不管送达与否、是否沉默）→ 清等待、锚点=现在；
         其他来源只在 delivered is True 时把锚点推到现在。"""

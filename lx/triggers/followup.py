@@ -101,6 +101,10 @@ class FollowupSource:
         """用户发言 → 取消待发的追发。chain 不动（归零点在正常回复后，卡要求）。"""
         self._pending.pop(key, None)
 
+    def stats(self) -> dict[str, Any]:
+        """诊断用只读摘要：正在等着追发的会话数。"""
+        return {"pending": len(self._pending)}
+
     def _cfg_value(self, cfg: Any, path: str) -> Any:
         try:
             return cfg.get(path, DEFAULTS[path])

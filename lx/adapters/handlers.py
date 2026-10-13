@@ -59,6 +59,23 @@ class EHandlers:
         self._merging: set = set()
         self._busy_since: dict = {}
 
+    def stats(self) -> dict:
+        """诊断用只读摘要：正在出话的会话数、正在聚合等待的会话数。"""
+        try:
+            busy = len(getattr(self._c, "busy", ()) or ())
+        except Exception:
+            busy = 0
+        return {"busy": busy, "merging": len(self._merging)}
+
+    def _diag_bump(self, prefix: str, key: Any) -> None:
+        """诊断计数 ``<prefix>.<scope>``（没装 diag 就什么也不做；装了出错也不影响主流程）。"""
+        try:
+            diag = getattr(self._c, "diag", None)
+            if diag is not None:
+                diag.bump(prefix + "." + key.scope.value)
+        except Exception:
+            pass
+
     async def on_message(self, event: Any):  # noqa: C901
         """异步生成器：需要 AstrBot 出话时 yield request_llm，其他时候结束。"""
         try:
@@ -98,6 +115,7 @@ class EHandlers:
             self._c.brain.observe(key, msg)
             trigger = self._c.router.route(key, msg, cfg, event)
             if trigger is None:
+                self._diag_bump("no_trigger", key)
                 if is_private:
                     try:
                         event.stop_event()

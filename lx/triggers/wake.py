@@ -250,6 +250,18 @@ class WakeSource:
             self._fired[task.key] = task.id
         return out
 
+    def stats(self) -> dict[str, Any]:
+        """诊断用只读摘要：唤醒任务数、最近一个还有几秒到点（已过点的算 0；没有任务是 None）。
+
+        只读 ``store.wake_list()``，不重算、不回写；取任务失败时异常原样抛出（由调用方记成那一项出错）。
+        """
+        tasks = self._store.wake_list()
+        next_fire: Optional[float] = None
+        if tasks:
+            now = self._clock()
+            next_fire = round(max(0.0, min(float(t.fire_at) for t in tasks) - now), 1)
+        return {"tasks": len(tasks), "next_fire_in": next_fire}
+
     def _find_task(self, key: SessionKey, now: float) -> Optional[WakeTask]:
         try:
             tasks = self._store.wake_list(key)

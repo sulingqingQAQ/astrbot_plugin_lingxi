@@ -102,6 +102,17 @@ class Ticker:
             except Exception as e:
                 self._log(f"[tick] on_replied 失败 {getattr(src, 'id', src)}: {e}")
 
+    # -- 诊断用只读摘要 --
+
+    def stats(self, window_seconds: float = 30.0) -> dict[str, Any]:
+        """触发源个数，以及最近 ``window_seconds`` 秒内触发过的（会话, 来源）个数。"""
+        try:
+            now = self._clock()
+            recent = sum(1 for t in list(self._last_fire.values()) if now - t <= window_seconds)
+        except Exception:
+            recent = 0
+        return {"sources": len(self._sources), "recent_fires": recent}
+
     # -- 轮询 --
 
     def poll(self, now: float | None = None) -> list[tuple[SessionKey, Trigger]]:

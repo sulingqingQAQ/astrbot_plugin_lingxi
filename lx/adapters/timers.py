@@ -213,6 +213,14 @@ class TimerRunner:
             except Exception:
                 pass
 
+    def stats(self) -> dict:
+        """诊断用只读摘要：后台循环还在跑吗（起过、没被停、至少一个任务没结束）。"""
+        try:
+            running = (not self._stopped) and any(not t.done() for t in list(self._tasks))
+        except Exception:
+            running = False
+        return {"running": bool(running)}
+
     def start(self) -> None:
         """在当前事件循环里起两个后台任务；重复 start 是空操作。"""
         alive = [t for t in self._tasks if not t.done()]

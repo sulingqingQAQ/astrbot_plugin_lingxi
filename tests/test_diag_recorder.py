@@ -542,11 +542,11 @@ class ModuleRulesTest(unittest.TestCase):
             if not name.endswith(".py"):
                 continue
             seen += 1
-            with open(os.path.join(diag_dir, name), encoding="utf-8") as f:
-                src = f.read()
-            self.assertIsNone(pat.search(src), name)
-            self.assertNotIn("\r\n", src, name)  # LF
-        self.assertGreaterEqual(seen, 3)
+            with open(os.path.join(diag_dir, name), "rb") as f:
+                data = f.read()
+            self.assertNotIn(b"\r", data, name)  # LF（按字节读，文本模式会把 CRLF 悄悄转掉）
+            self.assertIsNone(pat.search(data.decode("utf-8")), name)
+        self.assertGreaterEqual(seen, 5)
 
 
 if __name__ == "__main__":

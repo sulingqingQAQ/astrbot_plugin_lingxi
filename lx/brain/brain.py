@@ -86,6 +86,7 @@ class Brain:
         bot_name: str = "bot",
         clock: Callable[[], float] = time.time,
         log: LogFn = _noop_log,
+        diag: Any = None,
     ) -> None:
         self._resolver = resolver
         self._history = history
@@ -99,11 +100,59 @@ class Brain:
         self._bot_name = bot_name
         self._clock = clock
         self._log = log if log is not None else _noop_log
+        self._diag = diag  # 可选诊断记录器（lx.diag.DiagRecorder 的鸭子类型）；None = 不记
 
     def set_identity(self, bot_id: str, bot_name: str) -> None:
         """更新 bot 身份（供插件入口第一次拿到 self_id 时调用）。"""
         self._bot_id = bot_id
         self._bot_name = bot_name
+
+    # -- 诊断挂接：diag 缺省时什么都不做；diag 抛什么都吞掉，不影响主流程 --
+
+    def _diag_event(self, kind: str, key: SessionKey, trigger: Optional[Trigger],
+                    result: str, reason: str = "") -> None:
+        diag = self._diag
+        if diag is None:
+            return
+        try:
+            diag.event(kind, key, trigger, result=result, reason=reason)
+        except Exception:
+            pass
+
+    def _diag_seen(self, key: SessionKey) -> None:
+        diag = self._diag
+        if diag is None:
+            return
+        try:
+            diag.bump("seen." + key.scope.value)
+        except Exception:
+            pass
+
+    def _diag_outcome(self, key: SessionKey, trigger: Trigger, parsed: ParsedReply,
+                      outcome: Outcome, delivered: Optional[bool]) -> None:
+        diag = self._diag
+        if diag is None:
+            return
+        try:
+            text = outcome.text
+            if delivered is True:
+                result = "delivered"
+            elif outcome.silent:
+                result = "silent"
+            elif not text:
+                result = "empty"
+            else:
+                result = "undelivered"
+            parts = getattr(parsed, "parts", None)
+            diag.event(
+                "outcome", key, trigger, result=result,
+                reason=str(outcome.reason or ""),
+                chars=len(text or ""),
+                parts=len(parts) if isinstance(parts, (list, tuple)) else 0,
+                text=text, raw=outcome.raw,
+            )
+        except Exception:
+            pass
 
     # -- 规则 1：observe --
 
@@ -114,6 +163,7 @@ class Brain:
         except Exception as e:
             _safe_log(self._log, "[brain] observe 读 is_bot 失败：%r" % (e,))
             return
+        self._diag_seen(key)
         try:
             self._history.record(key, msg)
         except Exception as e:
@@ -167,6 +217,7 @@ class Brain:
                 raise
             r = self._gates.check(key, trigger, cfg, now)
             if r.verdict is not None and getattr(r.verdict, "value", r.verdict) != "allow":
+                self._diag_event("gate", key, trigger, "deny", r.why)
                 self._notify_replied_quietly(
                     key,
                     Outcome(
@@ -186,9 +237,11 @@ class Brain:
                 raise
             status = {"text": note}
             asm = self._assembler.build(key, trigger, hist, status, cfg)
+            self._diag_event("gate", key, trigger, "allow")
             return Prepared(allowed=True, why="", asm=asm, retry_after=None)
         except Exception as e:
             _safe_log(self._log, "[brain] prepare 内部异常：%r" % (e,))
+            self._diag_event("gate", key, trigger, "error", "内部异常")
             self._notify_replied_quietly(
                 key,
                 Outcome(
@@ -297,6 +350,8 @@ class Brain:
                 _safe_log(self._log, "[brain] 沉默：%s" % (outcome.reason,))
         except Exception:
             pass
+        # g. 诊断：这一轮最终结果
+        self._diag_outcome(key, trigger, parsed, outcome, delivered)
         return outcome
 
     # -- 规则 5：converse_t --
@@ -322,6 +377,7 @@ class Brain:
             raw = await generate(prepped.asm)
         except Exception as e:
             _safe_log(self._log, "[brain] converse_t 模型调用失败：%r" % (e,))
+            self._diag_event("model_error", key, trigger, "error", type(e).__name__)
             raw = None
         parsed = self.finish(key, trigger, raw)
         if parsed.needs_retry:
@@ -329,6 +385,7 @@ class Brain:
                 raw2 = await generate(prepped.asm)
             except Exception as e:
                 _safe_log(self._log, "[brain] converse_t 重试调用失败：%r" % (e,))
+                self._diag_event("model_error", key, trigger, "error", type(e).__name__)
                 raw2 = None
             parsed = self.finish(key, trigger, raw2)
             # 仍为空就不再试：outcome 自然保持 silent=False, text=None
@@ -342,6 +399,7 @@ class Brain:
                     delivered = False
             except Exception as e:
                 _safe_log(self._log, "[brain] converse_t 发送失败：%r" % (e,))
+                self._diag_event("send_error", key, trigger, "error", type(e).__name__)
                 delivered = False
         else:
             delivered = False

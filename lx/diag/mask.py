@@ -15,7 +15,7 @@ import hashlib
 import re
 from typing import Any
 
-__all__ = ["mask_digits", "mask_id", "redact_config", "HIDDEN"]
+__all__ = ["mask_digits", "mask_id", "redact_config", "is_secret_key", "HIDDEN"]
 
 HIDDEN = "<已隐藏>"
 
@@ -23,6 +23,11 @@ _DIGITS = re.compile(r"[0-9]{5,}")
 # 键名含这些词的值一律隐藏。"key" 后面跟 word 的（keyword / keywords，比如
 # wake_keywords、mute_keywords）是普通配置项，不是密钥，放过；其余照 DIAG-0 §1.4。
 _SECRET_KEY = re.compile(r"key(?!word)|token|secret|passw|cookie|auth", re.IGNORECASE)
+
+
+def is_secret_key(name: Any) -> bool:
+    """键名像密钥吗（含 key / token / secret / passw / cookie / auth，不区分大小写；keyword 不算）。"""
+    return isinstance(name, str) and bool(_SECRET_KEY.search(name))
 
 
 def _hash6(digits: str, salt: str) -> str:
@@ -62,7 +67,7 @@ def redact_config(obj: Any) -> Any:
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if isinstance(k, str) and _SECRET_KEY.search(k):
+            if is_secret_key(k):
                 out[k] = HIDDEN
             else:
                 out[k] = redact_config(v)

@@ -259,6 +259,11 @@ class NextReplySource:
             self._log(f"[next_reply] due 异常: {e}")
             return out
 
+    # -- 诊断用只读摘要 --
+    def stats(self) -> dict[str, Any]:
+        """正在等着触发的自约会话数（一个会话同时最多一条自约）。"""
+        return {"pending": sum(1 for entries in list(self._entries.values()) if entries)}
+
     # -- 用户发言：本源是空操作 --
     def on_user_message(self, key: SessionKey) -> None:
         return None

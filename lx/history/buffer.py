@@ -180,3 +180,8 @@ class MemoryHistoryBuffer:
     def cleared_at(self, key: SessionKey) -> Optional[float]:
         st = self._states.get(key)
         return st.cleared_at if st is not None else None
+
+    def stats(self) -> dict[str, int]:
+        """诊断用只读摘要：有几个会话的缓冲、一共缓存了几条消息（只数量，不碰内容）。"""
+        states = list(self._states.values())
+        return {"sessions": len(states), "messages": sum(len(st.msgs) for st in states)}
