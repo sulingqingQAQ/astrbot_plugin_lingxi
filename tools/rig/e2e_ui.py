@@ -192,7 +192,7 @@ def _parse_json(raw):
 def _initial_config():
     return {
         "private": {
-            "whitelist": {"enabled": False, "ids": []},
+            "whitelist": {"enabled": True, "ids": []},
             "base": {"take_over": False},
             "trigger": {"wait_seconds": 1},
         },
@@ -201,6 +201,33 @@ def _initial_config():
         },
         "session_overrides": "",
     }
+
+
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and isinstance(p.get("text"), str)
+        )
+    return ""
+
+
+def _user_texts(messages) -> "list[str]":
+    out = []
+    for msg in messages or []:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            out.append(_content_text(msg.get("content", "")))
+    return out
+
+
+def _system_text(messages) -> str:
+    return "\n".join(
+        _content_text(msg.get("content", ""))
+        for msg in messages or []
+        if isinstance(msg, dict) and msg.get("role") == "system"
+    )
 
 
 # -- 场景 ----------------------------------------------------------------------
@@ -212,6 +239,145 @@ def _need_ok(name, code, raw):
     assert isinstance(obj, dict) and obj.get("status") == "ok", (
         "%s 期望 status=ok，实际 %s" % (name, raw[:300]))
     return obj.get("data")
+
+
+def _plug_cfg_path():
+    return os.path.join(ROOT, "data", "config", PLUGIN_NAME + "_config.json")
+
+
+def _read_plug_cfg():
+    with open(_plug_cfg_path(), encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+async def _sc_U6(ctx):
+    """U6 热生效：不重启，经 config/save 开白名单+接管，私聊从默认流程切到接管。"""
+    ctx.llm.script(["默认流程回复"])
+    await ctx.napcat.send_private(USER_IN, "你好")
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert any("默认流程回复" in t for t in texts), (
+        "接管前期望收到默认流程回复，实际=%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert reqs, "接管前期望默认流程调了 LLM，实际假 LLM 0 请求"
+    users = _user_texts(reqs[0].get("messages"))
+    assert not any("[触发原因]" in t for t in users), (
+        "接管前期望请求里没有 [触发原因]，实际=%r" % (users,))
+
+    cfg = _need_ok("config", *_api_get(ctx, "config"))
+    saved = _need_ok("config/save(开接管)", *_api_post(
+        ctx, "config/save",
+        {"revision": cfg["revision"],
+         "changes": [
+             {"scope": "private", "path": "whitelist.ids",
+              "value": [USER_IN]},
+             {"scope": "private", "path": "base.take_over", "value": True},
+             {"scope": "private", "path": "trigger.wait_seconds",
+              "value": 1},
+         ]}))
+    assert saved.get("saved") is True, (
+        "开接管保存期望 saved=true，实际=%r" % (saved,))
+    assert saved.get("reloaded") is True, (
+        "开接管期望 reloaded=true（热加载），实际=%r" % (saved,))
+
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    ctx.llm.script(["接管回复"])
+    await ctx.napcat.send_private(USER_IN, "你好呀")
+    sent2 = await ctx.napcat.wait_sent(1, 60)
+    texts2 = [s["text"] for s in sent2]
+    assert any("接管回复" in t for t in texts2), (
+        "接管后期望收到接管回复，实际=%r" % (texts2,))
+    reqs2 = ctx.llm.requests()
+    assert len(reqs2) == 1, (
+        "接管后期望假 LLM 恰收到 1 条请求，实际 %d" % len(reqs2))
+    users2 = _user_texts(reqs2[0].get("messages"))
+    assert any("[触发原因]" in t for t in users2), (
+        "接管后期望请求里有 [触发原因]，实际=%r" % (users2,))
+
+
+def _sc_U5(ctx):
+    """U5 保存落盘：改值落盘、旧键保留、过期 revision 冲突、非法值被拒且磁盘不变。"""
+    cfg = _need_ok("config", *_api_get(ctx, "config"))
+    rev0 = cfg["revision"]
+    before = _read_plug_cfg()
+    assert before.get("schema_version") == 2, (
+        "迁移后 schema_version 期望 2，实际=%r" % (before.get("schema_version"),))
+    before_bytes = json.dumps(before, ensure_ascii=False, sort_keys=True)
+
+    AR_static_7 = ("合成风格",)
+    body = {"revision": rev0,
+            "changes": [
+                {"scope": "private", "path": "idle.base_minutes", "value": 45},
+                {"scope": "group", "path": "prompt.style_text",
+                 "value": AR_static_7[0]},
+            ]}
+    code, raw = _api_post(ctx, "config/save", body)
+    saved = _need_ok("config/save", code, raw)
+    assert saved.get("saved") is True, (
+        "合法保存期望 saved=true，实际=%r" % (saved,))
+    got = {(a.get("scope"), a.get("path")) for a in saved.get("applied", [])
+           if isinstance(a, dict)}
+    assert ("private", "idle.base_minutes") in got, (
+        "applied 缺 private_idle.base_minutes，实际=%r" % (saved.get("applied"),))
+    assert ("group", "prompt.style_text") in got, (
+        "applied 缺 group_prompt.style_text，实际=%r" % (saved.get("applied"),))
+    assert saved.get("reloaded") is True, (
+        "期望 reloaded=true（热加载），实际=%r" % (saved,))
+
+    after = _read_plug_cfg()
+    try:
+        assert after["private"]["idle"]["base_minutes"] == 45
+    except (KeyError, TypeError):
+        raise AssertionError(
+            "落盘 private.idle.base_minutes 期望 45，实际=%r"
+            % (after.get("private"),))
+    try:
+        assert after["group"]["prompt"]["style_text"] == AR_static_7[0]
+    except (KeyError, TypeError):
+        raise AssertionError(
+            "落盘 group.prompt.style_text 期望 %r，实际=%r"
+            % (AR_static_7[0], after.get("group"),))
+    assert after.get("schema_version") == 2, (
+        "保存后 schema_version 期望仍为 2，实际=%r" % (after.get("schema_version"),))
+
+    def _leaves(node, prefix=""):
+        out = {}
+        if isinstance(node, dict):
+            for k in sorted(node):
+                out.update(_leaves(node[k], "%s/%s" % (prefix, k)))
+        else:
+            out[prefix] = json.dumps(node, ensure_ascii=False, sort_keys=True)
+        return out
+
+    lb, la = _leaves(before), _leaves(after)
+    changed = {p for p in set(lb) | set(la) if lb.get(p) != la.get(p)}
+    expect = {"/private/idle/base_minutes", "/group/prompt/style_text"}
+    assert changed == expect, (
+        "期望只动两处 %r，实际动了 %r" % (sorted(expect), sorted(changed)))
+
+    stale = _need_ok("config/save(过期revision)", *_api_post(
+        ctx, "config/save",
+        {"revision": rev0,
+         "changes": [{"scope": "private", "path": "idle.base_minutes",
+                      "value": 46}]}))
+    assert stale.get("saved") is False and stale.get("conflict") is True, (
+        "过期 revision 期望 saved=false+conflict=true，实际=%r" % (stale,))
+
+    cur = _need_ok("config", *_api_get(ctx, "config"))
+    disk_before_bad = json.dumps(_read_plug_cfg(), ensure_ascii=False,
+                                 sort_keys=True)
+    bad = _need_ok("config/save(非法值)", *_api_post(
+        ctx, "config/save",
+        {"revision": cur["revision"],
+         "changes": [{"scope": "private", "path": "idle.base_minutes",
+                      "value": -5}]}))
+    assert bad.get("saved") is False and bad.get("errors"), (
+        "非法值 -5 期望 saved=false 带 errors，实际=%r" % (bad,))
+    disk_after_bad = json.dumps(_read_plug_cfg(), ensure_ascii=False,
+                                sort_keys=True)
+    assert disk_after_bad == disk_before_bad, "非法保存后磁盘文件被改了"
+    assert disk_after_bad != before_bytes, "合法保存后磁盘文件竟然没变"
 
 
 def _sc_U4(ctx):
@@ -474,7 +640,7 @@ async def amain(only):
             _probe_ext_base(ctx)
             print("ext api ok via %s" % ctx.ext_path, flush=True)
             scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3),
-                         ("U4", _sc_U4)]
+                         ("U4", _sc_U4), ("U5", _sc_U5), ("U6", _sc_U6)]
             for name, fn in scenarios:
                 if only and name not in only:
                     continue
