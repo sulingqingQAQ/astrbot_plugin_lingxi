@@ -46,7 +46,9 @@ def _report_warnings(report: _migrate.MigrationReport) -> list[str]:
     for r in report.results:
         if r.status == _lm.DROPPED and r.present and r.changed_from_default:
             out.append(f"旧配置项 {r.legacy} 在新版里没有了（{r.note}），旧值仍留在旧分节里，已用新默认值")
-        elif r.status == _lm.MOVED and r.present and not r.applied:
+        elif r.status == _lm.MOVED and r.present and not r.applied and r.changed_from_default:
+            # 只有"用户改过、却没搬成"才是真问题；旧值和旧默认一样（没改过）本来就不搬、直接用新默认值，
+            # 不能当失败报（否则没动过旧配置的人会收到上百条假警告）。
             out.append(f"旧配置项 {r.legacy} 没能迁成（{r.note or '见迁移说明'}），已用新默认值")
     for note in report.notes:
         if note not in out:

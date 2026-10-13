@@ -138,6 +138,33 @@ class MigrateAndBackupTest(unittest.TestCase):
             self.assertEqual(len(backups), 1)
 
 
+class PristineLegacyNoFalseWarningsTest(unittest.TestCase):
+    """没动过旧配置（全是旧默认值）的人，首次迁移不应收到"没能迁成"之类的假警告。
+    （真宿主里看到过：旧值和旧默认一样的键按规则不搬，被当成失败报了 115 条。）"""
+
+    def test_all_default_legacy_conf_has_no_migration_warnings(self):
+        with __import__("tempfile").TemporaryDirectory() as data_dir:
+            conf = FakeConf(legacy_defaults())
+            loaded = config_io.load_plugin_config(conf, data_dir)
+            self.assertTrue(loaded.migrated)
+            bad = [w for w in loaded.warnings if "没能迁成" in w or "没迁成" in w]
+            self.assertEqual(bad, [], bad[:3])
+            self.assertEqual(loaded.warnings, [], loaded.warnings[:3])
+
+    def test_report_warnings_only_for_changed_values(self):
+        from lx.config import legacy_map as lm
+        from lx.config import migrate as mg
+        changed = mg.LegacyResult(legacy="a.b", status=lm.MOVED, present=True, applied=False,
+                                  changed_from_default=True, note="值超出范围")
+        pristine = mg.LegacyResult(legacy="c.d", status=lm.MOVED, present=True, applied=False,
+                                   changed_from_default=False, note="旧值和旧默认值一样（没改过）")
+        report = mg.MigrationReport(results=[changed, pristine])
+        got = config_io._report_warnings(report)
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("a.b", got[0])
+        self.assertIn("没能迁成", got[0])
+
+
 class OverridesTextTest(unittest.TestCase):
     def test_bad_entry_warns_good_part_applies(self):
         with __import__("tempfile").TemporaryDirectory() as data_dir:
