@@ -1,4 +1,4 @@
-"""lx/adapters/timers.py：定时路径（任务卡 AD-4c）。
+"""lx/adapters/timers.py：定时路径（任务卡 AD-4c 返工版）。
 
 - ``make_generate_t``：无事件的模型调用（不带 contexts、不带工具）；
 - ``TimerRunner``：统一 tick 的后台循环 + 缓冲回收；
@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
-from ..contracts import Assembled, SessionKey
-from ..session.key import to_umo
+from ..contracts import Assembled, Outcome, SessionKey
 
 __all__ = ["make_generate_t", "TimerRunner", "wake_tools", "WakeTools"]
 
@@ -40,7 +40,11 @@ async def _maybe_await(value: Any) -> Any:
 
 
 def _persona_text(persona: Any) -> str:
-    """从人格对象里取出提示词文本：属性式 .system_prompt，兼容 dict 式。"""
+    """从人格对象里取出提示词文本。
+
+    兼容三种形状：DB Persona（``.system_prompt`` 属性）、v3 Personality
+    （dict ``{"prompt": ...}``）、dict ``{"system_prompt": ...}``。
+    """
     if persona is None:
         return ""
     try:
@@ -66,6 +70,8 @@ def make_generate_t(
     log: LogFn = _noop_log,
 ) -> Callable[[SessionKey, Assembled], Awaitable[Optional[str]]]:
     """造一个定时路径用的 generate(key, asm)：无事件、不带工具。"""
+    from ..session.key import to_umo
+
     _log = log if log is not None else _noop_log
 
     async def generate(key: SessionKey, asm: Assembled) -> Optional[str]:
@@ -138,359 +144,302 @@ def make_generate_t(
     return generate
 
 
-# ------------------------------------------------------------------
-# TimerRunner：统一 tick 的后台循环。
-#
-# 假定（任务卡 AD-4c；X 线的 WatchManager 落地后若形状不同，在此对齐）：
-# - ``wm.upcoming(now)`` -> Optional[WakeInfo]，WakeInfo 带 ``.fire``
-#   （epoch 秒）；None 表示没有将来的 wake。
-# - ``wm.due(now)`` -> iterable[(key, fire, cycle)]。
-# - ``wm.ack(key, fire, cycle)``：deliver 成功后才调。
-# - enabled 过滤由 wm 内部做（upcoming 只看 enabled 的会话）；
-#   overdue 兜底由调用方传 on_overdue(wm, now, log) 做
-#   （如调 sweep_deadlines / ack_missed），不传就不管。
-# ------------------------------------------------------------------
-
-OnOverdueFn = Callable[[Any, float, LogFn], Any]
-
-
 class TimerRunner:
-    """定时统一 tick：sleep(差值|tick) → 扫 due → deliver → ack。"""
+    """统一 tick 的后台循环 + 缓冲回收（任务卡 AD-4c）。
+
+    ``handle`` 给 ``Ticker.run`` 当 handler；``start`` 起两个后台任务
+    （ticker 循环 + 回收循环）；``stop`` 停它们，幂等。
+    """
 
     def __init__(
         self,
-        wm: Any,
-        tick: float,
-        deliver: Callable[[SessionKey], Awaitable[Optional[str]]],
-        on_overdue: Optional[OnOverdueFn] = None,
-        log: Optional[LogFn] = None,
-        clock: Optional[Callable[[], float]] = None,
-        sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+        c: Any,
+        generate: Callable[[SessionKey, Assembled], Awaitable[Optional[str]]],
+        *,
+        interval: float = 15.0,
+        evict_every: float = 600.0,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        clock: Callable[[], float] = time.time,
+        log: LogFn = _noop_log,
     ) -> None:
-        self._wm = wm
-        self._tick = float(tick)
-        self._deliver = deliver
-        self._on_overdue = on_overdue
+        self._c = c
+        self._generate = generate
+        self._interval = float(interval)
+        self._evict_every = float(evict_every)
+        self._sleep = sleep
+        self._clock = clock
         self._log: LogFn = log if log is not None else _noop_log
-        self._clock = clock if clock is not None else time.time
-        self._sleep = sleep if sleep is not None else asyncio.sleep
-        self._task: Optional[asyncio.Task] = None
         self._stopped = False
-        self._seen: set = set()  # 本轮已 deliver 的 (key, fire, cycle)，防重入
+        self._tasks: list = []
 
-    # -- 对外 --
+    async def handle(self, key: SessionKey, trigger: Any) -> Optional[Outcome]:
+        """Ticker.run 的 handler：走 brain.converse_t 一条龙。"""
+        c = self._c
+        generate = self._generate
 
-    def start(self) -> asyncio.Task:
-        """起后台循环（name="lx-timers"）；已在跑就返回原 task。"""
-        if self._task is not None and not self._task.done():
-            return self._task
-        self._stopped = False
-        self._task = asyncio.create_task(self._run(), name="lx-timers")
-        return self._task
+        async def _gen(asm: Assembled) -> Optional[str]:
+            return await generate(key, asm)
 
-    async def stop(self) -> None:
-        """只关自己：停循环、取消自己的 task，不碰 wm。"""
-        self._stopped = True
-        task, self._task = self._task, None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:  # pragma: no cover - 兜底
-                _safe_log(self._log, f"[timers] 停循环时异常：{e!r}")
-        self._recycle()
-
-    # -- 单轮（可单独测） --
-
-    def _next_wake(self) -> Optional[float]:
-        """最早 wake 距 now 的秒数；没有 upcoming 就 None。"""
-        now = self._clock()
         try:
-            info = self._wm.upcoming(now)
-        except Exception as e:
-            _safe_log(self._log, f"[timers] 取 upcoming 失败：{e!r}")
-            return None
-        if info is None:
-            return None
-        fire = getattr(info, "fire", None)
-        if fire is None:
-            _safe_log(self._log, "[timers] upcoming 返回的 wake 信息没有 .fire")
-            return None
-        try:
-            return float(fire) - now
-        except (TypeError, ValueError):
-            _safe_log(self._log, "[timers] wake.fire 不是时间戳")
-            return None
-
-    async def _once(self) -> None:
-        """跑一轮：sleep → 扫 due/deliver/ack → 回收 → on_overdue。"""
-        now = self._clock()
-        try:
-            wait = self._next_wake()
-            if wait is None or wait >= self._tick:
-                delay = self._tick
-            elif wait <= 0:
-                delay = 0.0
-            else:
-                delay = wait
-            await self._sleep(delay)
-            scan_at = self._clock()
-            try:
-                items = list(self._wm.due(scan_at))
-            except Exception as e:
-                _safe_log(self._log, f"[timers] 扫 due 失败：{e!r}")
-                items = []
-            for key, fire, cycle in items:
-                marker = (repr(key), repr(fire), repr(cycle))
-                if marker in self._seen:
-                    continue
-                self._seen.add(marker)
-                try:
-                    await self._deliver(key)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    _safe_log(
-                        self._log,
-                        f"[timers] deliver 会话 {key} 失败（不 ack，下轮重试）：{e!r}")
-                    continue
-                try:
-                    self._wm.ack(key, fire, cycle)
-                except Exception as e:
-                    _safe_log(
-                        self._log, f"[timers] ack 会话 {key} 失败：{e!r}")
+            return await c.brain.converse_t(
+                key, trigger, generate=_gen, speaker=c.speaker)
         except asyncio.CancelledError:
             raise
-        finally:
-            self._recycle()
-        if self._on_overdue is not None:
-            try:
-                await _maybe_await(self._on_overdue(self._wm, now, self._log))
-            except Exception as e:
-                _safe_log(self._log, f"[timers] on_overdue 失败：{e!r}")
+        except Exception as e:
+            _safe_log(self._log, f"[timers] converse_t 失败 {key}：{e!r}")
+            return None
 
-    async def _run(self) -> None:
+    async def _evict_loop(self) -> None:
         while not self._stopped:
             try:
-                await self._once()
+                await self._sleep(self._evict_every)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # 兜底：循环不崩
-                _safe_log(self._log, f"[timers] 单轮异常（继续跑）：{e!r}")
-                try:
-                    await self._sleep(self._tick)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
+            except Exception as e:
+                _safe_log(self._log, f"[timers] 回收 sleep 失败：{e!r}")
+                continue
+            if self._stopped:
+                return
+            try:
+                n = self._c.history.evict_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                _safe_log(self._log, f"[timers] 回收缓冲失败：{e!r}")
+                continue
+            try:
+                if n:
+                    _safe_log(self._log, f"[timers] 回收空闲缓冲 {n} 个")
+            except Exception:
+                pass
 
-    def _recycle(self) -> None:
-        """缓冲回收：清掉本轮 deliver 去重记号。"""
-        self._seen.clear()
+    def start(self) -> None:
+        """在当前事件循环里起两个后台任务；重复 start 是空操作。"""
+        alive = [t for t in self._tasks if not t.done()]
+        if alive:
+            return
+        self._tasks = []
+        self._stopped = False
+        c = self._c
+        self._tasks = [
+            asyncio.create_task(
+                c.ticker.run(self.handle, interval=self._interval,
+                             sleep=self._sleep,
+                             should_stop=lambda: self._stopped),
+                name="lx-timers-tick"),
+            asyncio.create_task(self._evict_loop(), name="lx-timers-evict"),
+        ]
+
+    async def stop(self) -> None:
+        """置停止标志、取消任务并等它们结束；幂等。"""
+        self._stopped = True
+        tasks, self._tasks = list(self._tasks), []
+        for t in tasks:
+            try:
+                if not t.done():
+                    t.cancel()
+            except Exception:
+                pass
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                _safe_log(self._log, f"[timers] 停循环时异常：{e!r}")
 
 
-# ------------------------------------------------------------------
-# wake_tools：唤醒工具（供 main.py 里 @llm_tool 薄包装调用）。
-#
-# 假定（X 线的 WatchManager 落地后若形状不同，在此对齐）：
-# - ``wm.list(key)`` -> records，record 带 ``.id/.text/.fire/.cycle``；
-# - ``wm.add(key, text, fire, cycle)`` -> wake_id(str)；
-# - ``wm.cancel(key, wake_id)`` -> bool。
-# 取舍（见交接）：whe=周期词、iso=时间字符串；周期与解析出的 kind
-# 不一致就打回；去重按 (text, fire, cycle) 归一后比；只收文本（空内容打回）。
-# ------------------------------------------------------------------
-
-_CYCLE_ALIASES = {
-    "once": "once",
-    "daily": "daily",
-    "day": "daily",
-    "cycle": "daily",
-    "weekly": "weekly",
-    "week": "weekly",
-    "monthly": "monthly",
-    "month": "monthly",
-    "yearly": "yearly",
-    "year": "yearly",
-}
+# ---------------------------------------------------------------- wake_tools
 
 
-def _event_sender(event: Any) -> str:
-    """sender 优先取 event.get_sender_id()，fallback unified_msg_origin。"""
-    fn = getattr(event, "get_sender_id", None)
-    if callable(fn):
-        try:
-            v = fn()
-        except Exception:
-            v = None
-        if v:
-            return str(v)
-    umo = getattr(event, "unified_msg_origin", None)
-    return str(umo) if umo else ""
-
-
-def _event_key(event: Any) -> Optional[SessionKey]:
-    """从事件的 unified_msg_origin（+群号）还原 SessionKey；还原不了就 None。"""
-    umo = getattr(event, "unified_msg_origin", None)
-    if not umo:
-        return None
-    gid = None
-    fn = getattr(event, "get_group_id", None)
-    if callable(fn):
-        try:
-            gid = fn()
-        except Exception:
-            gid = None
+def _format_fire(fire_at: float, tz: Any) -> str:
     try:
-        from ..session.key import try_from_umo
+        from ..triggers.timeparse import format_when
+
+        return format_when(datetime.fromtimestamp(fire_at, tz))
     except Exception:
-        return None
-    try:
-        return try_from_umo(umo, group_id=gid)
-    except Exception:
-        return None
+        return str(fire_at)
 
 
 class WakeTools:
-    """三个唤醒工具：add / list / cancel。结果全是给人看的中文 str。"""
+    """四个唤醒工具：query / create / update / delete。
 
-    def __init__(
-        self,
-        wm: Any,
-        allow: Any = (),
-        clock: Optional[Callable[[], float]] = None,
-        log: Optional[LogFn] = None,
-    ) -> None:
-        self._wm = wm
-        self._allow = {str(a) for a in (allow or ())}
+    每个方法第一个参数都是 event（从 session_key_of 取会话）；
+    失败一律返回大白话字符串，不抛。
+    方法内的编号是 query 列表的行号（"1" 起），实现里换算成真实 task.id。
+    """
+
+    def __init__(self, c: Any, tz: Any,
+                 clock: Optional[Callable[[], float]] = None,
+                 log: Optional[LogFn] = None) -> None:
+        self._c = c
+        self._tz = tz
         self._clock = clock if clock is not None else time.time
         self._log: LogFn = log if log is not None else _noop_log
 
-    # -- 内部 --
-
-    def _check(self, event: Any) -> tuple[Optional[SessionKey], Optional[str]]:
-        """self 限定：sender 不在白名单（或取不到）就拒绝。"""
-        sender = _event_sender(event)
-        if not sender or sender not in self._allow:
-            _safe_log(self._log, f"[timers] 拒绝非白名单 sender：{sender!r}")
-            return None, "拒绝：你没有定时唤醒的操作权限。"
-        key = _event_key(event)
-        if key is None:
-            return None, "拒绝：认不出这条消息是哪个会话发的。"
-        return key, None
-
-    def _parse_wake(self, whe: str, iso: str, tzname: str):
-        """(whe=周期词, iso=时间串) → (fire, cycle)；失败返回 (None, 错误文案)。"""
-        from ..triggers.timeparse import next_fire, parse_time_str
-
+    def _key_of(self, event: Any) -> tuple[Optional[SessionKey], Optional[str]]:
         try:
-            from zoneinfo import ZoneInfo
-            zone = ZoneInfo(tzname)
+            from .events import session_key_of
+
+            return session_key_of(event), None
         except Exception as e:
-            return None, f"时区 {tzname!r} 不可用：{e}"
-        cycle = _CYCLE_ALIASES.get(str(whe or "").strip().lower(), "")
-        if not cycle:
-            return None, (f"认不出这个周期 {whe!r}，"
-                          "只要 once/daily/weekly/monthly/yearly（day/Cycle 也算 daily）。")
-        now = datetime.fromtimestamp(self._clock(), tz=zone)
-        parsed, err = parse_time_str(str(iso or ""), zone, now)
-        if parsed is None:
-            if "past" in (err or ""):
-                return None, "这个时间已经过去了，换个未来的时间再加。"
-            return None, f"时间解析失败（{err}）：周期 {whe!r}，时间 {iso!r}。"
-        if parsed.kind != cycle:
-            return None, (f"周期与时间格式不一致：周期是 {cycle}，"
-                          f"时间串看着像 {parsed.kind}。")
-        fire = next_fire(parsed, now)
-        if fire is None:
-            return None, "这个时间已经过去了，换个未来的时间再加。"
-        return (fire, cycle), ""
+            _safe_log(self._log, f"[timers] 认不出会话：{e!r}")
+            return None, "认不出这条消息是哪个会话发的，查一下消息来源再试。"
 
-    # -- 工具 --
-
-    async def wake_add(self, text: str, whe: str, iso: str, event: Any,
-                       tz: str = "Asia/Shanghai") -> str:
-        """加一条唤醒。text=提醒内容，whe=周期词，iso=时间串，event=命令消息对象。"""
-        key, denied = self._check(event)
-        if denied:
-            return denied
-        body = str(text or "").strip()
-        if not body:
-            return "提醒内容是空的，加不了：只收文本内容。"
-        parsed, err = self._parse_wake(whe, iso, tz)
-        if parsed is None:
-            return err
-        fire, cycle = parsed
+    def _cfg_of(self, key: SessionKey) -> Any:
         try:
-            existing = await _maybe_await(self._wm.list(key))
-        except Exception as e:
-            return f"查已有提醒失败：{e}，稍后再试。"
-        for rec in existing or ():
-            rtext = getattr(rec, "text", "")
-            rfire = getattr(rec, "fire", None)
-            rcycle = getattr(rec, "cycle", "")
-            if (isinstance(rtext, str) and rtext.strip() == body
-                    and rfire == fire and rcycle == cycle):
-                return (f"已经有一条相同的提醒了（id={getattr(rec, 'id', '?')}），"
-                        "不用重复加。")
-        try:
-            wid = await _maybe_await(self._wm.add(key, body, fire, cycle))
-        except Exception as e:
-            return f"记提醒失败：{e}，稍后再试。"
-        from ..triggers.timeparse import format_when
-        try:
-            when = format_when(fire)
+            return self._c.resolver.resolve(key)
         except Exception:
-            when = str(fire)
-        _safe_log(self._log, f"[timers] 加提醒 ok：id={wid}")
-        return f"已加上提醒：id={wid}，{cycle} {when}，内容：{body}"
+            return None
 
-    async def wake_list(self, text: Any) -> str:
-        """列当前会话的提醒。text=文本命令消息对象（卡面签名）。"""
-        event = text
-        key, denied = self._check(event)
-        if denied:
-            return denied
+    def _ordered(self, key: SessionKey) -> list:
         try:
-            recs = await _maybe_await(self._wm.list(key))
+            tasks = self._c.store.wake_list(key)
         except Exception as e:
-            return f"查提醒失败：{e}，稍后再试。"
-        if not recs:
-            return "现在没有定时提醒。"
-        from ..triggers.timeparse import format_when
+            raise RuntimeError(f"取任务列表失败：{e}") from e
+        try:
+            tasks = sorted(tasks, key=lambda t: (t.fire_at, t.id))
+        except Exception:
+            pass
+        return tasks
+
+    def _resolve_uid(self, key: SessionKey, uid: str) -> tuple[Any, str]:
+        """编号（行号）或真实 id → task。找不到返回 (None, 原因)。"""
+        text = str(uid or "").strip()
+        if not text:
+            return None, "要找的编号是空的，先 query 看看有哪些任务。"
+        try:
+            tasks = self._ordered(key)
+        except Exception as e:
+            return None, f"查任务列表失败：{e}，稍后再试。"
+        for t in tasks:
+            if t.id == text:
+                return t, ""
+        try:
+            idx = int(text)
+        except (TypeError, ValueError):
+            idx = None
+        if idx is not None and 1 <= idx <= len(tasks):
+            return tasks[idx - 1], ""
+        return None, f"没有编号为 {text} 的任务，先 query 看看有哪些。"
+
+    async def query(self, event: Any) -> str:
+        key, err = self._key_of(event)
+        if err or key is None:
+            return err or "认不出这条消息是哪个会话发的。"
+        try:
+            tasks = self._ordered(key)
+        except Exception as e:
+            return f"查定时任务失败：{e}，稍后再试。"
+        if not tasks:
+            return "这个会话现在没有定时唤醒任务。"
         lines = []
-        for rec in recs:
-            try:
-                when = format_when(getattr(rec, "fire"))
-            except Exception:
-                when = str(getattr(rec, "fire", "?"))
-            lines.append(f"{getattr(rec, 'id', '?')}｜"
-                         f"{getattr(rec, 'cycle', '?')} {when}｜"
-                         f"{getattr(rec, 'text', '')}")
-        return "定时提醒：\n" + "\n".join(lines)
+        for i, t in enumerate(tasks, 1):
+            when = _format_fire(t.fire_at, self._tz)
+            note = str(t.note or "").strip() or "（没写备注）"
+            lines.append(f"{i}. {when} {note}")
+        return "本会话的定时唤醒：\n" + "\n".join(lines)
 
-    async def wake_cancel(self, text: Any, wake_id: str) -> str:
-        """按 id 取消。text=文本命令消息对象（卡面签名）。"""
-        event = text
-        key, denied = self._check(event)
-        if denied:
-            return denied
-        wid = str(wake_id or "").strip()
-        if not wid:
-            return "要取消的 id 是空的。"
+    async def create(self, event: Any, time_str: str, note: str = "") -> str:
+        key, err = self._key_of(event)
+        if err or key is None:
+            return err or "认不出这条消息是哪个会话发的。"
+        cfg = self._cfg_of(key)
         try:
-            ok = await _maybe_await(self._wm.cancel(key, wid))
+            enabled = cfg.get("wake.enabled", True) if cfg is not None else True
+        except Exception:
+            enabled = True
+        if not enabled:
+            return "定时唤醒已被关闭，开了开关再试。"
+        try:
+            now_dt = datetime.fromtimestamp(self._clock(), self._tz)
         except Exception as e:
-            return f"取消失败：{e}，稍后再试。"
-        if ok:
-            _safe_log(self._log, f"[timers] 取消提醒 ok：id={wid}")
-            return f"已取消提醒 {wid}。"
-        return f"没找到 id={wid} 的提醒。"
+            return f"时钟坏了，建不了任务：{e}。"
+        from ..triggers.wake import make_wake_task
+
+        task_id = uuid.uuid4().hex[:8]
+        task, reason = make_wake_task(key, str(time_str or ""), str(note or ""),
+                                      self._tz, now_dt, task_id)
+        if task is None:
+            msg = str(reason or "时间格式不对").strip()
+            return f"建不了这个任务：{msg}。时间格式：一次用 YYYY/MM/DD-HH:mm:ss，每天用 HH:mm:ss，每周用 1-HH:mm:ss（1=周一），每月用 DD-HH:mm:ss，每年用 MM/DD-HH:mm:ss。"
+        try:
+            self._c.store.wake_put(task)
+        except Exception as e:
+            try:
+                from ..state.store import WakeLimitError
+
+                if isinstance(e, WakeLimitError):
+                    return "这个会话的定时任务到上限了，先删掉不用的再加。"
+            except Exception:
+                pass
+            if "上限" in str(e) or "limit" in str(e).lower():
+                return "这个会话的定时任务到上限了，先删掉不用的再加。"
+            return f"存任务失败：{e}，稍后再试。"
+        when = _format_fire(task.fire_at, self._tz)
+        body = str(note or "").strip()
+        tail = f"，备注：{body}" if body else ""
+        return f"记好了，{when}叫你{tail}。"
+
+    async def update(self, event: Any, uid: str, time_str: str = "",
+                     note: str = "") -> str:
+        key, err = self._key_of(event)
+        if err or key is None:
+            return err or "认不出这条消息是哪个会话发的。"
+        task, reason = self._resolve_uid(key, uid)
+        if task is None:
+            return reason
+        new_note = str(note or "")
+        new_time = str(time_str or "").strip()
+        if not new_time and not new_note.strip():
+            return "没说要改什么：传新的时间或新的备注再试。"
+        if new_time:
+            try:
+                now_dt = datetime.fromtimestamp(self._clock(), self._tz)
+            except Exception as e:
+                return f"时钟坏了，改不了时间：{e}。"
+            from ..triggers.wake import make_wake_task
+
+            keep_note = new_note.strip() if new_note.strip() else task.note
+            rebuilt, why = make_wake_task(key, new_time, keep_note, self._tz,
+                                          now_dt, task.id)
+            if rebuilt is None:
+                msg = str(why or "时间格式不对").strip()
+                return f"改不了时间：{msg}。"
+            task.fire_at = rebuilt.fire_at
+            task.meta = dict(rebuilt.meta)
+            task.repeat_seconds = rebuilt.repeat_seconds
+        if new_note.strip():
+            task.note = new_note.strip()
+        try:
+            self._c.store.wake_put(task)
+        except Exception as e:
+            return f"存任务失败：{e}，稍后再试。"
+        when = _format_fire(task.fire_at, self._tz)
+        return f"改好了，{when}叫你，备注：{task.note or '（没写备注）'}。"
+
+    async def delete(self, event: Any, uid: str) -> str:
+        key, err = self._key_of(event)
+        if err or key is None:
+            return err or "认不出这条消息是哪个会话发的。"
+        task, reason = self._resolve_uid(key, uid)
+        if task is None:
+            return reason
+        try:
+            ok = self._c.store.wake_remove(task.id)
+        except Exception as e:
+            return f"删任务失败：{e}，稍后再试。"
+        if not ok:
+            return f"没有编号为 {str(uid or '').strip()} 的任务，先 query 看看有哪些。"
+        return f"删掉了 {when_short(task, self._tz)} 的那个任务。"
 
 
-def wake_tools(wm: Any, allow: Any = (),
-               clock: Optional[Callable[[], float]] = None,
+def when_short(task: Any, tz: Any) -> str:
+    try:
+        return _format_fire(task.fire_at, tz)
+    except Exception:
+        return "到点的"
+
+
+def wake_tools(c: Any, tz: Any, clock: Optional[Callable[[], float]] = None,
                log: Optional[LogFn] = None) -> WakeTools:
-    """造 WakeTools：wm=WatchManager，allow=sender 白名单（空=全拒绝）。"""
-    return WakeTools(wm, allow=allow, clock=clock, log=log)
+    """造 WakeTools：c=Components，tz=时区。"""
+    return WakeTools(c, tz, clock=clock, log=log)

@@ -1,4 +1,4 @@
-"""AD-4c：定时路径 timers（generate / TimerRunner / wake_tools）。
+"""AD-4c：定时路径 timers（generate / TimerRunner / wake_tools）。返工版：按任务卡重写。
 
 先写测试再实现；测试数据全合成；假 context / 假 sleep / 假时钟；
 用 build_components（AD-4a）装真的 Components；不 import astrbot / logging。
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from lx.adapters import assembly
-from lx.contracts import Assembled, Scope, SessionKey, Source, Trigger
+from lx.contracts import Assembled, Outcome, Scope, SessionKey, Source, Trigger
 from lx.session.key import to_umo
 
 TZ8 = timezone(timedelta(hours=8))
@@ -43,7 +43,7 @@ class FakeResolver:
 
 
 class FakePersonaManager:
-    """ persona_manager：get_persona（按名）/ get_default_persona_v3（默认）。"""
+    """persona_manager：get_persona（按名）/ get_default_persona_v3（默认）。"""
 
     def __init__(self, named=None, default=None):
         self.named = named if named is not None else {"prompt": "你是默认人格。"}
@@ -180,33 +180,7 @@ class GenerateTest(unittest.IsolatedAsyncioTestCase):
             await gen(KEY, make_asm())
 
 
-class FakeWakeInfo:
-    """最早 wake 信息：只带 fire（epoch 秒）。"""
-
-    def __init__(self, fire: float):
-        self.fire = fire
-
-
-class FakeWatchManager:
-    """按任务卡假定的 WatchManager 形状：due / upcoming / ack。"""
-
-    def __init__(self, upcoming_info=None, due_items=None):
-        self.upcoming_info = upcoming_info
-        self.due_items = list(due_items) if due_items else []
-        self.ack_calls: list = []
-        self.upcoming_calls: list = []
-        self.due_calls: list = []
-
-    def upcoming(self, now):
-        self.upcoming_calls.append(now)
-        return self.upcoming_info
-
-    def due(self, now):
-        self.due_calls.append(now)
-        return list(self.due_items)
-
-    def ack(self, key, fire, cycle):
-        self.ack_calls.append((key, fire, cycle))
+# ---------------------------------------------------------------- TimerRunner
 
 
 class FakeClock:
@@ -218,180 +192,244 @@ class FakeClock:
 
 
 class FakeSleep:
-    def __init__(self, clock: FakeClock | None = None):
+    def __init__(self):
         self.delays: list = []
-        self.clock = clock
 
     async def __call__(self, delay: float):
         self.delays.append(delay)
-        if self.clock is not None:
-            self.clock.now += max(0.0, delay)
+        await asyncio.sleep(0)
 
 
-def make_runner(wm, tick=60.0, deliver=None, clock=None, sleep=None,
-                on_overdue=None, log=None):
-    from lx.adapters import timers
+class FakeBrain:
+    def __init__(self, behaviour="ok"):
+        self.behaviour = behaviour
+        self.calls: list = []
 
-    async def _deliver(key):
-        return "定时文本"
+    async def converse_t(self, key, trigger, *, generate, speaker):
+        self.calls.append((key, trigger, generate, speaker))
+        if self.behaviour == "boom":
+            raise RuntimeError("大脑炸了")
+        if self.behaviour == "cancel":
+            raise asyncio.CancelledError()
+        return Outcome(text="ok", silent=False, reason="", source=trigger.source,
+                       delivered=True)
 
-    logs: list = []
-    runner = timers.TimerRunner(
-        wm, tick, deliver or _deliver,
-        on_overdue=on_overdue, log=log if log is not None else logs.append,
-        clock=clock, sleep=sleep)
-    return runner, logs
+
+def _make_components(brain=None, speaker=None, ticker=None, history=None):
+    return SimpleNamespace(brain=brain, speaker=speaker or object(),
+                           ticker=ticker, history=history)
+
+
+def _conf():
+    return {
+        "schema_version": 2,
+        "private": {
+            "whitelist": {"enabled": True, "ids": ["u123"]},
+            "base": {"enabled": True},
+            "trigger": {"wait_seconds": 0},
+        },
+        "group": {
+            "whitelist": {"enabled": False, "ids": []},
+            "base": {"enabled": True},
+        },
+    }
+
+
+async def _fake_send_text(key, text, cfg) -> bool:
+    return True
+
+
+async def _fake_puller(key, n):
+    return []
+
+
+def _build_real(tmpdir: str, **kw):
+    args: dict = {
+        "conf": _conf(),
+        "data_dir": tmpdir,
+        "save": lambda: None,
+        "send_text": _fake_send_text,
+        "puller": _fake_puller,
+        "bot_id": "bot1",
+        "bot_name": "lingxi",
+        "tz": TZ8,
+        "clock": lambda: NOW,
+        "log": lambda s: None,
+    }
+    args.update(kw)
+    return assembly.build_components(**args)
 
 
 class TimerRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_next_wake_none_when_no_upcoming(self):
-        wm = FakeWatchManager(upcoming_info=None)
-        runner, _ = make_runner(wm, clock=FakeClock(NOW))
-        self.assertIsNone(runner._next_wake())
+    async def test_handle_calls_converse_t(self):
+        from lx.adapters import timers
 
-    async def test_next_wake_delta(self):
-        wm = FakeWatchManager(upcoming_info=FakeWakeInfo(NOW + 5.0))
-        runner, _ = make_runner(wm, clock=FakeClock(NOW))
-        self.assertAlmostEqual(runner._next_wake(), 5.0)
-
-    async def test_next_wake_overdue_is_nonpositive(self):
-        wm = FakeWatchManager(upcoming_info=FakeWakeInfo(NOW - 3.0))
-        runner, _ = make_runner(wm, clock=FakeClock(NOW))
-        self.assertLessEqual(runner._next_wake(), 0.0)
-
-    async def test_sleep_delta_when_sooner_than_tick(self):
-        clock = FakeClock(NOW)
-        sleep = FakeSleep(clock)
-        wm = FakeWatchManager(upcoming_info=FakeWakeInfo(NOW + 5.0))
-        runner, _ = make_runner(wm, tick=60.0, clock=clock, sleep=sleep)
-        await runner._once()
-        self.assertEqual(sleep.delays, [5.0])
-
-    async def test_sleep_tick_when_no_upcoming(self):
-        clock = FakeClock(NOW)
-        sleep = FakeSleep()
-        wm = FakeWatchManager(upcoming_info=None)
-        runner, _ = make_runner(wm, tick=30.0, clock=clock, sleep=sleep)
-        await runner._once()
-        self.assertEqual(sleep.delays, [30.0])
-
-    async def test_sleep_tick_when_wake_far(self):
-        sleep = FakeSleep()
-        wm = FakeWatchManager(upcoming_info=FakeWakeInfo(NOW + 3600.0))
-        runner, _ = make_runner(wm, tick=30.0, clock=FakeClock(NOW),
-                                sleep=sleep)
-        await runner._once()
-        self.assertEqual(sleep.delays, [30.0])
-
-    async def test_due_deliver_then_ack(self):
-        delivered: list = []
-        fire = datetime(2026, 1, 1, tzinfo=TZ8)
-
-        async def _deliver(key):
-            delivered.append(key)
-            return "定时文本"
-
-        wm = FakeWatchManager(due_items=[(KEY, fire, "daily")])
-        runner, _ = make_runner(wm, clock=FakeClock(NOW), sleep=FakeSleep(),
-                                deliver=_deliver)
-        await runner._once()
-        self.assertEqual(delivered, [KEY])
-        self.assertEqual(wm.ack_calls, [(KEY, fire, "daily")])
-
-    async def test_deliver_error_no_ack_loop_survives(self):
-        async def _boom(key):
-            raise ConnectionError("发不出去")
-
-        wm = FakeWatchManager(
-            due_items=[(KEY, "fire", "daily")], upcoming_info=None)
-        runner, logs = make_runner(wm, clock=FakeClock(NOW),
-                                   sleep=FakeSleep(), deliver=_boom)
-        await runner._once()  # 不抛
-        self.assertEqual(wm.ack_calls, [])
-        self.assertTrue(any("发不出去" in m for m in logs))
-
-    async def test_ack_error_logged_not_raised(self):
-        class _BadAck(FakeWatchManager):
-            def ack(self, key, fire, cycle):
-                raise KeyError("ack 炸了")
-
-        wm = _BadAck(due_items=[(KEY, "fire", "daily")])
-        runner, logs = make_runner(wm, clock=FakeClock(NOW),
-                                   sleep=FakeSleep())
-        await runner._once()  # 不抛
-        self.assertTrue(any("ack" in m for m in logs))
-
-    async def test_duplicate_due_in_one_round_delivers_once(self):
-        delivered: list = []
-
-        async def _deliver(key):
-            delivered.append(key)
-            return "文本"
-
-        wm = FakeWatchManager(
-            due_items=[(KEY, "f", "daily"), (KEY, "f", "daily")])
-        runner, _ = make_runner(wm, clock=FakeClock(NOW), sleep=FakeSleep(),
-                                deliver=_deliver)
-        await runner._once()
-        self.assertEqual(delivered, [KEY])
-        await runner._once()  # 缓冲已回收：下一轮照常发
-        self.assertEqual(delivered, [KEY, KEY])
-
-    async def test_on_overdue_called_each_round(self):
+        brain = FakeBrain("ok")
+        speaker = object()
+        c = _make_components(brain=brain, speaker=speaker)
         seen: list = []
-        wm = FakeWatchManager()
 
-        def _hook(wm_arg, now, log):
-            seen.append((wm_arg is wm, now))
+        async def _gen(key, asm):
+            seen.append((key, asm))
+            return "模型文字"
 
-        runner, _ = make_runner(wm, clock=FakeClock(NOW), sleep=FakeSleep(),
-                                on_overdue=_hook)
-        await runner._once()
-        await runner._once()
-        self.assertEqual(len(seen), 2)
-        self.assertTrue(all(s[0] for s in seen))
+        runner = timers.TimerRunner(c, _gen, sleep=FakeSleep(),
+                                    clock=FakeClock(NOW))
+        trig = Trigger(source=Source.WAKE, reason="到点了", silent_ok=True)
+        out = await runner.handle(KEY, trig)
+        self.assertEqual(len(brain.calls), 1)
+        key, got_trig, gen_fn, got_speaker = brain.calls[0]
+        self.assertEqual(key, KEY)
+        self.assertIs(got_trig, trig)
+        self.assertIs(got_speaker, speaker)
+        # generate 透传 key：调一下包住的 lambda 应回到外层 _gen
+        asm = make_asm()
+        self.assertEqual(await gen_fn(asm), "模型文字")
+        self.assertEqual(seen, [(KEY, asm)])
+        self.assertIsNotNone(out)
 
-    async def test_on_overdue_error_logged(self):
-        def _bad(wm_arg, now, log):
-            raise ValueError("兜底炸了")
+    async def test_handle_exception_swallowed_and_logged(self):
+        from lx.adapters import timers
 
-        wm = FakeWatchManager()
-        runner, logs = make_runner(wm, clock=FakeClock(NOW),
-                                   sleep=FakeSleep(), on_overdue=_bad)
-        await runner._once()  # 不抛
-        self.assertTrue(any("兜底炸了" in m for m in logs))
+        logs: list = []
+        brain = FakeBrain("boom")
+        c = _make_components(brain=brain)
 
-    async def test_start_names_task_and_stop_closes_only_self(self):
-        wm = FakeWatchManager()
-        runner, _ = make_runner(wm, tick=0.01)
-        task = runner.start()
-        try:
-            self.assertEqual(task.get_name(), "lx-timers")
+        async def _gen(key, asm):
+            return "x"
+
+        runner = timers.TimerRunner(c, _gen, sleep=FakeSleep(),
+                                    clock=FakeClock(NOW), log=logs.append)
+        trig = Trigger(source=Source.IDLE, reason="闲", silent_ok=True)
+        out = await runner.handle(KEY, trig)  # 不抛
+        self.assertIsNone(out)
+        self.assertTrue(logs)
+
+    async def test_handle_cancelled_propagates(self):
+        from lx.adapters import timers
+
+        brain = FakeBrain("cancel")
+        c = _make_components(brain=brain)
+
+        async def _gen(key, asm):
+            return "x"
+
+        runner = timers.TimerRunner(c, _gen, sleep=FakeSleep(),
+                                    clock=FakeClock(NOW))
+        trig = Trigger(source=Source.IDLE, reason="闲", silent_ok=True)
+        with self.assertRaises(asyncio.CancelledError):
+            await runner.handle(KEY, trig)
+
+    async def test_end_to_end_wake_tick_to_send(self):
+        from lx.adapters import timers
+        from lx.triggers.wake import make_wake_task
+
+        sent: list = []
+
+        async def _send(key, text, cfg) -> bool:
+            sent.append((key, text))
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            c = _build_real(tmp, send_text=_send)
+            key = SessionKey(Scope.PRIVATE, "u123", "plat")
+            now_dt = datetime.fromtimestamp(NOW, TZ8)
+            task, err = make_wake_task(key, "2030/01/01-08:00:00", "合成喝水提醒",
+                                       TZ8, now_dt, "w1234567")
+            self.assertEqual(err, "")
+            assert task is not None
+            # 拨到已到期：ticker 才会产出
+            task.fire_at = NOW - 1.0
+            c.store.wake_put(task)
+            due = c.ticker.poll(NOW)
+            self.assertTrue(due)
+            dkey, trig = due[0]
+            self.assertEqual(dkey, key)
+
+            async def _gen(k, asm):
+                return "到点喝水吧"
+
+            runner = timers.TimerRunner(c, _gen, sleep=FakeSleep(),
+                                        clock=FakeClock(NOW))
+            out = await runner.handle(dkey, trig)
+            self.assertIsNotNone(out)
+            self.assertTrue(sent)
+            self.assertEqual(sent[0][0], key)
+            self.assertIn("到点喝水吧", sent[0][1])
+            # once 型送达后登记删除
+            self.assertEqual(c.store.wake_list(key), [])
+
+    async def test_start_stop_idempotent(self):
+        from lx.adapters import timers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            c = _build_real(tmp)
+
+            async def _gen(key, asm):
+                return "x"
+
+            sleep_calls: list = []
+
+            async def _sleep(d):
+                sleep_calls.append(d)
+                await asyncio.sleep(0)
+
+            runner = timers.TimerRunner(c, _gen, interval=0.01, evict_every=100000.0,
+                                        sleep=_sleep, clock=FakeClock(NOW))
+            runner.start()
+            n1 = len(runner._tasks)
+            runner.start()  # 重复 start 是空操作
+            self.assertEqual(len(runner._tasks), n1)
+            self.assertEqual(n1, 2)
             await asyncio.sleep(0.05)
-            self.assertTrue(wm.due_calls)
-        finally:
             await runner.stop()
-        self.assertTrue(task.done())
+            self.assertEqual(runner._tasks, [])
+            await runner.stop()  # 幂等，不抛
 
-    async def test_start_idempotent(self):
-        wm = FakeWatchManager()
-        runner, _ = make_runner(wm, tick=60.0)
-        try:
-            t1 = runner.start()
-            t2 = runner.start()
-            self.assertIs(t1, t2)
-        finally:
-            await runner.stop()
+    async def test_evict_loop_calls_evict_idle(self):
+        from lx.adapters import timers
+
+        class _Hist:
+            def __init__(self):
+                self.calls = 0
+
+            def evict_idle(self):
+                self.calls += 1
+                return 3
+
+        logs: list = []
+        hist = _Hist()
+        c = _make_components(history=hist)
+        # ticker 桩：run 直接返回，不占任务
+        c.ticker = SimpleNamespace(run=self._null_run)
+
+        async def _gen(key, asm):
+            return "x"
+
+        mail = FakeSleep()
+        runner = timers.TimerRunner(c, _gen, interval=100000.0, evict_every=0.01,
+                                    sleep=mail, clock=FakeClock(NOW),
+                                    log=logs.append)
+        runner.start()
+        await asyncio.sleep(0.05)
+        await runner.stop()
+        self.assertGreaterEqual(hist.calls, 1)
+        self.assertTrue(any("回收" in m or "evict" in m.lower() or "3" in m for m in logs))
+
+    async def _null_run(self, *a, **k):
+        return None
+
+
+# ---------------------------------------------------------------- wake_tools
 
 
 class FakeEvent:
-    """文本命令消息对象：只给 wake_tools 要的那几个方法。"""
-
     def __init__(self, sender="owner1",
                  umo="plat:FriendMessage:owner1", group_id=""):
         self._sender = sender
         self.unified_msg_origin = umo
         self._group_id = group_id
+        self._extra = {}
 
     def get_sender_id(self):
         return self._sender
@@ -399,180 +437,131 @@ class FakeEvent:
     def get_group_id(self):
         return self._group_id
 
-
-class FakeWakeStore(FakeWatchManager):
-    """WatchManager 形状 + 唤醒存取：list / add / cancel。"""
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self._wakes: dict = {}
-        self.list_calls: list = []
-        self.add_calls: list = []
-        self.cancel_calls: list = []
-
-    def list(self, key):
-        self.list_calls.append(key)
-        return list(self._wakes.get(repr(key), []))
-
-    def add(self, key, text, fire, cycle):
-        self.add_calls.append((key, text, fire, cycle))
-        rec = SimpleNamespace(id=f"w{len(self.add_calls)}", text=text,
-                              fire=fire, cycle=cycle)
-        self._wakes.setdefault(repr(key), []).append(rec)
-        return rec.id
-
-    def cancel(self, key, wake_id):
-        self.cancel_calls.append((key, wake_id))
-        recs = self._wakes.get(repr(key), [])
-        for i, rec in enumerate(recs):
-            if rec.id == wake_id:
-                del recs[i]
-                return True
-        return False
+    def get_extra(self, name, default=None):
+        return self._extra.get(name, default)
 
 
-def make_tools(wm=None, allow=("owner1",), clock=None):
+def _event_key_of(event):
+    from lx.adapters.events import session_key_of
+
+    return session_key_of(event)
+
+
+def make_tools(c=None, tz=None, tmpdir=None, clock=None, log=None):
     from lx.adapters import timers
 
-    wm = wm if wm is not None else FakeWakeStore()
-    logs: list = []
-    tools = timers.wake_tools(wm, allow=allow,
-                              clock=clock or FakeClock(NOW), log=logs.append)
-    return tools, wm, logs
+    if c is None:
+        assert tmpdir is not None
+        c = _build_real(tmpdir)
+    logs: list = [] if log is None else log
+    tools = timers.wake_tools(c, tz or TZ8, clock=clock or FakeClock(NOW),
+                              log=(logs.append if isinstance(logs, list) else logs))
+    return tools, logs
 
 
 class WakeToolsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_add_ok(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("喝水", "daily", "08:00:00",
-                                   FakeEvent())
-        self.assertIn("id=w1", out)
-        key, text, fire, cycle = wm.add_calls[0]
-        self.assertEqual(key, SessionKey(Scope.PRIVATE, "owner1", "plat"))
-        self.assertEqual(text, "喝水")
-        self.assertEqual(cycle, "daily")
-        self.assertEqual((fire.hour, fire.minute), (8, 0))
-        self.assertEqual(fire.tzinfo.key, "Asia/Shanghai")
+    async def test_query_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            out = await tools.query(FakeEvent())
+            self.assertIn("没有", out)
 
-    async def test_add_whe_aliases(self):
-        tools, wm, _ = make_tools()
-        await tools.wake_add("a", "day", "08:00:00", FakeEvent())
-        await tools.wake_add("b", "Cycle", "09:00:00", FakeEvent())
-        self.assertEqual([c[3] for c in wm.add_calls], ["daily", "daily"])
+    async def test_query_lists_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成喝水")
+            await tools.create(FakeEvent(), "08:00:00", "合成吃药")
+            out = await tools.query(FakeEvent())
+            self.assertIn("合成喝水", out)
+            self.assertIn("合成吃药", out)
+            self.assertIn("2030", out)
 
-    async def test_add_whe_mismatch_rejected(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("x", "daily", "2030/01/01-08:00:00",
-                                   FakeEvent())
-        self.assertIn("不一致", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_create_ok_contains_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            out = await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成开会")
+            self.assertIn("2030", out)
+            self.assertIn("合成开会", out)
 
-    async def test_add_past_rejected(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("x", "once", "2000/01/01-00:00:00",
-                                   FakeEvent())
-        self.assertIn("过去", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_create_bad_time_no_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            out = await tools.create(FakeEvent(), "胡说八道", "合成备注")
+            self.assertIsInstance(out, str)
+            self.assertTrue(out.strip())
 
-    async def test_add_bad_time_rejected(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("x", "daily", "胡说", FakeEvent())
-        self.assertIn("解析失败", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_create_over_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c = _build_real(tmp)
+            c.store._wake_max = 1
+            tools, _ = make_tools(c=c)
+            out1 = await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成一")
+            self.assertIn("2030", out1)
+            out2 = await tools.create(FakeEvent(), "2031/01/01-08:00:00", "合成二")
+            self.assertIn("上限", out2)
 
-    async def test_add_bad_cycle_rejected(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("x", "胡说", "08:00:00", FakeEvent())
-        self.assertIn("周期", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_create_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from lx.adapters import timers
 
-    async def test_add_duplicate_returns_existing_id(self):
-        tools, wm, _ = make_tools()
-        first = await tools.wake_add("喝水", "daily", "08:00:00",
-                                     FakeEvent())
-        second = await tools.wake_add("喝水", "daily", "08:00:00",
-                                      FakeEvent())
-        self.assertIn("id=w1", first)
-        self.assertIn("w1", second)
-        self.assertIn("相同", second)
-        self.assertEqual(len(wm.add_calls), 1)
+            c = _build_real(tmp)
 
-    async def test_add_denied_for_stranger(self):
-        tools, wm, logs = make_tools()
-        out = await tools.wake_add("x", "daily", "08:00:00",
-                                   FakeEvent(sender="hacker",
-                                             umo="plat:FriendMessage:hacker"))
-        self.assertIn("拒绝", out)
-        self.assertEqual(wm.add_calls, [])
-        self.assertTrue(any("拒绝" in m for m in logs))
+            class _Off(DictCfg):
+                def get(self, path: str, default=None):
+                    if path == "wake.enabled":
+                        return False
+                    return super().get(path, default)
 
-    async def test_add_no_sender_rejected(self):
-        tools, wm, _ = make_tools()
+            c.resolver = FakeResolver(_Off({}))
+            tools = timers.wake_tools(c, TZ8, clock=FakeClock(NOW))
+            out = await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成备注")
+            self.assertIn("关闭", out)
 
-        class _Mute:
-            unified_msg_origin = ""
+    async def test_update_ok_and_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成旧备注")
+            out = await tools.update(FakeEvent(), "1", note="合成新备注")
+            self.assertIn("合成新备注", out)
+            q2 = await tools.query(FakeEvent())
+            self.assertIn("合成新备注", q2)
+            bad = await tools.update(FakeEvent(), "99", note="合成x")
+            self.assertIn("没有", bad)
 
-        out = await tools.wake_add("x", "daily", "08:00:00", _Mute())
-        self.assertIn("拒绝", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_update_time_recalc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成备注")
+            out = await tools.update(FakeEvent(), "1", time_str="2031/02/02-09:00:00")
+            self.assertIn("2031", out)
 
-    async def test_add_empty_text_rejected(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("  ", "daily", "08:00:00", FakeEvent())
-        self.assertIn("空", out)
-        self.assertEqual(wm.add_calls, [])
+    async def test_delete_ok_and_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
+            await tools.create(FakeEvent(), "2030/01/01-08:00:00", "合成待删")
+            out = await tools.delete(FakeEvent(), "1")
+            self.assertIn("删", out)
+            q = await tools.query(FakeEvent())
+            self.assertIn("没有", q)
+            bad = await tools.delete(FakeEvent(), "9")
+            self.assertIn("没有", bad)
 
-    async def test_add_group_key(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_add("开会", "daily", "09:00:00",
-                                   FakeEvent(sender="owner1",
-                                             umo="plat:GroupMessage:999",
-                                             group_id="999"))
-        self.assertIn("id=", out)
-        self.assertEqual(wm.add_calls[0][0],
-                         SessionKey(Scope.GROUP, "999", "plat"))
+    async def test_bad_event_no_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools, _ = make_tools(tmpdir=tmp)
 
-    async def test_list(self):
-        tools, _, _ = make_tools()
-        await tools.wake_add("喝水", "daily", "08:00:00", FakeEvent())
-        await tools.wake_add("吃药", "once", "2030/01/01-08:00:00",
-                             FakeEvent())
-        out = await tools.wake_list(FakeEvent())
-        self.assertIn("w1", out)
-        self.assertIn("w2", out)
-        self.assertIn("喝水", out)
+            class _Bad:
+                unified_msg_origin = ""
 
-    async def test_list_empty(self):
-        tools, _, _ = make_tools()
-        out = await tools.wake_list(FakeEvent())
-        self.assertIn("没有", out)
+                def get_group_id(self):
+                    return ""
 
-    async def test_list_denied_for_stranger(self):
-        tools, _, _ = make_tools()
-        out = await tools.wake_list(FakeEvent(sender="hacker",
-                                              umo="plat:FriendMessage:hacker"))
-        self.assertIn("拒绝", out)
-
-    async def test_cancel_ok(self):
-        tools, wm, _ = make_tools()
-        await tools.wake_add("喝水", "daily", "08:00:00", FakeEvent())
-        out = await tools.wake_cancel(FakeEvent(), "w1")
-        self.assertIn("已取消", out)
-        self.assertEqual(wm.cancel_calls[0][1], "w1")
-        self.assertIn("没有", await tools.wake_list(FakeEvent()))
-
-    async def test_cancel_missing(self):
-        tools, _, _ = make_tools()
-        out = await tools.wake_cancel(FakeEvent(), "w9")
-        self.assertIn("没找到", out)
-
-    async def test_cancel_denied_for_stranger(self):
-        tools, wm, _ = make_tools()
-        out = await tools.wake_cancel(FakeEvent(sender="hacker",
-                                                umo="plat:FriendMessage:hacker"),
-                                      "w1")
-        self.assertIn("拒绝", out)
-        self.assertEqual(wm.cancel_calls, [])
+            for coro in (tools.query(_Bad()),
+                         tools.create(_Bad(), "2030/01/01-08:00:00", "合成x"),
+                         tools.update(_Bad(), "1", note="合成x"),
+                         tools.delete(_Bad(), "1")):
+                out = await coro
+                self.assertIsInstance(out, str)
 
 
 if __name__ == "__main__":
