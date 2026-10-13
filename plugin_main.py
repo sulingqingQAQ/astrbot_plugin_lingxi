@@ -169,7 +169,7 @@ class LingxiPlugin(star.Star):
     def _setup_webui(self) -> None:
         """接配置面板后端：构造 ConfigService + 注册 7 个 WebAPI。
 
-        lx.webui.* 由 UI-1a / UI-1b 两张卡在做，本分支还没有——import 失败只记
+        lx.webui.* 缺失（或 import 失败）时只记
         日志直接返回，插件照常加载（页面不可用而已）。方法整体不抛。
         """
         try:
@@ -179,7 +179,7 @@ class LingxiPlugin(star.Star):
                 from .lx.adapters.webapi import LingxiWebApi
                 from .lx.config.spec import SCHEMA_VERSION
             except Exception as e:
-                _warn("[lingxi] 配置面板不可用（缺模块，UI-1a/1b 未合入）：%r" % (e,))
+                _warn("[lingxi] 配置面板不可用（缺模块）：%r" % (e,))
                 return
             version = _webui_plugin_version()
             save = getattr(self.config, "save_config", None)

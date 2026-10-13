@@ -292,14 +292,29 @@ class TestWebuiWiring(unittest.TestCase):
         return plugin
 
     def test_setup_webui_missing_modules_no_raise(self):
-        # 本分支 lx.webui.* 还不存在（UI-1a/1b 未合入）：构造不抛，服务为 None。
-        plugin = self._make_plugin()
-        self.assertIsNone(plugin._webui_service)
-        self.assertIsNone(plugin._webui_api)
+        # 模拟 lx.webui.service 缺失（sys.modules 里置 None → import 抛 ImportError）：
+        # 构造不抛，服务为 None，插件照常加载。
+        key = PLUGIN_PKG + ".lx.webui.service"
+        saved = sys.modules.get(key, "__absent__")
+        sys.modules[key] = None
         try:
-            plugin._setup_webui()
-        except Exception as e:
-            self.fail("_setup_webui 抛了：%r" % (e,))
+            plugin = self._make_plugin()
+            self.assertIsNone(plugin._webui_service)
+            self.assertIsNone(plugin._webui_api)
+            try:
+                plugin._setup_webui()
+            except Exception as e:
+                self.fail("_setup_webui 抛了：%r" % (e,))
+        finally:
+            if saved == "__absent__":
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = saved
+
+    def test_setup_webui_builds_service_when_modules_present(self):
+        plugin = self._make_plugin()
+        self.assertIsNotNone(plugin._webui_service)
+        self.assertIsNotNone(plugin._webui_api)
 
     def test_webui_reload_calls_resolver_reload(self):
         plugin = self._make_plugin()

@@ -169,6 +169,16 @@ class SaveConfigTest(unittest.TestCase):
         self.assertEqual(h.conf["private"]["idle"]["base_minutes"], 30)
         self.assertEqual(h.save_calls, 0)
 
+    def test_revision_conflict_checked_before_item_validation(self):
+        # 页面数据已过期（revision 对不上）时，不逐项报错，只报冲突、要求刷新。
+        h = _Harness({"private": {"idle": {"base_minutes": 30}}})
+        svc = h.svc()
+        data = svc.save_config({"revision": "deadbeef0000", "changes": [
+            {"scope": "private", "path": "no.such_item", "value": 1}]})
+        self.assertFalse(data["saved"])
+        self.assertTrue(data["conflict"])
+        self.assertEqual([e["path"] for e in data["errors"]], ["revision"])
+
     def test_save_exception_rolls_back(self):
         before = {"private": {"idle": {"base_minutes": 30}}}
         h = _Harness(dict(json.loads(json.dumps(before))), save_exc=OSError("磁盘满了"))

@@ -178,7 +178,16 @@ class ConfigService:
         if not isinstance(changes, list):
             return _fail([{"scope": None, "path": "changes", "message": "改动列表应该是一个列表，请刷新页面重试"}])
 
-        # ① 全部校验：路径必须在规格里且适用该 scope。
+        # ① revision：与当前不一致 → 冲突，要求刷新（先查：页面数据已过期时逐项校验没有意义）。
+        rev = body.get("revision")
+        current = self.get_config()
+        if "error" in current:
+            return current
+        if not isinstance(rev, str) or rev != current["revision"]:
+            msg = "缺少 revision，请刷新页面后重试" if not isinstance(rev, str) else "配置在别处被改过，请刷新页面后重试"
+            return _fail([{"scope": None, "path": "revision", "message": msg}], conflict=True)
+
+        # ② 全部校验：路径必须在规格里且适用该 scope。
         errors: list[dict] = []
         valid: list[tuple[Scope, str, str, str, Any]] = []  # (scope, path, block, name, 规整值)
         for i, ch in enumerate(changes):
@@ -233,15 +242,6 @@ class ConfigService:
                 new_text = text if isinstance(text, str) else ""
         if errors:
             return _fail(errors)
-
-        # ② revision：与当前不一致 → 冲突，要求刷新。
-        rev = body.get("revision")
-        current = self.get_config()
-        if "error" in current:
-            return current
-        if not isinstance(rev, str) or rev != current["revision"]:
-            msg = "缺少 revision，请刷新页面后重试" if not isinstance(rev, str) else "配置在别处被改过，请刷新页面后重试"
-            return _fail([{"scope": None, "path": "revision", "message": msg}], conflict=True)
 
         # 同一个 (scope, path) 多次出现取最后一个。
         merged: dict[tuple[str, str], tuple[str, str, str, Any]] = {}
