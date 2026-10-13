@@ -1,6 +1,6 @@
 """lx 契约（B1 接口草案的代码化）。只有协调者改这个文件。
 
-状态：**v0.5 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；v0.4：加可选 Seedable、WaitAggregator.forget，SessionKey 注明群聊 id 是真群号；v0.5：Msg 加 addressed，Trigger.meta 约定 wait；等 adapters 跑通后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
+状态：**v0.6 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；v0.4：加可选 Seedable、WaitAggregator.forget，SessionKey 注明群聊 id 是真群号；v0.5：Msg 加 addressed，Trigger.meta 约定 wait；v0.6：HistoryBuffer 加 messages；等 adapters 跑通后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
 但不要把实现绑死在细节上；契约改了，协调者会通知并合并进各线分支。
 
 只放：数据类、枚举、Protocol 签名、时钟类型。**不放任何业务逻辑，不 import astrbot。**
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
-CONTRACT_VERSION = "0.5-provisional"
+CONTRACT_VERSION = "0.6-provisional"
 
 # 注入时钟：所有带时间的逻辑都接收一个 Clock，测试里用假时钟。返回秒级 Unix 时间戳。
 Clock = Callable[[], float]
@@ -100,6 +100,7 @@ class HistoryBuffer(Protocol):
     def clear(self, key: SessionKey, reason: str) -> None: ...
     async def pull(self, key: SessionKey) -> int: ...  # 重启回拉，返回回拉条数
     def evict_idle(self) -> int: ...
+    def messages(self, key: SessionKey) -> list[Msg]: ...  # v0.6：按 ts 升序的当前消息副本（只读访问，供便签锚点校验、渲染复用）
 
 
 # ---------------------------------------------------------------- 触发
