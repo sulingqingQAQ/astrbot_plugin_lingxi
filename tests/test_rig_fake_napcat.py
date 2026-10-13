@@ -339,5 +339,61 @@ class TestApiResponseAndRecord(_Base):
         self.assertEqual(cli.sent(), [])
 
 
+class TestWaitAndTeardown(_Base):
+    async def test_wait_sent_success(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv.send_api("send_private_msg",
+                                {"user_id": 10001, "message": "甲"},
+                                echo="w-1")
+        await self.srv.send_api("send_private_msg",
+                                {"user_id": 10001, "message": "乙"},
+                                echo="w-2")
+        got = await cli.wait_sent(n=2, timeout=5.0)
+        self.assertEqual(len(got), 2)
+        self.assertEqual([r["text"] for r in got], ["甲", "乙"])
+
+    async def test_wait_sent_timeout(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        with self.assertRaises(TimeoutError):
+            await cli.wait_sent(n=1, timeout=0.2)
+
+    async def test_stop_closes_server_side(self):
+        await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.client.stop()
+        await asyncio.wait_for(self.srv.closed.wait(), 5.0)
+        self.assertTrue(self.srv.closed.is_set())
+
+    async def test_stop_idempotent(self):
+        await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.client.stop()
+        await self.client.stop()  # 不抛异常
+
+    async def test_start_failure_raises(self):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            dead_port = s.getsockname()[1]
+        # socket 关闭后该端口无监听
+        self.client = FakeNapCat(f"ws://127.0.0.1:{dead_port}/ws")
+        with self.assertRaises(Exception):
+            await self.client.start()
+
+    async def test_bad_frame_goes_to_errors_and_survives(self):
+        cli = await self._connect(self_id="10000")
+        await self.srv.wait_frames(n=1)
+        await self.srv._ws.send_str("这不是 JSON{{{")
+        await self.srv.send_api("send_private_msg",
+                                {"user_id": 10001, "message": "之后还活着"},
+                                echo="r-1")
+        got = await cli.wait_sent(n=1, timeout=5.0)
+        self.assertEqual(got[0]["text"], "之后还活着")
+        self.assertTrue(any("bad_json" in e for e in cli.errors()))
+
+
 if __name__ == "__main__":
     unittest.main()
