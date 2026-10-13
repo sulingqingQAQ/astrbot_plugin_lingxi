@@ -143,6 +143,54 @@ def seed_idle(c: Components, keys: Iterable[SessionKey], now: Optional[float] = 
     return count
 
 
+def whitelist_seed_keys(resolver: Any, platforms: Iterable[str]) -> list:
+    """白名单 ID 列表 × 平台 id → SessionKey 列表（去重，私聊在前、群聊在后）。
+
+    platform 必须是 UMO 第一段的平台实例名（``context.platform_manager`` 里
+    ``meta().id`` 的那个值），因为 ``SessionKey.platform`` 存的就是它
+    （见 lx/session/key.py ``from_umo``：``platform, mtype, sid = parts``）。
+    名单里的完整 UMO 条目在 resolver 里已压成裸 ID（平台名不参与匹配），
+    这里直接与每个平台 id 相乘；落到该会话的 idle 配置开关仍由 seed_idle 把关。
+    """
+    plats: list[str] = []
+    for p in platforms or ():
+        try:
+            text = p.strip() if isinstance(p, str) else str(p).strip()
+        except Exception:
+            continue
+        if text and text not in plats:
+            plats.append(text)
+    if not plats:
+        return []
+    keys: list = []
+    seen: set = set()
+    for scope in (Scope.PRIVATE, Scope.GROUP):
+        try:
+            ids = resolver.whitelist_ids(scope)
+        except Exception:
+            continue
+        for ident in ids or ():
+            try:
+                sid = ident.strip() if isinstance(ident, str) else str(ident).strip()
+            except Exception:
+                continue
+            if not sid:
+                continue
+            for plat in plats:
+                mark = (scope.value, sid, plat)
+                if mark in seen:
+                    continue
+                seen.add(mark)
+                keys.append(SessionKey(scope, sid, plat))
+    return keys
+
+
+def seed_idle_from_whitelist(c: Components, platforms: Iterable[str],
+                             now: Optional[float] = None) -> int:
+    """白名单会话的启动播种：先拼 key 再走 seed_idle（开关与锚点规则不变）。"""
+    return seed_idle(c, whitelist_seed_keys(c.resolver, platforms), now=now)
+
+
 def import_legacy_wake(c: Components, legacy_records) -> int:
     """把旧 wake_replies.json 记录转成 WakeTask 并入库。失败记 log 返回 0。"""
     try:

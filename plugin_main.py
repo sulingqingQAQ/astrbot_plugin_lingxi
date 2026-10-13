@@ -16,7 +16,7 @@ import astrbot.api.star as star
 from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 
-from .lx.adapters.assembly import build_components, seed_idle
+from .lx.adapters.assembly import build_components, seed_idle, whitelist_seed_keys
 from .lx.adapters.handlers import EHandlers
 from .lx.adapters.platform_io import make_history_puller, make_send_text
 from .lx.adapters.timers import TimerRunner, make_generate_t, wake_tools
@@ -102,6 +102,7 @@ class LingxiPlugin(star.Star):
     def __init__(self, context: star.Context, config) -> None:
         super().__init__(context)
         self.config = config
+        self._context = context
         log = _make_log()
         tz = _resolve_tz(context)
         self._tz = tz
@@ -163,27 +164,57 @@ class LingxiPlugin(star.Star):
         # AD-5a 未合并时 setter 为 None：同样置位，避免每次重复尝试。
         self._identity_set = True
 
-    def _seed_keys(self) -> list:
-        """store 里已知会话 key 去重列表；拿不到就空。"""
+    def _platform_ids(self) -> list:
+        """当前在跑的平台实例名（即 UMO 第一段）；拿不到就空，不抛。"""
         try:
-            tasks = self._c.store.wake_list(None)
+            mgr = getattr(self._context, "platform_manager", None)
+            get = getattr(mgr, "get_insts", None)
+            insts = get() if callable(get) else getattr(mgr, "platform_insts", None)
+            ids = []
+            for p in insts or []:
+                try:
+                    pid = p.meta().id
+                except Exception:
+                    continue
+                if isinstance(pid, str) and pid.strip() and pid not in ids:
+                    ids.append(pid)
+            return ids
         except Exception:
             return []
+
+    def _seed_keys(self) -> list:
+        """启动播种的会话 key：白名单 ID × 平台 id 为主，有唤醒任务的会话兜底。
+
+        旧写法只取 wake_list 里的会话，没有唤醒任务的白名单会话播种不到；
+        白名单关了的范围没有可枚举的名单，仍靠 wake 任务覆盖已知会话。
+        """
         keys = []
         seen = set()
-        for t in tasks or []:
-            try:
-                key = t.key
-            except Exception:
-                continue
+
+        def _add(key) -> None:
             try:
                 mark = (str(key.scope), str(key.id), str(key.platform))
             except Exception:
-                continue
-            if mark in seen:
-                continue
+                return
+            if not key.id or mark in seen:
+                return
             seen.add(mark)
             keys.append(key)
+
+        try:
+            for key in whitelist_seed_keys(self._c.resolver, self._platform_ids()):
+                _add(key)
+        except Exception:
+            pass
+        try:
+            tasks = self._c.store.wake_list(None)
+        except Exception:
+            tasks = []
+        for t in tasks or []:
+            try:
+                _add(t.key)
+            except Exception:
+                continue
         return keys
 
     async def initialize(self) -> None:
