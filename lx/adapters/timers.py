@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from ..contracts import Assembled, SessionKey
@@ -288,3 +289,208 @@ class TimerRunner:
     def _recycle(self) -> None:
         """缓冲回收：清掉本轮 deliver 去重记号。"""
         self._seen.clear()
+
+
+# ------------------------------------------------------------------
+# wake_tools：唤醒工具（供 main.py 里 @llm_tool 薄包装调用）。
+#
+# 假定（X 线的 WatchManager 落地后若形状不同，在此对齐）：
+# - ``wm.list(key)`` -> records，record 带 ``.id/.text/.fire/.cycle``；
+# - ``wm.add(key, text, fire, cycle)`` -> wake_id(str)；
+# - ``wm.cancel(key, wake_id)`` -> bool。
+# 取舍（见交接）：whe=周期词、iso=时间字符串；周期与解析出的 kind
+# 不一致就打回；去重按 (text, fire, cycle) 归一后比；只收文本（空内容打回）。
+# ------------------------------------------------------------------
+
+_CYCLE_ALIASES = {
+    "once": "once",
+    "daily": "daily",
+    "day": "daily",
+    "cycle": "daily",
+    "weekly": "weekly",
+    "week": "weekly",
+    "monthly": "monthly",
+    "month": "monthly",
+    "yearly": "yearly",
+    "year": "yearly",
+}
+
+
+def _event_sender(event: Any) -> str:
+    """sender 优先取 event.get_sender_id()，fallback unified_msg_origin。"""
+    fn = getattr(event, "get_sender_id", None)
+    if callable(fn):
+        try:
+            v = fn()
+        except Exception:
+            v = None
+        if v:
+            return str(v)
+    umo = getattr(event, "unified_msg_origin", None)
+    return str(umo) if umo else ""
+
+
+def _event_key(event: Any) -> Optional[SessionKey]:
+    """从事件的 unified_msg_origin（+群号）还原 SessionKey；还原不了就 None。"""
+    umo = getattr(event, "unified_msg_origin", None)
+    if not umo:
+        return None
+    gid = None
+    fn = getattr(event, "get_group_id", None)
+    if callable(fn):
+        try:
+            gid = fn()
+        except Exception:
+            gid = None
+    try:
+        from ..session.key import try_from_umo
+    except Exception:
+        return None
+    try:
+        return try_from_umo(umo, group_id=gid)
+    except Exception:
+        return None
+
+
+class WakeTools:
+    """三个唤醒工具：add / list / cancel。结果全是给人看的中文 str。"""
+
+    def __init__(
+        self,
+        wm: Any,
+        allow: Any = (),
+        clock: Optional[Callable[[], float]] = None,
+        log: Optional[LogFn] = None,
+    ) -> None:
+        self._wm = wm
+        self._allow = {str(a) for a in (allow or ())}
+        self._clock = clock if clock is not None else time.time
+        self._log: LogFn = log if log is not None else _noop_log
+
+    # -- 内部 --
+
+    def _check(self, event: Any) -> tuple[Optional[SessionKey], Optional[str]]:
+        """self 限定：sender 不在白名单（或取不到）就拒绝。"""
+        sender = _event_sender(event)
+        if not sender or sender not in self._allow:
+            _safe_log(self._log, f"[timers] 拒绝非白名单 sender：{sender!r}")
+            return None, "拒绝：你没有定时唤醒的操作权限。"
+        key = _event_key(event)
+        if key is None:
+            return None, "拒绝：认不出这条消息是哪个会话发的。"
+        return key, None
+
+    def _parse_wake(self, whe: str, iso: str, tzname: str):
+        """(whe=周期词, iso=时间串) → (fire, cycle)；失败返回 (None, 错误文案)。"""
+        from ..triggers.timeparse import next_fire, parse_time_str
+
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(tzname)
+        except Exception as e:
+            return None, f"时区 {tzname!r} 不可用：{e}"
+        cycle = _CYCLE_ALIASES.get(str(whe or "").strip().lower(), "")
+        if not cycle:
+            return None, (f"认不出这个周期 {whe!r}，"
+                          "只要 once/daily/weekly/monthly/yearly（day/Cycle 也算 daily）。")
+        now = datetime.fromtimestamp(self._clock(), tz=zone)
+        parsed, err = parse_time_str(str(iso or ""), zone, now)
+        if parsed is None:
+            if "past" in (err or ""):
+                return None, "这个时间已经过去了，换个未来的时间再加。"
+            return None, f"时间解析失败（{err}）：周期 {whe!r}，时间 {iso!r}。"
+        if parsed.kind != cycle:
+            return None, (f"周期与时间格式不一致：周期是 {cycle}，"
+                          f"时间串看着像 {parsed.kind}。")
+        fire = next_fire(parsed, now)
+        if fire is None:
+            return None, "这个时间已经过去了，换个未来的时间再加。"
+        return (fire, cycle), ""
+
+    # -- 工具 --
+
+    async def wake_add(self, text: str, whe: str, iso: str, event: Any,
+                       tz: str = "Asia/Shanghai") -> str:
+        """加一条唤醒。text=提醒内容，whe=周期词，iso=时间串，event=命令消息对象。"""
+        key, denied = self._check(event)
+        if denied:
+            return denied
+        body = str(text or "").strip()
+        if not body:
+            return "提醒内容是空的，加不了：只收文本内容。"
+        parsed, err = self._parse_wake(whe, iso, tz)
+        if parsed is None:
+            return err
+        fire, cycle = parsed
+        try:
+            existing = await _maybe_await(self._wm.list(key))
+        except Exception as e:
+            return f"查已有提醒失败：{e}，稍后再试。"
+        for rec in existing or ():
+            rtext = getattr(rec, "text", "")
+            rfire = getattr(rec, "fire", None)
+            rcycle = getattr(rec, "cycle", "")
+            if (isinstance(rtext, str) and rtext.strip() == body
+                    and rfire == fire and rcycle == cycle):
+                return (f"已经有一条相同的提醒了（id={getattr(rec, 'id', '?')}），"
+                        "不用重复加。")
+        try:
+            wid = await _maybe_await(self._wm.add(key, body, fire, cycle))
+        except Exception as e:
+            return f"记提醒失败：{e}，稍后再试。"
+        from ..triggers.timeparse import format_when
+        try:
+            when = format_when(fire)
+        except Exception:
+            when = str(fire)
+        _safe_log(self._log, f"[timers] 加提醒 ok：id={wid}")
+        return f"已加上提醒：id={wid}，{cycle} {when}，内容：{body}"
+
+    async def wake_list(self, text: Any) -> str:
+        """列当前会话的提醒。text=文本命令消息对象（卡面签名）。"""
+        event = text
+        key, denied = self._check(event)
+        if denied:
+            return denied
+        try:
+            recs = await _maybe_await(self._wm.list(key))
+        except Exception as e:
+            return f"查提醒失败：{e}，稍后再试。"
+        if not recs:
+            return "现在没有定时提醒。"
+        from ..triggers.timeparse import format_when
+        lines = []
+        for rec in recs:
+            try:
+                when = format_when(getattr(rec, "fire"))
+            except Exception:
+                when = str(getattr(rec, "fire", "?"))
+            lines.append(f"{getattr(rec, 'id', '?')}｜"
+                         f"{getattr(rec, 'cycle', '?')} {when}｜"
+                         f"{getattr(rec, 'text', '')}")
+        return "定时提醒：\n" + "\n".join(lines)
+
+    async def wake_cancel(self, text: Any, wake_id: str) -> str:
+        """按 id 取消。text=文本命令消息对象（卡面签名）。"""
+        event = text
+        key, denied = self._check(event)
+        if denied:
+            return denied
+        wid = str(wake_id or "").strip()
+        if not wid:
+            return "要取消的 id 是空的。"
+        try:
+            ok = await _maybe_await(self._wm.cancel(key, wid))
+        except Exception as e:
+            return f"取消失败：{e}，稍后再试。"
+        if ok:
+            _safe_log(self._log, f"[timers] 取消提醒 ok：id={wid}")
+            return f"已取消提醒 {wid}。"
+        return f"没找到 id={wid} 的提醒。"
+
+
+def wake_tools(wm: Any, allow: Any = (),
+               clock: Optional[Callable[[], float]] = None,
+               log: Optional[LogFn] = None) -> WakeTools:
+    """造 WakeTools：wm=WatchManager，allow=sender 白名单（空=全拒绝）。"""
+    return WakeTools(wm, allow=allow, clock=clock, log=log)

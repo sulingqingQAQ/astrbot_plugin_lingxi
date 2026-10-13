@@ -384,5 +384,196 @@ class TimerRunnerTest(unittest.IsolatedAsyncioTestCase):
             await runner.stop()
 
 
+class FakeEvent:
+    """文本命令消息对象：只给 wake_tools 要的那几个方法。"""
+
+    def __init__(self, sender="owner1",
+                 umo="plat:FriendMessage:owner1", group_id=""):
+        self._sender = sender
+        self.unified_msg_origin = umo
+        self._group_id = group_id
+
+    def get_sender_id(self):
+        return self._sender
+
+    def get_group_id(self):
+        return self._group_id
+
+
+class FakeWakeStore(FakeWatchManager):
+    """WatchManager 形状 + 唤醒存取：list / add / cancel。"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._wakes: dict = {}
+        self.list_calls: list = []
+        self.add_calls: list = []
+        self.cancel_calls: list = []
+
+    def list(self, key):
+        self.list_calls.append(key)
+        return list(self._wakes.get(repr(key), []))
+
+    def add(self, key, text, fire, cycle):
+        self.add_calls.append((key, text, fire, cycle))
+        rec = SimpleNamespace(id=f"w{len(self.add_calls)}", text=text,
+                              fire=fire, cycle=cycle)
+        self._wakes.setdefault(repr(key), []).append(rec)
+        return rec.id
+
+    def cancel(self, key, wake_id):
+        self.cancel_calls.append((key, wake_id))
+        recs = self._wakes.get(repr(key), [])
+        for i, rec in enumerate(recs):
+            if rec.id == wake_id:
+                del recs[i]
+                return True
+        return False
+
+
+def make_tools(wm=None, allow=("owner1",), clock=None):
+    from lx.adapters import timers
+
+    wm = wm if wm is not None else FakeWakeStore()
+    logs: list = []
+    tools = timers.wake_tools(wm, allow=allow,
+                              clock=clock or FakeClock(NOW), log=logs.append)
+    return tools, wm, logs
+
+
+class WakeToolsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_add_ok(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("喝水", "daily", "08:00:00",
+                                   FakeEvent())
+        self.assertIn("id=w1", out)
+        key, text, fire, cycle = wm.add_calls[0]
+        self.assertEqual(key, SessionKey(Scope.PRIVATE, "owner1", "plat"))
+        self.assertEqual(text, "喝水")
+        self.assertEqual(cycle, "daily")
+        self.assertEqual((fire.hour, fire.minute), (8, 0))
+        self.assertEqual(fire.tzinfo.key, "Asia/Shanghai")
+
+    async def test_add_whe_aliases(self):
+        tools, wm, _ = make_tools()
+        await tools.wake_add("a", "day", "08:00:00", FakeEvent())
+        await tools.wake_add("b", "Cycle", "09:00:00", FakeEvent())
+        self.assertEqual([c[3] for c in wm.add_calls], ["daily", "daily"])
+
+    async def test_add_whe_mismatch_rejected(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("x", "daily", "2030/01/01-08:00:00",
+                                   FakeEvent())
+        self.assertIn("不一致", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_past_rejected(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("x", "once", "2000/01/01-00:00:00",
+                                   FakeEvent())
+        self.assertIn("过去", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_bad_time_rejected(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("x", "daily", "胡说", FakeEvent())
+        self.assertIn("解析失败", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_bad_cycle_rejected(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("x", "胡说", "08:00:00", FakeEvent())
+        self.assertIn("周期", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_duplicate_returns_existing_id(self):
+        tools, wm, _ = make_tools()
+        first = await tools.wake_add("喝水", "daily", "08:00:00",
+                                     FakeEvent())
+        second = await tools.wake_add("喝水", "daily", "08:00:00",
+                                      FakeEvent())
+        self.assertIn("id=w1", first)
+        self.assertIn("w1", second)
+        self.assertIn("相同", second)
+        self.assertEqual(len(wm.add_calls), 1)
+
+    async def test_add_denied_for_stranger(self):
+        tools, wm, logs = make_tools()
+        out = await tools.wake_add("x", "daily", "08:00:00",
+                                   FakeEvent(sender="hacker",
+                                             umo="plat:FriendMessage:hacker"))
+        self.assertIn("拒绝", out)
+        self.assertEqual(wm.add_calls, [])
+        self.assertTrue(any("拒绝" in m for m in logs))
+
+    async def test_add_no_sender_rejected(self):
+        tools, wm, _ = make_tools()
+
+        class _Mute:
+            unified_msg_origin = ""
+
+        out = await tools.wake_add("x", "daily", "08:00:00", _Mute())
+        self.assertIn("拒绝", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_empty_text_rejected(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("  ", "daily", "08:00:00", FakeEvent())
+        self.assertIn("空", out)
+        self.assertEqual(wm.add_calls, [])
+
+    async def test_add_group_key(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_add("开会", "daily", "09:00:00",
+                                   FakeEvent(sender="owner1",
+                                             umo="plat:GroupMessage:999",
+                                             group_id="999"))
+        self.assertIn("id=", out)
+        self.assertEqual(wm.add_calls[0][0],
+                         SessionKey(Scope.GROUP, "999", "plat"))
+
+    async def test_list(self):
+        tools, _, _ = make_tools()
+        await tools.wake_add("喝水", "daily", "08:00:00", FakeEvent())
+        await tools.wake_add("吃药", "once", "2030/01/01-08:00:00",
+                             FakeEvent())
+        out = await tools.wake_list(FakeEvent())
+        self.assertIn("w1", out)
+        self.assertIn("w2", out)
+        self.assertIn("喝水", out)
+
+    async def test_list_empty(self):
+        tools, _, _ = make_tools()
+        out = await tools.wake_list(FakeEvent())
+        self.assertIn("没有", out)
+
+    async def test_list_denied_for_stranger(self):
+        tools, _, _ = make_tools()
+        out = await tools.wake_list(FakeEvent(sender="hacker",
+                                              umo="plat:FriendMessage:hacker"))
+        self.assertIn("拒绝", out)
+
+    async def test_cancel_ok(self):
+        tools, wm, _ = make_tools()
+        await tools.wake_add("喝水", "daily", "08:00:00", FakeEvent())
+        out = await tools.wake_cancel(FakeEvent(), "w1")
+        self.assertIn("已取消", out)
+        self.assertEqual(wm.cancel_calls[0][1], "w1")
+        self.assertIn("没有", await tools.wake_list(FakeEvent()))
+
+    async def test_cancel_missing(self):
+        tools, _, _ = make_tools()
+        out = await tools.wake_cancel(FakeEvent(), "w9")
+        self.assertIn("没找到", out)
+
+    async def test_cancel_denied_for_stranger(self):
+        tools, wm, _ = make_tools()
+        out = await tools.wake_cancel(FakeEvent(sender="hacker",
+                                                umo="plat:FriendMessage:hacker"),
+                                      "w1")
+        self.assertIn("拒绝", out)
+        self.assertEqual(wm.cancel_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
