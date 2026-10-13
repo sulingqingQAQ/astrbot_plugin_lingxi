@@ -100,6 +100,11 @@ class Brain:
         self._clock = clock
         self._log = log if log is not None else _noop_log
 
+    def set_identity(self, bot_id: str, bot_name: str) -> None:
+        """更新 bot 身份（供插件入口第一次拿到 self_id 时调用）。"""
+        self._bot_id = bot_id
+        self._bot_name = bot_name
+
     # -- 规则 1：observe --
 
     def observe(self, key: SessionKey, msg: Msg) -> None:

@@ -547,5 +547,25 @@ class ConverseTTest(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class SetIdentityTest(unittest.TestCase):
+    def test_set_identity_changes_report_bot_msg(self):
+        b, args, _ = _brain(now=5000.0)
+        b.set_identity("synth-bot-9", "合成小灵")
+        key = _key()
+        b.report(key, _trigger(), _parsed(text="合成回复"), True)
+        bot_msgs = [m for _, m in args["history"].recorded if m.is_bot]
+        self.assertEqual(len(bot_msgs), 1)
+        self.assertEqual(bot_msgs[0].speaker_id, "synth-bot-9")
+        self.assertEqual(bot_msgs[0].speaker_name, "合成小灵")
+
+    def test_default_identity_without_set(self):
+        b, args, _ = _brain(bot_id="bot", bot_name="bot", now=5000.0)
+        b.report(_key(), _trigger(), _parsed(text="合成回复"), True)
+        bot_msgs = [m for _, m in args["history"].recorded if m.is_bot]
+        self.assertEqual(len(bot_msgs), 1)
+        self.assertEqual(bot_msgs[0].speaker_id, "bot")
+        self.assertEqual(bot_msgs[0].speaker_name, "bot")
+
+
 if __name__ == "__main__":
     unittest.main()
