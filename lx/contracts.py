@@ -1,6 +1,6 @@
 """lx 契约（B1 接口草案的代码化）。只有协调者改这个文件。
 
-状态：**v0.4 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；v0.4：加可选 Seedable、WaitAggregator.forget，SessionKey 注明群聊 id 是真群号；等 adapters 跑通后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
+状态：**v0.5 临时版**（v0.2：A-0 探针后修订；v0.3：Outcome 加 source / delivered，给定时触发源用；v0.4：加可选 Seedable、WaitAggregator.forget，SessionKey 注明群聊 id 是真群号；v0.5：Msg 加 addressed，Trigger.meta 约定 wait；等 adapters 跑通后冻结成 v1）。冻结之前，各线可以按这里的签名开工，
 但不要把实现绑死在细节上；契约改了，协调者会通知并合并进各线分支。
 
 只放：数据类、枚举、Protocol 签名、时钟类型。**不放任何业务逻辑，不 import astrbot。**
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
-CONTRACT_VERSION = "0.4-provisional"
+CONTRACT_VERSION = "0.5-provisional"
 
 # 注入时钟：所有带时间的逻辑都接收一个 Clock，测试里用假时钟。返回秒级 Unix 时间戳。
 Clock = Callable[[], float]
@@ -78,6 +78,9 @@ class Msg:
     is_bot: bool = False
     quote_id: Optional[str] = None
     images: list[ImageRef] = field(default_factory=list)
+    # v0.5：这条消息是不是在叫 bot，由 adapters 填。"at" = @ 了它；"quote" = 引用了它的消息；"name" = 点了名字 / 唤醒词（adapters 能判断就填，
+    # 不能判断也可以留 None，由 DirectSource 按配置里的唤醒词再认一次）；"private" = 私聊里发来的（被 lingxi 接管的私聊每条都是）；None = 没叫它。
+    addressed: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +120,9 @@ class Trigger:
     reason: str  # 进提示词的"触发原因"文本，来自可编辑模板
     silent_ok: bool  # 这一次允许模型沉默吗（来自配置"沉默"块）
     event: Any = None  # E 路径持有的 AstrMessageEvent；T 路径为 None。核心逻辑只当不透明对象传递
+    # v0.5 约定 meta["wait"] = {"seconds": N, "mode": "latest" | "merge"}：事件触发源（direct / wait / interval / activity）要求 adapters 在锁外先等 N 秒再放行。
+    #   latest = 最新者胜（等待期间来了新消息，旧的丢弃，只放行最后一条）；merge = 首条等待、后续并入（群里 @ / 喊话聚合，现 `group_chime.py:1166-1289` 的做法）。
+    #   没有 meta["wait"] 或 seconds<=0 = 不等。定时触发源（idle / followup / wake）不带。
     meta: dict[str, Any] = field(default_factory=dict)
 
 
