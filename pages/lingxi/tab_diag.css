@@ -74,7 +74,7 @@
   .diag-overview-end { margin-left: 0; width: 100%; justify-content: space-between; }
   .diag-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .diag-sources { grid-template-columns: minmax(0, 1fr); }
-  .diag-log { grid-template-columns: auto 48px; }
+  .diag-log { grid-template-columns: auto minmax(0, 1fr); }
   .diag-log-text { grid-column: 1 / -1; }
   .diag-export-actions > button { flex: 1 1 auto; }
 }
