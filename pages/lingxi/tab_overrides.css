@@ -57,7 +57,9 @@ span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
 .ex-bar .ex-only { margin-left: auto; }
 .ex-empty { padding: var(--sp-5) var(--sp-4); }
 .ex-table tr.ex-row[data-source="override"] > td:nth-child(2) { font-weight: 600; }
-.ex-table tr.ex-row > td:first-child { white-space: nowrap; }
+.ex-table tr.ex-row > td:first-child { width: 38%; }
+.ex-table tr.ex-row > td:nth-child(2) { width: 38%; }
+.ex-table tr.ex-row > td:last-child { white-space: nowrap; }
 
 /* ---- 关于 ---- */
 .kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-3); }
@@ -73,7 +75,9 @@ span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
 @media (max-width: 700px) {
   .ov-row > button { flex: 1 1 auto; }
   .ov-meta { flex: 1 1 100%; }
-  #ex-id { flex-basis: 100%; }
+  #ex-id { flex-basis: 140px; }
+  #ov-help summary { min-height: 40px; }
+  .ex-table tr.ex-row > td:first-child, .ex-table tr.ex-row > td:nth-child(2) { width: auto; }
   .ex-bar .ex-only { margin-left: 0; }
   .kv-grid { grid-template-columns: minmax(0, 1fr); }
 }

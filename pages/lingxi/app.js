@@ -567,9 +567,12 @@
       if (Array.isArray(item.value) || Array.isArray(old)) {
         change.textContent = listDiffText(old, item.value);
       } else {
-        change.appendChild(el("span", { class: "diff-old", text: fmtVal(f, old) }));
+        var oldText = fmtVal(f, old);
+        var newText = fmtVal(f, item.value);
+        if (oldText.length + newText.length > 56) change.classList.add("diff-stack");
+        change.appendChild(el("span", { class: "diff-old", text: oldText }));
         change.appendChild(el("span", { class: "diff-arrow", text: "→" }));
-        change.appendChild(el("span", { class: "diff-new", text: fmtVal(f, item.value) }));
+        change.appendChild(el("span", { class: "diff-new", text: newText }));
       }
       var div = el("div", { class: "diff-item" }, [head, change]);
       div.setAttribute("data-scope", item.scope);

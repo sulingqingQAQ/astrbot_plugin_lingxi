@@ -9,7 +9,7 @@
 - 文字：`--text` / `--text-2` 次要 / `--text-3` 说明·时间（三者压在 bg·surface 上都 ≥ 4.5:1）
 - 强调：`--accent` 实心底 / `--accent-hover` / `--accent-soft` 软底 / `--accent-text` 强调色文字 / `--on-accent` 压在 accent 上的字 / `--accent-2`（只做渐变）/ `--focus`
 - 状态：`--ok --warn --danger --info --neutral`（文字·图标色）各配 `-soft`（软底色，前者压后者 ≥ 4.5:1）；`--warn-line` 只做装饰线
-- 其余：`--overlay` `--surface-glass` `--shadow-1` `--shadow-2`
+- 其余：`--overlay` `--surface-glass` `--shadow-1` `--shadow-2` `--knob`（开关旋钮）
 - 间距 `--sp-1…6` = 4 8 12 16 24 32；字阶 `--fs-12 13 14 16 20 28`；圆角 `--r-sm md lg pill` = 6 10 14 999；过渡 `--t-fast base slow` = 120 160 180ms + `--ease`；字体 `--font` `--font-mono`；控件高 `--h-control` `--h-btn` `--h-btn-sm`（手机自动变 42/42/40）
 - 小工具类：`.num` 等宽数字 · `.hint` 说明小字 · `.muted` 次要色 · `.faint` 更淡 · `.mono` 等宽 · `.row` 横排换行 · `.stack` 竖排 · `.grow` 撑满 · `.hidden` 隐藏 · `.sr-only` 只给读屏
 
@@ -134,7 +134,7 @@ LX.registerTab({ id: "diag", title: "诊断", order: 40, icon: "pulse", mount: f
 
 ## 深浅色与手机
 - 颜色全走令牌，不写 `#hex` / `rgb()`（静态测试会扫 `form.css`、`tab_overrides.css`，新标签的 css 请同样遵守）；深浅色靠令牌自动切换，不要写 `[data-theme]` 分支。
-- 状态色做文字时配对 `--x` 压 `--x-soft` 或 `--surface`（已验证 ≥ 4.5:1）；`--text-3` 只做说明小字；`--warn-line` 只做装饰线。
+- 状态色做文字时压在自己的软底（如 `--ok` 压 `--ok-soft`）或 `--surface` 上（已有场景断言 ≥ 4.5:1）；`--text-3` 只做说明小字；`--warn-line` 只做装饰线。
 - 手机（≤ 700px）：保存栏由壳固定在底部，页面里别再放 fixed 底栏（`main` 已留 104px）；别给 `.topbar` 加 backdrop-filter / transform（会让里面的 fixed 保存栏失效）；表格套 `.table-wrap`；会话号、路径这类长串加 `overflow-wrap: anywhere`；触控目标 ≥ 40px 靠 `--h-*` 令牌，自己画可点元素请用 `min-height: var(--h-btn)`。
 - 动效只用 `--t-fast/base/slow` + `--ease`（120–180ms）；`prefers-reduced-motion` 已在 `app.css` 末尾统一关掉动画，别写 `!important` 的时长。
 - 焦点环：自绘可点元素用 `:focus-visible` + `outline: 2px solid var(--focus)`；按下反馈 `transform: translateY(1px)`。

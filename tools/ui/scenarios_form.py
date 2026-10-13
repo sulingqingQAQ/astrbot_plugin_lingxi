@@ -417,6 +417,93 @@ async def _extra_ui8(browser, harness, base, meta):
         await chk(browser, harness, base, meta)
 
 
+# ---- DIAG-4a 追加：表单重绘后的结构 / 状态标记（长相由 shots_visual.py 的截图看）----
+
+async def _chk_diag4a_field_layout(browser, harness, base, meta):
+    scope = "private"
+    ib, ifld = _first_field(meta, scope, lambda f, b: f["type"] == "int" and f["slider"] and not f["condition"])
+    bb, bfld = _first_field(meta, scope, lambda f, b: f["type"] == "bool" and not f["condition"])
+    tb, tfld = _first_field(meta, scope, lambda f, b: f["type"] == "text" and not f["condition"]
+                            and b["key"] != "whitelist")
+    await _fresh(browser, base)
+    await _show_tab(browser, scope)
+    # 一个块 = 一张卡片，配置项在卡片里
+    await _select_block(browser, scope, ib["title"])
+    n_card = await browser.count("#tab-%s .form-items > .card.form-card .field" % scope)
+    assert n_card == len(ib["fields"]), "块没有装在一张 .card.form-card 里：%r" % n_card
+    # 三种版式类
+    sel = lambda f: "#tab-%s %s" % (scope, _field_sel(scope, f["path"]))
+    assert await browser.exists(sel(ifld) + ".field-inline"), "数字项应是 field-inline 版式"
+    # 开关：真 checkbox（role=switch）+ 旁边"开 / 关"文字，随值同步
+    await _select_block(browser, scope, bb["title"])
+    assert await browser.exists(sel(bfld) + ".field-bool"), "bool 项应是 field-bool 版式"
+    tog = sel(bfld) + " .toggle"
+    assert await browser.exists(tog + ' > input[type="checkbox"][role="switch"][data-role="control"]'), \
+        "bool 项应是 .toggle 里的 role=switch 复选框"
+    assert await browser.exists(tog + " > .toggle-track"), "开关缺 .toggle-track"
+    want = "开" if bfld["default"] else "关"
+    assert (await browser.text(tog + " .toggle-text")).strip() == want, "开关旁的文字应与当前值一致"
+    await browser.eval("document.querySelector(%s).click()" % _q(tog + " > input"))
+    await browser.wait_for("LX.isDirty(%s, %s) === true" % (_q(scope), _q(bfld["path"])))
+    flipped = "关" if bfld["default"] else "开"
+    assert (await browser.text(tog + " .toggle-text")).strip() == flipped, "点开关后文字没跟着变"
+    assert await browser.eval("document.querySelector(%s).classList.contains('is-dirty')" % _q(sel(bfld))), \
+        "改动的项应带 is-dirty 标记"
+    vis = await browser.eval(
+        "getComputedStyle(document.querySelector(%s)).visibility" % _q(sel(bfld) + " .field-reset"))
+    assert vis == "visible", "与默认值不同时应能看到“恢复默认”：%r" % vis
+    await browser.click(sel(bfld) + " .field-reset")
+    await browser.wait_for("LX.isDirty(%s, %s) === false" % (_q(scope), _q(bfld["path"])))
+    vis = await browser.eval(
+        "getComputedStyle(document.querySelector(%s)).visibility" % _q(sel(bfld) + " .field-reset"))
+    assert vis == "hidden", "与默认值一样时“恢复默认”应隐藏：%r" % vis
+    assert not await browser.eval("document.querySelector(%s).classList.contains('is-dirty')" % _q(sel(bfld))), \
+        "撤销后 is-dirty 标记应消失"
+    # 文本框项整行宽
+    await _select_block(browser, scope, tb["title"])
+    assert await browser.exists(sel(tfld) + ".field-wide"), "text 项应是 field-wide 版式"
+    # 滑块进度色：--fill 与取值位置一致
+    await _select_block(browser, scope, ib["title"])
+    fill = await browser.eval(
+        "(function(){var s=document.querySelector(%s);var min=+s.min,max=+s.max,v=+s.value;"
+        "return {fill:s.style.getPropertyValue('--fill'),want:((v-min)/(max-min)*100)};})()"
+        % _q(sel(ifld) + ' input[type="range"]'))
+    assert fill["fill"].endswith("%") and abs(float(fill["fill"][:-1]) - fill["want"]) < 0.5, \
+        "滑块进度色 --fill 与取值不一致：%r" % (fill,)
+    await browser.eval(
+        "(function(){var s=document.querySelector(%s);s.value=s.max;"
+        "s.dispatchEvent(new Event('input',{bubbles:true}));})()" % _q(sel(ifld) + ' input[type="range"]'))
+    assert (await browser.eval(
+        "document.querySelector(%s).style.getPropertyValue('--fill')" % _q(sel(ifld) + ' input[type="range"]'))
+    ) == "100%", "拖到最大值后进度色应是 100%"
+    await _discard(browser)
+    # 条件项：带缩进类
+    cb, cfld = _first_field(meta, scope, lambda f, b: bool(f["condition"]))
+    await _select_block(browser, scope, cb["title"])
+    assert await browser.exists(sel(cfld) + ".field-cond"), "条件项应带 field-cond（缩进 + 竖线）"
+    print("DIAG-4a 表单结构 OK（卡片 / 三种版式 / 开关 / 恢复默认显隐 / 已改动标记 / 滑块进度色 / 条件项缩进）")
+
+
+async def _chk_diag4a_empty_state(browser, harness, base, meta):
+    await _fresh(browser, base)
+    await _show_tab(browser, "private")
+    await browser.fill("#tab-private .form-search", "zzz不存在乱码zzz")
+    await asyncio.sleep(0.4)
+    assert await browser.exists("#tab-private .form-items .empty.form-empty .empty-title"), "没有匹配项时应是空状态组件"
+    assert await browser.exists("#tab-private .search-box > svg.icon"), "搜索框应带图标"
+    await browser.fill("#tab-private .form-search", "")
+    await asyncio.sleep(0.3)
+    print("DIAG-4a 空状态 OK")
+
+
+DIAG4A_CHECKS = (_chk_diag4a_field_layout, _chk_diag4a_empty_state)
+
+
+async def _extra_diag4a(browser, harness, base, meta):
+    for chk in DIAG4A_CHECKS:
+        await chk(browser, harness, base, meta)
+
+
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
     harness = Harness(page_dir=PAGE_DIR)
@@ -719,6 +806,9 @@ async def _run(out_dir):
 
         # ⑪ UI-8 追加
         await _extra_ui8(browser, harness, base, meta)
+
+        # ⑫ DIAG-4a 追加
+        await _extra_diag4a(browser, harness, base, meta)
 
         # ⑩ 全程无 JS 错误
         _check_no_errors(browser, "全程结束")

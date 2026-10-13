@@ -9,7 +9,8 @@
 
 /* ---- 布局：左块导航 + 右卡片 ---- */
 .form-layout { display: flex; gap: var(--sp-5); align-items: flex-start; }
-.block-aside { flex: 0 0 216px; position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+/* 四周留 4px 内边距、外面抵消掉：侧栏要 overflow:auto 才能在窄窗口里滚动，不留边的话键盘焦点环会被裁掉 */
+.block-aside { flex: 0 0 224px; position: sticky; top: 72px; max-height: calc(100vh - 88px); overflow: auto; padding: 4px; margin: -4px; }
 .block-aside > .group-title { margin-top: 0; }
 .block-nav { display: flex; flex-direction: column; gap: 2px; }
 .block-btn {
@@ -59,10 +60,12 @@
 .field-inline .field-control > input[type="number"] { flex: 0 0 120px; }
 .field-inline .field-control > input[type="range"] { flex: 1 1 120px; }
 .field-inline .field-control > input[type="text"], .field-inline .field-control > select { flex: 1 1 100%; }
-.field-wide .field-control { flex-direction: column; align-items: stretch; gap: 6px; }
-.field-wide .field-control > textarea { flex: none; }
-.field-wide .field-control .field-hint { margin-top: 0; }
-.field-count { align-self: flex-end; font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
+/* 整行宽的项：输入框占满一行，下面一行左边是小提示、右边是字数 / 条数 */
+.field-wide .field-control { align-items: baseline; gap: 6px var(--sp-3); }
+.field-wide .field-control > textarea { flex: 1 1 100%; }
+.field-wide .field-control > .field-hint { order: 2; flex: 1 1 0; min-width: 0; margin-top: 0; }
+.field-wide .field-control > .field-count { order: 3; margin-left: auto; }
+.field-count { font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
 textarea.form-tall { font-family: var(--font-mono); font-size: var(--fs-13); background: var(--surface-2); }
 .field-error:empty { display: none; }
 .field-error {
