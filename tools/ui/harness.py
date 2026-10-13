@@ -84,9 +84,17 @@ FAKE_SDK_JS = """\
     } else {
       init.body = JSON.stringify(payload === undefined ? {} : payload);
     }
+    // 照真宿主的行为（webui PluginPagePage 的 api:get / api:post）：
+    //   status === "error" → 拒绝（Error(message)）；成功 → 只回传 data（data ?? 整个响应）。
     return fetch(url, init).then(function (resp) {
       if (!resp.ok) { throw new Error("HTTP " + resp.status); }
       return resp.json();
+    }).then(function (body) {
+      if (body && body.status === "error") {
+        throw new Error(body.message || "Plugin request failed.");
+      }
+      var d = body ? body.data : undefined;
+      return (d === undefined || d === null) ? body : d;
     });
   }
 

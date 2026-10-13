@@ -10,15 +10,16 @@
 <button id="save-btn">保存</button>
 <button id="boom-btn">抛异常</button>
 <script>
+// 桥接 SDK 的语义照真宿主：成功只回传 data 部分，出错直接 reject。
 var rev = "";
 AstrBotPluginPage.ready().then(function () {
   return AstrBotPluginPage.apiGet("api/meta");
-}).then(function (resp) {
-  var blocks = resp.data.blocks.private.length + resp.data.blocks.group.length;
+}).then(function (meta) {
+  var blocks = meta.blocks.private.length + meta.blocks.group.length;
   document.getElementById("out").textContent = "块数=" + blocks;
   return AstrBotPluginPage.apiGet("api/config");
-}).then(function (resp) {
-  rev = resp.data.revision;
+}).then(function (cfg) {
+  rev = cfg.revision;
 }).catch(function (e) {
   document.getElementById("out").textContent = "加载失败：" + e.message;
 });
@@ -26,9 +27,9 @@ document.getElementById("save-btn").addEventListener("click", function () {
   AstrBotPluginPage.apiPost("api/config/save", {
     revision: rev,
     changes: [{ scope: "private", path: "idle.base_minutes", value: 45 }]
-  }).then(function (resp) {
-    if (resp.data && resp.data.saved) {
-      rev = resp.data.config.revision;
+  }).then(function (data) {
+    if (data && data.saved) {
+      rev = data.config.revision;
       document.getElementById("out").textContent = "已保存 base=45";
     } else {
       document.getElementById("out").textContent = "保存被拒";

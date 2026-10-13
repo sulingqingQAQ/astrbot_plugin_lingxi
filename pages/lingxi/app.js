@@ -84,10 +84,21 @@
   async function apiCall(method, route, payload) {
     var fn = method === "GET" ? bridge.apiGet : bridge.apiPost;
     var resp = await fn.call(bridge, "api/" + route, payload || {});
-    if (!resp || resp.status !== "ok") {
-      throw new Error((resp && resp.message) || "接口返回异常");
+    // 真宿主的桥接（PluginPagePage 的 api:get / api:post）会把响应解包：
+    //   status === "error" → 直接让请求失败（Error(message)）；
+    //   成功 → 只回传 data 部分（resp.data ?? 整个响应）。
+    // 本地夹具 / 旧版桥接则可能回传整个 {status, data} 信封。两种都认：
+    // 带 status 字段的按信封处理，否则把返回值本身当 data。
+    if (resp && typeof resp === "object" && (resp.status === "ok" || resp.status === "error")) {
+      if (resp.status !== "ok") {
+        throw new Error(resp.message || "接口返回异常");
+      }
+      return resp.data === undefined || resp.data === null ? {} : resp.data;
     }
-    return resp.data;
+    if (resp === undefined || resp === null) {
+      throw new Error("接口返回异常");
+    }
+    return resp;
   }
 
   var LX = {
