@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Mapping, Optional
 
 from ..contracts import Scope, SessionKey
@@ -25,6 +26,7 @@ from . import spec
 
 _SCOPE_CN = {Scope.PRIVATE: "私聊", Scope.GROUP: "群聊"}
 _WHO_CN = {spec.PRIVATE: "私聊", spec.GROUP: "群聊"}
+_PLAUSIBLE_BARE_ID = re.compile(r"\d+(?:_\d+)?")  # QQ 号 / 群号（群聊独立会话的 发送者_群号 也算）
 _OVERRIDE_PREFIXES = {"group": Scope.GROUP, "private": Scope.PRIVATE, "friend": Scope.PRIVATE}
 
 
@@ -113,7 +115,10 @@ class ConfigResolver:
         warnings 清空重算、缓存清空。Brain / 闸门 / Ticker 持有同一个对象，
         reload 后它们 resolve() 立刻拿到新值。坏数据不抛（沿用 __init__ 的容错）。
         """
-        self.__init__(private, group, overrides, whitelist)  # noqa: PLC2801
+        # 原子换入（UI-7 #7）：先在新对象上构造，成功才整体替换内部状态；构造中途出任何问题，
+        # 旧状态原封不动（Brain / 闸门 / Ticker 持有的仍是可用的 resolver）。
+        fresh = ConfigResolver(private, group, overrides, whitelist)
+        self.__dict__.update(fresh.__dict__)
 
     def _warn(self, msg: str) -> None:
         self.warnings.append(msg)
@@ -179,6 +184,11 @@ class ConfigResolver:
             if sc is not None and sc != scope:
                 self._warn(f"{label}：条目 {entry} 是{_SCOPE_CN[sc]}的，放在{_SCOPE_CN[scope]}白名单里无效，已忽略")
                 continue
+            if sc is None and not _PLAUSIBLE_BARE_ID.fullmatch(ident):
+                # 裸 ID 应该是纯数字（QQ 号 / 群号，群聊独立会话可带 _）；别的写法（带逗号、group: 前缀、字母）
+                # 不会匹配到任何会话——照旧收下（不改行为），但提醒用户（UI-7 #2）
+                self._warn(f"{label}：条目 {_short(entry)} 不像 QQ 号或群号（应该是纯数字，"
+                           f"或完整会话标识 平台:类型:号码），可能不会匹配到任何会话")
             out.add(ident)
             if scope == Scope.GROUP:
                 out.add(strip_isolation(ident))

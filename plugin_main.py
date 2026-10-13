@@ -194,10 +194,19 @@ class LingxiPlugin(star.Star):
                 warnings = list(getattr(self._c, "warnings", None) or [])
             except Exception:
                 warnings = []
+            # 启动提示里"跟当前配置内容有关"的两类（覆盖表解析错误、resolver 警告）会随用户修改过期，
+            # 不能当快照一直显示；其余（迁移 / 备份结果等）是一次性的，保留。面板读取时用 _webui_live_warnings 现算。
+            try:
+                resolver_now = list(getattr(self._c.resolver, "warnings", None) or [])
+            except Exception:
+                resolver_now = []
+            self._webui_static_warnings = [
+                w for w in warnings
+                if not str(w).startswith("会话覆盖表：") and w not in resolver_now]
             service = ConfigService(
                 self.config, save, self._webui_reload,
                 plugin_version=version, startup_warnings=warnings,
-                backups_dir=backups_dir)
+                backups_dir=backups_dir, live_warnings=self._webui_live_warnings)
             api = LingxiWebApi(
                 service, lambda: build_meta(version, SCHEMA_VERSION),
                 choices_provider=self._webui_choices, log=_make_log())
@@ -271,9 +280,43 @@ class LingxiPlugin(star.Star):
         #    活刷；identity 已在首条消息时固定，对齐差一拍，不要求重载插件。
         try:
             self._bot_name = _bot_name_of(conf)
+            # Brain 记机器人发言用自己的 bot_name；身份已固定过就把新名字同步过去（UI-7 #14）
+            if self._identity_set:
+                setter = getattr(self._c.brain, "set_identity", None)
+                if callable(setter):
+                    setter(self._self_id, self._bot_name)
         except Exception:
             pass
+        # ③ 空闲触发：每个会话"这一轮要等多久"（含抖动）算好后缓存，直到有人发言才重置——
+        #    改了间隔必须清缓存，才对已经在等的会话生效（UI-7 #4）。锚点不动。
+        try:
+            reset = getattr(getattr(self._c, "idle", None), "reset_waits", None)
+            if callable(reset):
+                reset()
+        except Exception:
+            notes.append("空闲触发的等待时长需要重载插件才对已在等待的会话生效")
         return notes
+
+    def _webui_live_warnings(self) -> list:
+        """当前配置的提示（每次现算，不是启动快照）：启动时的迁移 / 备份类提示 + 覆盖表现在的解析错误
+        + resolver 现在的警告（白名单里不像号码的条目等）。给 ConfigService.get_config 用，不抛。"""
+        out: list = list(getattr(self, "_webui_static_warnings", []) or [])
+        try:
+            from .lx.config.overrides import parse_overrides_text
+            text = ""
+            try:
+                text = self.config.get("session_overrides") or ""
+            except Exception:
+                text = ""
+            _parsed, errs = parse_overrides_text(text)
+            out.extend("会话覆盖表：" + e for e in (errs or []))
+        except Exception:
+            pass
+        try:
+            out.extend(str(w) for w in (getattr(self._c.resolver, "warnings", None) or []))
+        except Exception:
+            pass
+        return out
 
     def _webui_choices(self) -> dict:
         """尽力取模型提供商 id 与人格名；取不到返回空列表，不抛（UI-3）。"""

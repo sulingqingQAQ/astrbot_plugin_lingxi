@@ -321,5 +321,72 @@ class AboutTest(unittest.TestCase):
         json.dumps(got)
 
 
+class ReviewFixesTest(unittest.TestCase):
+    """UI-7 审查后的修整：#2 白名单格式、#3 现算警告、#15 数值上限、#16 null 覆盖表。"""
+
+    def _save(self, h, changes=None, **extra):
+        svc = h.svc(**extra.pop("svc_kw", {}))
+        body = {"revision": _rev_of(svc), "changes": changes or []}
+        body.update(extra)
+        return svc, svc.save_config(body)
+
+    def test_whitelist_ids_with_separators_rejected(self):
+        for bad in (["123, 456"], ["123，456"], ["123 456"], ["123;456"], ["a、b"]):
+            h = _Harness({})
+            _svc, data = self._save(h, [{"scope": "group", "path": "whitelist.ids", "value": bad}])
+            self.assertFalse(data["saved"], bad)
+            self.assertEqual(data["errors"][0]["path"], "whitelist.ids")
+            self.assertEqual(h.save_calls, 0)
+            self.assertNotIn("group", h.conf)
+
+    def test_whitelist_ids_with_scope_prefix_rejected(self):
+        h = _Harness({})
+        _svc, data = self._save(h, [{"scope": "private", "path": "whitelist.ids",
+                                     "value": ["group:123"]}])
+        self.assertFalse(data["saved"])
+        self.assertIn("前缀", data["errors"][0]["message"])
+
+    def test_whitelist_ids_good_forms_saved(self):
+        h = _Harness({})
+        good = ["900100200", "aiocqhttp:GroupMessage:900100200", "123_900100200"]
+        _svc, data = self._save(h, [{"scope": "group", "path": "whitelist.ids", "value": good}])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["group"]["whitelist"]["ids"], good)
+
+    def test_live_warnings_used_instead_of_startup_snapshot(self):
+        state = {"w": ["现在的警告"]}
+        h = _Harness({})
+        svc = h.svc(startup_warnings=["启动时的旧警告"], live_warnings=lambda: list(state["w"]))
+        self.assertEqual(svc.get_config()["warnings"], ["现在的警告"])
+        state["w"] = []
+        self.assertEqual(svc.get_config()["warnings"], [])
+        # 关于页的"启动提示"仍是启动快照
+        self.assertEqual(svc.about()["startup_warnings"], ["启动时的旧警告"])
+
+    def test_live_warnings_failure_falls_back_to_startup(self):
+        def boom():
+            raise RuntimeError("合成")
+        svc = _Harness({}).svc(startup_warnings=["启动提示"], live_warnings=boom)
+        self.assertEqual(svc.get_config()["warnings"], ["启动提示"])
+
+    def test_huge_numbers_rejected_even_without_upper_bound(self):
+        h = _Harness({})
+        for v in (10 ** 30, 1e30, 10 ** 400):
+            _svc, data = self._save(h, [{"scope": "private", "path": "trigger.wait_seconds",
+                                         "value": v}])
+            self.assertFalse(data["saved"], v)
+            self.assertIn("太大", data["errors"][0]["message"])
+
+    def test_session_overrides_null_means_absent_not_clear(self):
+        text = "group:900100200:\n  idle:\n    enabled: true\n"
+        h = _Harness({"session_overrides": text})
+        _svc, data = self._save(h, [], session_overrides=None)
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_overrides"], text)  # None 不清空
+        _svc, data = self._save(h, [], session_overrides="")
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_overrides"], "")  # 要清空就传空字符串
+
+
 if __name__ == "__main__":
     unittest.main()

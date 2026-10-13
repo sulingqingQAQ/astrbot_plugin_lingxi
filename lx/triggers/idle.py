@@ -169,6 +169,13 @@ class IdleSource:
         self._waits.pop(key, None)
         # unanswered 的增减由 Ticker 独占（用户发言时它先清零再通知各源），这里不碰。
 
+    def reset_waits(self) -> None:
+        """配置热加载后调用：清掉所有会话已算好的等待时长（含抖动），下次 due() 按新配置重算。
+
+        锚点（上次有人说话的时间）不动——已经等了多久照算，只是"要等多久"按新配置来。
+        """
+        self._waits.clear()
+
     def _cfg_value(self, cfg: ResolvedConfig, path: str) -> Any:
         try:
             return cfg.get(path, DEFAULTS[path])

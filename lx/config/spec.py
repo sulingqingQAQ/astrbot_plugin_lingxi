@@ -27,6 +27,7 @@ GROUP = "group"
 PRIVATE = "private"
 
 SCHEMA_VERSION = 2  # 新 schema 的版本号；旧 schema 视为 1（schema 里 schema_version 默认 0 = 还没迁移）
+_NUMBER_SANITY_CAP = 10**9  # 数值项的通用上限（10 亿）：规格表没单独设 hi 的项也不收离谱的大数
 
 _TYPES = ("bool", "int", "float", "string", "text", "list")
 
@@ -635,6 +636,12 @@ def validate_value(f: Field, value: Any) -> tuple[bool, Any]:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False, "应该是一个数字"
         if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            return False, "应该是一个有限的数字"
+        # 没有设上限的项也不接受离谱的大数（UI-7 #15 / #7：1e30 能存进去，10**400 转 float 会抛 OverflowError）
+        try:
+            if abs(value) > _NUMBER_SANITY_CAP:
+                return False, f"数字太大了（绝对值不能超过 {_NUMBER_SANITY_CAP:,}）"
+        except Exception:
             return False, "应该是一个有限的数字"
         if t == "int":
             if isinstance(value, float):

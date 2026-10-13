@@ -98,5 +98,40 @@ class IsListedTest(unittest.TestCase):
         self.assertTrue(r.is_listed(G_ISOLATED))
 
 
+class ReloadAtomicTest(unittest.TestCase):
+    """UI-7 #7：reload 中途出问题，旧状态原封不动（Brain 等持有的 resolver 仍可用）。"""
+
+    def test_failed_reload_keeps_old_state(self):
+        from unittest import mock
+        r = ConfigResolver(group={"idle": {"base_minutes": 45}},
+                           whitelist={"group": {"enabled": True, "ids": ["900100200"]}})
+        self.assertEqual(r.resolve(G).get("idle.base_minutes"), 45)
+        with mock.patch.object(ConfigResolver, "_load_overrides",
+                               side_effect=RuntimeError("合成故障")):
+            with self.assertRaises(RuntimeError):
+                r.reload(None, {"idle": {"base_minutes": 99}}, {})
+        # 失败后：旧值还在，白名单还在，resolve 不抛
+        self.assertEqual(r.resolve(G).get("idle.base_minutes"), 45)
+        self.assertTrue(r.is_listed(G))
+
+
+class WhitelistPlausibleIdTest(unittest.TestCase):
+    """UI-7 #2：不像号码的白名单条目照旧收下，但给警告，别让用户静默失效。"""
+
+    def _warnings(self, ids):
+        return ConfigResolver(group={"whitelist": {"enabled": True, "ids": ids}}).warnings
+
+    def test_digits_and_umo_have_no_warning(self):
+        self.assertEqual(self._warnings(["900100200", "123_900100200",
+                                         "aiocqhttp:GroupMessage:900100200"]), [])
+
+    def test_comma_prefix_and_letters_warn_but_are_kept(self):
+        r = ConfigResolver(group={"whitelist": {"enabled": True,
+                                                "ids": ["123, 456", "group:123", "abc"]}})
+        self.assertEqual(len(r.warnings), 3, r.warnings)
+        self.assertTrue(all("不像 QQ 号或群号" in w for w in r.warnings))
+        self.assertIn("abc", r.whitelist_ids(Scope.GROUP))  # 行为不变：照旧收下
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ except Exception:  # noqa: BLE001
 
 MAX_TEXT_BYTES = 100_000
 MAX_DEPTH = 12
+MAX_NODES = 50_000  # 形状检查最多访问的节点次数（含重复引用），正常覆盖表远低于这个数
 
 _YAML_HINT = "常见原因：缩进不一致（只能用空格，不能用 Tab）、冒号后面少了空格、引号没配对。"
 
@@ -44,15 +45,29 @@ def _type_cn(value: Any) -> str:
 
 
 def _short(value: Any) -> str:
+    # 容器不能直接 repr：YAML 的 & / * 别名能让同一个对象被引用很多次，repr 会指数级膨胀
+    if isinstance(value, dict):
+        return f"一组设置（{len(value)} 项）"
+    if isinstance(value, list):
+        return f"一个列表（{len(value)} 项）"
     text = repr(value)
     return text if len(text) <= 50 else text[:47] + "…"
 
 
 def _check_shape(obj: Any, errors: list[str]) -> bool:
-    """深度 / 循环检查。通过返回 True。"""
+    """深度 / 循环 / 总访问量检查。通过返回 True。
+
+    总访问量按“访问次数”计（共享节点每被引用一次算一次）：YAML 的 & / * 别名几百字节就能展开成天文数字，
+    不设上限会把整个事件循环算死；超过 MAX_NODES 直接拒绝，耗时与上限成正比。
+    """
     stack: list[int] = []
+    visited = [0]
 
     def walk(o: Any, depth: int) -> bool:
+        visited[0] += 1
+        if visited[0] > MAX_NODES:
+            errors.append("内容太大，或者用了太多 YAML 的 & 和 * 重复引用，整张表已忽略")
+            return False
         if isinstance(o, (dict, list)):
             if id(o) in stack:
                 errors.append("内容里有循环引用（别用 YAML 的 & 和 * 写法），整张表已忽略")

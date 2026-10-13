@@ -347,6 +347,44 @@ class TestWebuiWiring(unittest.TestCase):
         # 构造时缓存的 _wake_max 被活刷（50 来自 FakeResolved）
         self.assertEqual(plugin._c.store._wake_max, 50)
 
+    def test_webui_reload_resets_idle_waits_and_syncs_bot_name(self):
+        # UI-7 #4 / #14：热加载后清空闲等待缓存，并把新显示名同步给 Brain
+        plugin = self._make_plugin()
+        calls = {"reset": 0, "identity": []}
+
+        class FakeResolver:
+            def reload(self, private, group, overrides, whitelist=None):
+                pass
+
+            def resolve(self, key):
+                return types.SimpleNamespace(get=lambda path, default=None: default)
+
+        plugin._c.resolver = FakeResolver()
+        plugin._c.store = types.SimpleNamespace(_wake_max=100)
+        plugin._c.idle = types.SimpleNamespace(reset_waits=lambda: calls.__setitem__("reset", calls["reset"] + 1))
+        plugin._c.brain = types.SimpleNamespace(
+            set_identity=lambda bot_id, name: calls["identity"].append((bot_id, name)))
+        plugin._identity_set = True
+        plugin._self_id = "10000"
+        plugin._webui_reload({"private": {}, "group": {}, "bot_name": "合成新名字",
+                              "session_overrides": ""})
+        self.assertEqual(calls["reset"], 1)
+        self.assertEqual(calls["identity"], [("10000", "合成新名字")])
+
+    def test_webui_live_warnings_combines_static_overrides_and_resolver(self):
+        # UI-7 #3：提示每次现算：启动一次性提示 + 覆盖表现在的解析错误 + resolver 现在的警告
+        plugin = self._make_plugin(conf={"session_overrides": "[1, 2"})
+        plugin._webui_static_warnings = ["迁移提示A"]
+        plugin._c.resolver = types.SimpleNamespace(warnings=["白名单：条目 'abc' 不像号码"])
+        got = plugin._webui_live_warnings()
+        self.assertEqual(got[0], "迁移提示A")
+        self.assertTrue(any(w.startswith("会话覆盖表：") for w in got), got)
+        self.assertIn("白名单：条目 'abc' 不像号码", got)
+        # 用户把覆盖表改对后，覆盖表那条自动消失
+        plugin.config["session_overrides"] = ""
+        got2 = plugin._webui_live_warnings()
+        self.assertFalse(any(w.startswith("会话覆盖表：") for w in got2), got2)
+
     def test_webui_choices_empty_when_no_managers(self):
         plugin = self._make_plugin()
         out = plugin._webui_choices()

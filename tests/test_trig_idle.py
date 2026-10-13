@@ -305,5 +305,32 @@ class FormatElapsedTest(unittest.TestCase):
         self.assertEqual(format_elapsed(25 * 3600), "1天1小时")
 
 
+class IdleResetWaitsTest(unittest.TestCase):
+    """UI-7 #4：热加载后改了空闲间隔，已在等待的会话也要按新配置算（reset_waits 清缓存，锚点不动）。"""
+
+    def test_reset_waits_applies_new_base_minutes(self):
+        values = dict(BASE_CFG)
+        values["idle.base_minutes"] = 600
+        clock = Clock()
+        src = IdleSource(lambda key: FakeCfg(values), FakeStore(),
+                         clock=clock, rng=random.Random(1))
+        key = make_key()
+        src.on_user_message(key)  # 锚点 = 现在
+        t5 = clock() + 5 * 60
+        self.assertEqual(src.due(t5), [])  # 600 分钟的等待时长已算好并缓存
+        values["idle.base_minutes"] = 5     # 用户在面板里改成 5 分钟
+        self.assertEqual(src.due(t5), [])  # 缓存还在：不重置就不生效（这正是要修的）
+        src.reset_waits()
+        self.assertEqual(len(src.due(t5)), 1)  # 重置后按新配置，锚点没动，已经等满 5 分钟
+
+    def test_reset_waits_keeps_anchor(self):
+        src, _, clock = make_source()
+        key = make_key()
+        src.on_user_message(key)
+        src.reset_waits()
+        self.assertEqual(src.due(clock() + 29 * 60), [])
+        self.assertEqual(len(src.due(clock() + 30 * 60)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

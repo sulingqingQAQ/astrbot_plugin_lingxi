@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import time
 from typing import Any, Callable, Mapping, MutableMapping, Optional
 
@@ -25,6 +26,29 @@ _SCOPE_CN = {Scope.PRIVATE: "私聊", Scope.GROUP: "群聊"}
 # 缺省 legacy_check 看的旧顶层分节（迁移源头见 lx/config/legacy_map.py 的 _mv 首段）。
 _LEGACY_TOP_KEYS = ("friend_settings", "group_settings", "group_chime_settings",
                     "followup_settings", "wake_up_reply")
+
+
+_ID_SEPARATORS = re.compile(r"[,，;；、\s]")
+_ID_SCOPE_PREFIX = re.compile(r"^(group|private|friend|群聊|私聊)\s*[:：]", re.IGNORECASE)
+
+
+def _check_whitelist_ids(ids: Any) -> Optional[str]:
+    """白名单 ID 列表里明显写错的格式（一行写了几个号、带了覆盖表的 group: 前缀）→ 大白话原因；没问题 None。
+
+    这两种条目 resolver 会当"裸 ID"收下但永远匹配不上任何会话，用户却看不出来（UI-7 #2），所以保存时直接拒绝。
+    """
+    if not isinstance(ids, list):
+        return None
+    for i, raw in enumerate(ids, 1):
+        text = str(raw).strip()
+        if not text:
+            continue
+        if _ID_SEPARATORS.search(text):
+            return f"第 {i} 项「{text}」里有逗号 / 空格，看起来是把几个号写在了同一行，请一行写一个"
+        if _ID_SCOPE_PREFIX.match(text):
+            return (f"第 {i} 项「{text}」带了 group: / private: 前缀；白名单里直接写号码，"
+                    f"或写完整会话标识（平台名:GroupMessage 或 FriendMessage:号码），前缀是分会话覆盖表的写法")
+    return None
 
 
 def _err(message: str) -> dict:
@@ -57,6 +81,7 @@ class ConfigService:
         backups_dir: Optional[str] = None,
         legacy_check: Optional[Callable[[], bool]] = None,
         now: Callable[[], float] = time.time,
+        live_warnings: Optional[Callable[[], list]] = None,
     ):
         self._conf = conf
         self._save = save
@@ -66,6 +91,7 @@ class ConfigService:
         self._backups_dir = backups_dir
         self._legacy_check = legacy_check
         self._now = now
+        self._live_warnings = live_warnings
 
     # ------------------------------------------------------------------ 内部工具
     def _stored_layer(self, scope: Scope) -> Mapping:
@@ -148,6 +174,16 @@ class ConfigService:
         except Exception:
             return ConfigResolver()
 
+    def _current_warnings(self) -> list:
+        """页面顶部显示的提示：有 live_warnings 回调就现算（热加载后跟着变），否则退回启动快照。"""
+        if self._live_warnings is not None:
+            try:
+                got = self._live_warnings()
+                return [str(x) for x in (got or [])]
+            except Exception:
+                pass
+        return list(self._startup_warnings)
+
     # ------------------------------------------------------------------ 2.2
     def get_config(self) -> dict:
         try:
@@ -159,7 +195,7 @@ class ConfigService:
                 "group": group,
                 "session_overrides": text,
                 "revision": self._revision(private, group, text),
-                "warnings": self._startup_warnings + w1 + w2,
+                "warnings": self._current_warnings() + w1 + w2,
             }
         except Exception as e:  # noqa: BLE001
             return _err(f"读配置失败：{e}")
@@ -218,13 +254,19 @@ class ConfigService:
                 errors.append({"scope": scope.value, "path": path,
                                "message": f"『{f.description}』{result}"})
                 continue
+            if path == "whitelist.ids":
+                bad = _check_whitelist_ids(result)
+                if bad:
+                    errors.append({"scope": scope.value, "path": path,
+                                   "message": f"『{f.description}』{bad}"})
+                    continue
             valid.append((scope, path, block_key, name, result))
 
         # ① 覆盖表：有错就整体拒绝。
         new_text: Optional[str] = None
-        if "session_overrides" in body:
-            raw_text = body.get("session_overrides")
-            text = raw_text if isinstance(raw_text, str) else ("" if raw_text is None else raw_text)
+        # None 当作"没带这个字段"（不写）；要清空覆盖表请传空字符串 ""（UI-7 #16）
+        if body.get("session_overrides") is not None:
+            text = body.get("session_overrides")
             try:
                 parsed, parse_errors = _overrides.parse_overrides_text(text)
             except Exception as e:  # noqa: BLE001

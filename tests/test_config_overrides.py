@@ -225,5 +225,42 @@ class ValidateOverridesTest(unittest.TestCase):
         self.assertTrue(d)
 
 
+class AliasBombTest(unittest.TestCase):
+    """UI-7 #1：YAML 的 & / * 别名几百字节就能展开成天文数字，形状检查必须按访问次数设上限（快速拒绝）。"""
+
+    @staticmethod
+    def _bomb(levels, fan=9):
+        lines = ["l0: &l0 [" + ",".join(["x"] * fan) + "]"]
+        for i in range(1, levels + 1):
+            lines.append("l%d: &l%d [" % (i, i) + ",".join(["*l%d" % (i - 1)] * fan) + "]")
+        return "\n".join(lines) + "\n"
+
+    @unittest.skipUnless(ov.yaml_available(), "没有 PyYAML")
+    def test_alias_bomb_rejected_fast(self):
+        import time
+        t0 = time.perf_counter()
+        parsed, errors = ov.parse_overrides_text(self._bomb(11))
+        dt = time.perf_counter() - t0
+        self.assertLess(dt, 2.0, "别名炸弹应被快速拒绝，实际 %.2fs" % dt)
+        self.assertEqual(parsed, {})
+        self.assertTrue(any("太大" in e or "重复引用" in e for e in errors), errors)
+
+    def test_short_does_not_repr_containers(self):
+        shared = ["x"] * 9
+        nested = [shared] * 9
+        text = ov._short(nested)
+        self.assertLess(len(text), 60)
+        self.assertIn("列表", text)
+
+    def test_normal_large_table_still_accepted(self):
+        # 正常的大覆盖表（几百个会话）不能被误杀
+        lines = []
+        for i in range(500):
+            lines.append("group:%d:\n  idle:\n    enabled: true\n    base_minutes: 20\n" % (900000 + i))
+        parsed, errors = ov.parse_overrides_text("".join(lines))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 500)
+
+
 if __name__ == "__main__":
     unittest.main()
