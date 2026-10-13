@@ -250,6 +250,95 @@ def _read_plug_cfg():
         return json.load(f)
 
 
+async def _sc_U7(ctx):
+    """U7 三段文案进 system：保存风格/名词表/成员档案，再发私聊，看请求。"""
+    AR_U7_STYLE = "合成口癖标记ZZ"
+    AR_U7_GLOSS = "合成词 = 合成解释"
+    AR_U7_MEMB = "合成成员甲：爱聊合成话题"
+    cfg = _need_ok("config", *_api_get(ctx, "config"))
+    saved = _need_ok("config/save(三段文案)", *_api_post(
+        ctx, "config/save",
+        {"revision": cfg["revision"],
+         "changes": [
+             {"scope": "private", "path": "prompt.style_text",
+              "value": AR_U7_STYLE},
+             {"scope": "private", "path": "prompt.glossary_text",
+              "value": AR_U7_GLOSS},
+             {"scope": "private", "path": "prompt.members_text",
+              "value": AR_U7_MEMB},
+         ]}))
+    assert saved.get("saved") is True, (
+        "三段文案保存期望 saved=true，实际=%r" % (saved,))
+
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    ctx.llm.script(["文案回复"])
+    await ctx.napcat.send_private(USER_IN, "聊聊合成话题")
+    sent = await ctx.napcat.wait_sent(1, 60)
+    texts = [s["text"] for s in sent]
+    assert any("文案回复" in t for t in texts), (
+        "期望收到接管回复，实际=%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert reqs, "期望假 LLM 收到请求，实际 0 条"
+    blob = _system_text(reqs[0].get("messages"))
+    blob += "\n".join(_user_texts(reqs[0].get("messages")))
+    for needle in (AR_U7_STYLE, AR_U7_GLOSS, AR_U7_MEMB,
+                   "[名词表]", "[成员档案]"):
+        assert needle in blob, (
+            "期望请求里出现 %r，实际 system+user 前 500 字=%r"
+            % (needle, blob[:500]))
+
+
+async def _sc_U8(ctx):
+    """U8 覆盖表：合法群覆盖进 explain；非法键被拒且磁盘不变。"""
+    AR_U8_GOOD = "group:%s:\n  idle:\n    base_minutes: 12\n" % GROUP_ID
+    AR_U8_BAD = "group:%s:\n  nosuchblock:\n    nosuchkey: 1\n" % GROUP_ID
+    cfg = _need_ok("config", *_api_get(ctx, "config"))
+    saved = _need_ok("config/save(合法覆盖)", *_api_post(
+        ctx, "config/save",
+        {"revision": cfg["revision"], "session_overrides": AR_U8_GOOD}))
+    assert saved.get("saved") is True, (
+        "合法覆盖期望 saved=true，实际=%r" % (saved,))
+
+    exp = _need_ok("explain", *_api_get(
+        ctx, "explain", {"scope": "group", "id": GROUP_ID}))
+    vals = exp.get("values") or {}
+    item = vals.get("idle.base_minutes")
+    assert isinstance(item, dict), (
+        "explain 期望有 idle.base_minutes 项，实际 keys=%r" % (sorted(vals)))
+    assert item.get("source") == "override", (
+        "idle.base_minutes 期望 source=override，实际=%r" % (item,))
+    assert item.get("value") == 12, (
+        "idle.base_minutes 期望值 12，实际=%r" % (item.get("value"),))
+
+    cur = _need_ok("config", *_api_get(ctx, "config"))
+    disk_before = json.dumps(_read_plug_cfg(), ensure_ascii=False,
+                             sort_keys=True)
+    bad = _need_ok("config/save(非法覆盖)", *_api_post(
+        ctx, "config/save",
+        {"revision": cur["revision"], "session_overrides": AR_U8_BAD}))
+    assert bad.get("saved") is False, (
+        "含不存在键的覆盖期望 saved=false，实际=%r" % (bad,))
+    disk_after = json.dumps(_read_plug_cfg(), ensure_ascii=False,
+                            sort_keys=True)
+    assert disk_after == disk_before, "非法覆盖保存后磁盘文件被改了"
+
+
+def _post_U9(ctx, webui_port, ws_port):
+    """U9 收尾：进程已停、端口已释放、隔离根日志全程无 Traceback。"""
+    assert _port_free(webui_port), "收尾后 webui 端口 %d 还被占" % webui_port
+    assert _port_free(ws_port), "收尾后 ws 端口 %d 还被占" % ws_port
+    proc = ctx.proc
+    assert proc is not None, "AstrBot 进程对象不在，没法验日志"
+    try:
+        with open(proc.log_path, "rb") as f:
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        raise AssertionError("读不到隔离根日志 %s：%r" % (proc.log_path, e))
+    assert "Traceback" not in text, (
+        "隔离根日志全程期望无 Traceback，实际 %d 处" % text.count("Traceback"))
+
+
 async def _sc_U6(ctx):
     """U6 热生效：不重启，经 config/save 开白名单+接管，私聊从默认流程切到接管。"""
     ctx.llm.script(["默认流程回复"])
@@ -640,7 +729,8 @@ async def amain(only):
             _probe_ext_base(ctx)
             print("ext api ok via %s" % ctx.ext_path, flush=True)
             scenarios = [("U1", _sc_U1), ("U2", _sc_U2), ("U3", _sc_U3),
-                         ("U4", _sc_U4), ("U5", _sc_U5), ("U6", _sc_U6)]
+                         ("U4", _sc_U4), ("U5", _sc_U5), ("U6", _sc_U6),
+                         ("U7", _sc_U7), ("U8", _sc_U8)]
             for name, fn in scenarios:
                 if only and name not in only:
                     continue
@@ -665,6 +755,16 @@ async def amain(only):
     finally:
         ctx.llm.stop()
         print("llm stopped", flush=True)
+
+    if not only or "U9" in only:
+        try:
+            _post_U9(ctx, webui_port, ws_port)
+        except AssertionError as e:
+            ctx.record("U9", "FAIL", str(e))
+        except Exception as e:  # noqa: BLE001
+            ctx.record("U9", "ERROR", "%r" % (e,))
+        else:
+            ctx.record("U9", "PASS", "")
 
     print("", flush=True)
     print("名字 | 结果 | 说明", flush=True)
