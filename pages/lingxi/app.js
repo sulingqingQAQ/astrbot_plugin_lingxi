@@ -326,6 +326,8 @@
     if (save) save.disabled = n === 0;
   }
 
+  var warnOpen = false; // 提示条“还有 N 条”是否展开
+
   function renderBanner() {
     var banner = $("#banner");
     if (!banner) return;
@@ -342,13 +344,14 @@
     });
     if (warns.length) {
       var box = el("div", { class: "warn-box" });
-      var showAll = warns.length <= 3 || box.getAttribute("data-open") === "1";
+      // 展开状态存在模块变量里：每次 renderBanner 都会重建 box，存在节点上等于没存
+      var showAll = warns.length <= 3 || warnOpen;
       var list = showAll ? warns : warns.slice(0, 3);
       list.forEach(function (w) { box.appendChild(el("div", { class: "warn", text: String(w) })); });
       if (warns.length > 3) {
         var btn = el("button", { class: "small secondary", text: showAll ? "收起" : "还有 " + (warns.length - 3) + " 条，点我展开" });
         btn.addEventListener("click", function () {
-          box.setAttribute("data-open", showAll ? "0" : "1");
+          warnOpen = !warnOpen;
           renderBanner();
         });
         box.appendChild(btn);

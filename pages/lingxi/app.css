@@ -80,6 +80,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.secondary { background: var(--card); }
 button.danger { color: var(--danger); }
 button.armed { color: #fff; background: var(--danger); border-color: var(--danger); font-weight: 600; }
+/* 深色下 accent / danger 底色偏亮，白字只有约 2.5:1，改深色文字（≥ 4.5:1） */
+:root[data-theme="dark"] button.primary, :root[data-theme="dark"] button.armed { color: #16181c; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) button.primary, :root:not([data-theme="light"]) button.armed { color: #16181c; }
+}
 button.small { padding: 2px 8px; font-size: 12.5px; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 main { padding: 16px; max-width: 1280px; margin: 0 auto; }
@@ -164,4 +169,6 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
     justify-content: flex-end; margin-left: 0;
   }
   main { padding: 12px 12px 76px; }
+  /* 保存栏固定在底部（约 52px 高），toast 抬到它上方，免得盖住按钮 */
+  .toast { bottom: calc(72px + env(safe-area-inset-bottom)); }
 }
