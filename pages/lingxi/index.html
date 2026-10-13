@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>灵犀</title>
+  <!-- AstrBot 托管时会把这个地址改写成带鉴权参数的真实地址 -->
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <link rel="stylesheet" href="./app.css" />
+  <link rel="stylesheet" href="./form.css" />
+  <link rel="stylesheet" href="./tab_overrides.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" id="app-title">灵犀</div>
+    <nav class="tabs" id="tabs" aria-label="配置标签"></nav>
+    <div class="savebar">
+      <span class="muted" id="dirty-count"></span>
+      <button class="secondary" id="btn-discard">放弃</button>
+      <button class="primary" id="btn-save" disabled>保存</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden" role="status"></div>
+  <div id="conflict-banner" class="banner conflict hidden" role="alert"><span>配置在别处被改过，请先刷新，你的改动会保留在页面里。</span> <button class="small" id="btn-refresh">刷新</button></div>
+  <div id="fatal" class="fatal hidden" role="alert"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <main id="tab-host"></main>
+
+  <div id="diff-panel" class="overlay hidden" role="dialog" aria-label="确认保存这些改动">
+    <div class="dialog">
+      <h3>确认保存这些改动</h3>
+      <div id="diff-list" class="diff-list"></div>
+      <div class="dialog-actions">
+        <button class="secondary" id="btn-cancel-save">再想想</button>
+        <button class="primary" id="btn-confirm-save">确认保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+  <!-- form.js（UI-4c：表单生成）与 tab_overrides.js（UI-4b：覆盖表/关于标签）现在还不存在：
+       缺失时只是少标签，页面不报错（app.js 里对 LX.registerTab 已做容错，404 的 script 本身不抛 JS 异常）。 -->
+  <script src="./form.js"></script>
+  <script src="./tab_overrides.js"></script>
+</body>
+</html>
