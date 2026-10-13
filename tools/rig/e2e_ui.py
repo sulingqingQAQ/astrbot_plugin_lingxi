@@ -782,7 +782,7 @@ async def amain(only):
         if hasattr(ctx, attr):
             val = str(getattr(ctx, attr))
             # 页面资源 token 不进日志：只留路径，查询串里的 token 一律隐藏
-            val = re.sub(r"(token=)[^&\s]+", r"<已隐藏>", val)
+            val = re.sub(r"(token=)[^&\s]+", r"\1<已隐藏>", val)
             print("%s: %s" % (attr, val), flush=True)
     bad = [r for r in ctx.results if r[1] in ("FAIL", "ERROR")]
     return 1 if bad else 0
