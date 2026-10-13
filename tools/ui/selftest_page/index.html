@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UI-5 自测页</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+</head>
+<body>
+<div id="out">还没加载</div>
+<button id="save-btn">保存</button>
+<button id="boom-btn">抛异常</button>
+<script>
+var rev = "";
+AstrBotPluginPage.ready().then(function () {
+  return AstrBotPluginPage.apiGet("api/meta");
+}).then(function (resp) {
+  var blocks = resp.data.blocks.private.length + resp.data.blocks.group.length;
+  document.getElementById("out").textContent = "块数=" + blocks;
+  return AstrBotPluginPage.apiGet("api/config");
+}).then(function (resp) {
+  rev = resp.data.revision;
+}).catch(function (e) {
+  document.getElementById("out").textContent = "加载失败：" + e.message;
+});
+document.getElementById("save-btn").addEventListener("click", function () {
+  AstrBotPluginPage.apiPost("api/config/save", {
+    revision: rev,
+    changes: [{ scope: "private", path: "idle.base_minutes", value: 45 }]
+  }).then(function (resp) {
+    if (resp.data && resp.data.saved) {
+      rev = resp.data.config.revision;
+      document.getElementById("out").textContent = "已保存 base=45";
+    } else {
+      document.getElementById("out").textContent = "保存被拒";
+    }
+  }).catch(function (e) {
+    document.getElementById("out").textContent = "保存失败：" + e.message;
+  });
+});
+document.getElementById("boom-btn").addEventListener("click", function () {
+  setTimeout(function () { throw new Error("合成未捕获异常"); }, 0);
+});
+</script>
+</body>
+</html>
