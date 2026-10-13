@@ -59,6 +59,7 @@
       return j.length > 80 ? j.slice(0, 80) + "…" : j;
     }
     var t = String(v);
+    if (t === "") return "（空）";
     return t.length > 80 ? t.slice(0, 80) + "…" : t;
   }
 
@@ -66,14 +67,62 @@
     while (node.firstChild) node.removeChild(node.firstChild);
   }
 
+  // ---- 小零件（长相见 DESIGN.md；图标由 icons.js 提供，缺了就不画） ----
+  function ic(name, size) {
+    return typeof LX.icon === "function" ? LX.icon(name, size) : null;
+  }
+
+  // 带图标的按钮：LX.el 建好后把图标插到文字前面
+  function iconButton(attrs, iconName) {
+    var b = LX.el("button", attrs);
+    var i = ic(iconName, 14);
+    if (i) b.insertBefore(i, b.firstChild);
+    return b;
+  }
+
+  // 卡片头：图标块 + 标题 + 小字说明（+ 右侧操作区）
+  function cardHead(iconName, title, sub, actions) {
+    var chip = LX.el("span", { class: "card-icon" });
+    var i = ic(iconName, 18);
+    if (i) chip.appendChild(i);
+    var titles = LX.el("div", { class: "card-titles" }, [LX.el("h3", { text: title })]);
+    if (sub) titles.appendChild(LX.el("div", { class: "card-sub", text: sub }));
+    var head = LX.el("div", { class: "card-head" }, [chip, titles]);
+    if (actions) head.appendChild(LX.el("div", { class: "card-actions" }, actions));
+    return head;
+  }
+
+  // 提示条：tone 为 info / ok / warn / danger；extra 是要保留的钩子类名
+  function alertBox(tone, text, extra) {
+    var names = { info: "info", ok: "check-circle", warn: "warning", danger: "alert-circle" };
+    var box = LX.el("div", { class: "alert alert-" + tone + (extra ? " " + extra : "") });
+    var i = ic(names[tone] || "info", 16);
+    if (i) box.appendChild(LX.el("span", { class: "alert-icon" }, [i]));
+    box.appendChild(LX.el("div", { class: "alert-body", text: text }));
+    return box;
+  }
+
+  // 开关：<label class="toggle"><input type=checkbox><span class="toggle-track"/><span class="toggle-text">文字</span></label>
+  function toggleLabel(inputId, text, extraClass) {
+    var input = document.createElement("input");
+    input.id = inputId;
+    input.setAttribute("type", "checkbox");
+    input.setAttribute("role", "switch");
+    var label = LX.el("label", { class: "toggle" + (extraClass ? " " + extraClass : "") }, [
+      input, LX.el("span", { class: "toggle-track" }), LX.el("span", { class: "toggle-text", text: text })
+    ]);
+    return { label: label, input: input };
+  }
+
   var SRC_TEXT = { "default": "默认", "global": "全局设置", "override": "分会话覆盖" };
+  var SRC_TONE = { "default": "neutral", "global": "info", "override": "ok" };
 
   /* ================= 分会话覆盖标签 ================= */
   var ov = {
     ta: null, meta: null, result: null, exampleBtn: null,
     saveNote: null, helpPre: null,
     exScope: null, exId: null, exIds: null, exRun: null, exHead: null,
-    exOnly: null, exTable: null, exDirtyWarn: null,
+    exOnly: null, exTable: null, exWrap: null, exEmpty: null, exDirtyWarn: null,
     checkSeq: 0, debounceTimer: null,
     lastSessions: [], lastExplain: null
   };
@@ -103,14 +152,17 @@
     else ov.meta.classList.remove("over");
   }
 
+  // 一条检查错误：红色提示条，类名 ov-err 是场景脚本数错误条数用的
+  function errLine(text) {
+    return alertBox("danger", String(text), "ov-err");
+  }
+
   function renderCheck(data) {
     clearNode(ov.result);
     if (!data || !data.ok) {
       var errs = (data && data.errors) || ["检查失败"];
       var box = LX.el("div", { class: "ov-errors" });
-      errs.forEach(function (m) {
-        box.appendChild(LX.el("div", { class: "ov-err", text: String(m) }));
-      });
+      errs.forEach(function (m) { box.appendChild(errLine(m)); });
       ov.result.appendChild(box);
       return;
     }
@@ -118,15 +170,29 @@
     ov.lastSessions = sessions;
     refreshDatalist();
     if (!sessions.length) {
-      ov.result.appendChild(LX.el("div", { class: "muted", text: "现在没有任何分会话覆盖" }));
+      ov.result.appendChild(LX.el("div", { class: "ov-empty muted", text: "现在没有任何分会话覆盖" }));
       return;
     }
-    ov.result.appendChild(LX.el("div", { class: "ov-ok", text: "识别到 " + sessions.length + " 个会话" }));
+    var okIcon = ic("check-circle", 16);
+    ov.result.appendChild(LX.el("div", { class: "ov-ok" }, [
+      okIcon, LX.el("span", { text: "识别到 " + sessions.length + " 个会话" })
+    ]));
+    var list = LX.el("div", { class: "ov-sessions" });
     sessions.forEach(function (s) {
+      var row = LX.el("div", { class: "ov-session" }, [
+        LX.el("span", { class: "pill pill-accent", text: scopeTitle(s.scope) }),
+        LX.el("code", { text: String(s.id) }),
+        LX.el("span", { class: "muted", text: "改了：" })
+      ]);
       var keys = (s.keys || []).map(function (p) { return fieldTitle(s.scope, p); });
-      var line = scopeTitle(s.scope) + " " + s.id + " · 改了：" + (keys.length ? keys.join("、") : "（没有改任何项）");
-      ov.result.appendChild(LX.el("div", { class: "ov-session", text: line }));
+      if (keys.length) {
+        keys.forEach(function (k) { row.appendChild(LX.el("span", { class: "pill", text: k })); });
+      } else {
+        row.appendChild(LX.el("span", { class: "muted", text: "（没有改任何项）" }));
+      }
+      list.appendChild(row);
     });
+    ov.result.appendChild(list);
   }
 
   function runCheck() {
@@ -135,7 +201,7 @@
     if (!text.trim()) {
       ov.checkSeq++;
       clearNode(ov.result);
-      ov.result.appendChild(LX.el("div", { class: "muted", text: "现在没有任何分会话覆盖" }));
+      ov.result.appendChild(LX.el("div", { class: "ov-empty muted", text: "现在没有任何分会话覆盖" }));
       ov.lastSessions = [];
       refreshDatalist();
       return;
@@ -148,10 +214,7 @@
       if (seq !== ov.checkSeq) return;
       clearNode(ov.result);
       var box = LX.el("div", { class: "ov-errors" });
-      box.appendChild(LX.el("div", {
-        class: "ov-err",
-        text: "检查失败：" + (e && e.message ? e.message : String(e))
-      }));
+      box.appendChild(errLine("检查失败：" + (e && e.message ? e.message : String(e))));
       ov.result.appendChild(box);
     });
   }
@@ -225,6 +288,9 @@
     head.appendChild(hr);
     ov.exTable.appendChild(head);
     var data = ov.lastExplain;
+    // 还没试算过：不画空表头，换成一句引导
+    if (ov.exWrap) ov.exWrap.classList.toggle("hidden", !data);
+    if (ov.exEmpty) ov.exEmpty.classList.toggle("hidden", !!data);
     if (!data) return;
     var onlyNonDefault = ov.exOnly && ov.exOnly.checked;
     var values = data.values || {};
@@ -243,7 +309,7 @@
       var paths = groups[block];
       if (!paths.length) return;
       anyRow = true;
-      var headRow = LX.el("tr", { class: "ex-block" });
+      var headRow = LX.el("tr", { class: "ex-block row-group" });
       var th = document.createElement("th");
       th.setAttribute("colspan", "3");
       th.textContent = blockTitle(scope, block) + "（" + block + "）";
@@ -260,7 +326,7 @@
         c2.textContent = fmtValue(item.value);
         var c3 = document.createElement("td");
         var badge = document.createElement("span");
-        badge.className = "src-" + item.source;
+        badge.className = "badge badge-" + (SRC_TONE[item.source] || "neutral") + " src-" + item.source;
         badge.textContent = SRC_TEXT[item.source] || item.source;
         c3.appendChild(badge);
         tr.appendChild(c1);
@@ -293,11 +359,17 @@
     LX.api.get("explain", { scope: scope, id: id }).then(function (data) {
       ov.lastExplain = data;
       var wl = data.whitelist || {};
-      var parts = "白名单：" + (wl.enabled ? "开" : "关") + " · " + (wl.listed ? "在名单里" : "不在名单里") +
-        " · " + (data.enabled ? "启用" : "停用");
-      if (data.scope === "private") parts += " · 私聊接管：" + (data.takes_over ? "是" : "否");
+      // 一行小徽章：白名单开没开 / 在不在名单里 / 这个会话是否启用 /（私聊）是否接管
+      var chips = [
+        ["白名单：" + (wl.enabled ? "开" : "关"), "neutral"],
+        [wl.listed ? "在名单里" : "不在名单里", wl.listed ? "ok" : (wl.enabled ? "warn" : "neutral")],
+        [data.enabled ? "启用" : "停用", data.enabled ? "ok" : "danger"]
+      ];
+      if (data.scope === "private") chips.push(["私聊接管：" + (data.takes_over ? "是" : "否"), data.takes_over ? "info" : "neutral"]);
       clearNode(ov.exHead);
-      ov.exHead.appendChild(LX.el("span", { text: parts }));
+      chips.forEach(function (c) {
+        ov.exHead.appendChild(LX.el("span", { class: "badge badge-" + c[1], text: c[0] }));
+      });
       renderExplainTable();
     }).catch(function (e) {
       clearNode(ov.exHead);
@@ -310,30 +382,28 @@
 
   function mountOverrides(root) {
     var card = LX.el("div", { class: "card" }, [
-      LX.el("h3", { text: "分会话覆盖（YAML）" })
+      cardHead("sliders", "分会话覆盖（YAML）", "给某个群 / 某个人单独改几项设置，没写的项沿用全局配置。")
     ]);
     ov.ta = document.createElement("textarea");
     ov.ta.id = "ov-text";
     ov.ta.setAttribute("spellcheck", "false");
     ov.ta.setAttribute("rows", "16");
+    ov.ta.setAttribute("aria-label", "分会话覆盖表（YAML）");
     ov.ta.value = currentText();
     card.appendChild(ov.ta);
     var row = LX.el("div", { class: "ov-row" });
     ov.meta = LX.el("span", { class: "muted ov-meta", text: "" });
     row.appendChild(ov.meta);
-    var btnCheck = LX.el("button", { class: "small primary", text: "检查" });
+    var btnCheck = iconButton({ class: "small primary", text: "检查" }, "check");
     btnCheck.id = "ov-check";
-    var btnRevert = LX.el("button", { class: "small secondary", text: "还原为已保存的内容" });
+    var btnRevert = iconButton({ class: "small ghost", text: "还原为已保存的内容" }, "undo");
     btnRevert.id = "ov-revert";
-    row.appendChild(btnCheck);
     row.appendChild(btnRevert);
+    row.appendChild(btnCheck);
     card.appendChild(row);
     ov.result = LX.el("div", { id: "ov-result", class: "ov-result" });
     card.appendChild(ov.result);
-    ov.saveNote = LX.el("div", {
-      class: "warn-line hidden",
-      text: "保存时被服务端拒绝，见顶部提示。"
-    });
+    ov.saveNote = alertBox("warn", "保存时被服务端拒绝，见顶部提示。", "warn-line hidden");
     card.appendChild(ov.saveNote);
 
     var help = document.createElement("details");
@@ -352,19 +422,16 @@
     var example = (LX.state.meta && LX.state.meta.overrides && LX.state.meta.overrides.example) || "";
     ov.helpPre.textContent = example;
     help.appendChild(ov.helpPre);
-    ov.exampleBtn = LX.el("button", { class: "small secondary", text: "把示例插到编辑框末尾" });
+    ov.exampleBtn = iconButton({ class: "small secondary", text: "把示例插到编辑框末尾" }, "plus");
     ov.exampleBtn.id = "ov-insert-example";
     help.appendChild(ov.exampleBtn);
     card.appendChild(help);
     root.appendChild(card);
 
     var card2 = LX.el("div", { class: "card" }, [
-      LX.el("h3", { text: "试算：看某个会话最终生效的设置" })
+      cardHead("eye", "试算：看某个会话最终生效的设置", "选一个会话，看四层配置合并后每一项最终是多少、来自哪一层。")
     ]);
-    ov.exDirtyWarn = LX.el("div", {
-      class: "warn-line hidden",
-      text: "试算用的是已保存的配置；你有未保存的改动，先保存再试算。"
-    });
+    ov.exDirtyWarn = alertBox("warn", "试算用的是已保存的配置；你有未保存的改动，先保存再试算。", "warn-line hidden");
     card2.appendChild(ov.exDirtyWarn);
     var exRow = LX.el("div", { class: "ov-row" });
     ov.exScope = document.createElement("select");
@@ -383,27 +450,31 @@
     ov.exId.setAttribute("list", "ex-ids");
     ov.exIds = document.createElement("datalist");
     ov.exIds.id = "ex-ids";
-    ov.exRun = LX.el("button", { class: "small primary", text: "试算" });
+    ov.exRun = iconButton({ class: "small primary", text: "试算" }, "bolt");
     ov.exRun.id = "ex-run";
     exRow.appendChild(ov.exScope);
     exRow.appendChild(ov.exId);
     exRow.appendChild(ov.exIds);
     exRow.appendChild(ov.exRun);
     card2.appendChild(exRow);
+    var exMeta = LX.el("div", { class: "ex-bar" });
     ov.exHead = LX.el("div", { id: "ex-head", class: "ex-head" });
-    card2.appendChild(ov.exHead);
-    var onlyLabel = document.createElement("label");
-    onlyLabel.className = "ex-only";
-    ov.exOnly = document.createElement("input");
-    ov.exOnly.id = "ex-only-nondefault";
-    ov.exOnly.setAttribute("type", "checkbox");
-    onlyLabel.appendChild(ov.exOnly);
-    onlyLabel.appendChild(document.createTextNode("只看不是默认的"));
-    card2.appendChild(onlyLabel);
+    exMeta.appendChild(ov.exHead);
+    var only = toggleLabel("ex-only-nondefault", "只看不是默认的", "ex-only");
+    ov.exOnly = only.input;
+    exMeta.appendChild(only.label);
+    card2.appendChild(exMeta);
+    ov.exEmpty = LX.el("div", { class: "empty ex-empty" }, [
+      LX.el("div", { class: "empty-icon" }, [ic("eye", 22)]),
+      LX.el("div", { class: "empty-title", text: "还没有试算结果" }),
+      LX.el("div", { class: "empty-text", text: "选好会话类型，填上群号 / QQ 号，点“试算”。" })
+    ]);
+    card2.appendChild(ov.exEmpty);
     ov.exTable = document.createElement("table");
     ov.exTable.id = "ex-table";
-    ov.exTable.className = "ex-table";
-    card2.appendChild(ov.exTable);
+    ov.exTable.className = "table ex-table";
+    ov.exWrap = LX.el("div", { class: "table-wrap hidden" }, [ov.exTable]);
+    card2.appendChild(ov.exWrap);
     root.appendChild(card2);
 
     ov.ta.addEventListener("input", function () {
@@ -455,7 +526,7 @@
   }
 
   LX.registerTab({
-    id: "overrides", title: "分会话覆盖", order: 30,
+    id: "overrides", title: "分会话覆盖", order: 30, icon: "sliders",
     mount: mountOverrides,
     isDirty: function () { return LX.state.overridesDirty; }
   });
@@ -477,33 +548,47 @@
     clearNode(ab.warnings);
     var warns = (data && data.startup_warnings) || [];
     if (!warns.length) {
-      ab.warnings.appendChild(LX.el("span", { class: "muted", text: "没有" }));
+      var okIcon = ic("check", 12);
+      ab.warnings.appendChild(LX.el("span", { class: "badge badge-ok" }, [okIcon, "没有"]));
     } else {
+      var stack = LX.el("div", { class: "stack" });
       warns.forEach(function (w) {
-        ab.warnings.appendChild(LX.el("div", { class: "warn", text: String(w) }));
+        var line = alertBox("warn", String(w), "warn");
+        stack.appendChild(line);
       });
+      ab.warnings.appendChild(stack);
     }
     clearNode(ab.backups);
     var list = (data && data.backups) || [];
     if (!list.length) {
-      ab.backups.appendChild(LX.el("span", { class: "muted", text: "还没有备份" }));
+      ab.backups.appendChild(LX.el("div", { class: "empty about-empty" }, [
+        LX.el("div", { class: "empty-icon" }, [ic("file", 22)]),
+        LX.el("div", { class: "empty-title", text: "还没有备份" }),
+        LX.el("div", { class: "empty-text", text: "第一次从旧配置迁移时，会把旧配置先备份到这里。" })
+      ]));
     } else {
       var table = document.createElement("table");
-      table.className = "ex-table";
+      table.className = "table";
+      var thead = document.createElement("thead");
       var thr = document.createElement("tr");
       ["名字", "大小", "时间"].forEach(function (t) {
         var th = document.createElement("th");
         th.textContent = t;
         thr.appendChild(th);
       });
-      table.appendChild(thr);
+      thead.appendChild(thr);
+      table.appendChild(thead);
+      var tbody = document.createElement("tbody");
       list.forEach(function (b) {
         var tr = document.createElement("tr");
         var c1 = document.createElement("td");
+        c1.className = "mono";
         c1.textContent = b.name;
         var c2 = document.createElement("td");
+        c2.className = "num";
         c2.textContent = (Number(b.size) / 1024).toFixed(1) + " KB";
         var c3 = document.createElement("td");
+        c3.className = "num";
         try {
           c3.textContent = new Date(Number(b.mtime) * 1000).toLocaleString();
         } catch (e) {
@@ -512,9 +597,10 @@
         tr.appendChild(c1);
         tr.appendChild(c2);
         tr.appendChild(c3);
-        table.appendChild(tr);
+        tbody.appendChild(tr);
       });
-      ab.backups.appendChild(table);
+      table.appendChild(tbody);
+      ab.backups.appendChild(LX.el("div", { class: "table-wrap" }, [table]));
     }
   }
 
@@ -530,48 +616,35 @@
   }
 
   function mountAbout(root) {
-    var card = LX.el("div", { class: "card" }, [
-      LX.el("h3", { text: "关于" })
-    ]);
-    function row(label, id) {
-      var line = LX.el("div", { class: "about-row" });
-      line.appendChild(LX.el("span", { class: "about-label", text: label + "：" }));
-      var val = LX.el("span", { id: id });
-      line.appendChild(val);
-      return { line: line, val: val };
-    }
-    var r1 = row("插件版本", "about-version");
-    var r2 = row("配置版本", "about-schema");
-    ab.version = r1.val;
-    ab.schema = r2.val;
-    card.appendChild(r1.line);
-    card.appendChild(r2.line);
-    var wline = LX.el("div", { class: "about-row" });
-    wline.appendChild(LX.el("span", { class: "about-label", text: "启动提示：" }));
-    ab.warnings = LX.el("span", { id: "about-warnings" });
-    wline.appendChild(ab.warnings);
-    card.appendChild(wline);
-    var bline = LX.el("div", { class: "about-row" });
-    bline.appendChild(LX.el("span", { class: "about-label", text: "备份文件：" }));
-    ab.backups = LX.el("span", { id: "about-backups" });
-    bline.appendChild(ab.backups);
-    card.appendChild(bline);
-    var note = document.createElement("p");
-    note.className = "muted";
-    note.textContent = "配置在 AstrBot 自带的配置页里也能改，两边是同一份数据。" +
-      "两边同时开着时，后保存的会覆盖先保存的整块设置（私聊 / 群聊 / 覆盖表按整块覆盖），改之前先刷新一下。" +
-      "这里改完保存立即生效，不用重载插件。";
-    card.appendChild(note);
-    var btn = LX.el("button", { class: "small secondary", text: "刷新" });
+    var btn = iconButton({ class: "small secondary", text: "刷新" }, "refresh");
     btn.id = "about-refresh";
     btn.addEventListener("click", loadAbout);
-    card.appendChild(btn);
+    var card = LX.el("div", { class: "card about-card" }, [
+      cardHead("ghost", "关于", "版本、迁移留下的提示和备份。", [btn])
+    ]);
+    // 版本信息：两张小键值卡
+    ab.version = LX.el("span", { id: "about-version", class: "kv-value mono" });
+    ab.schema = LX.el("span", { id: "about-schema", class: "kv-value mono" });
+    function kv(label, valueEl) {
+      return LX.el("div", { class: "kv" }, [LX.el("div", { class: "kv-label", text: label }), valueEl]);
+    }
+    card.appendChild(LX.el("div", { class: "kv-grid" }, [kv("插件版本", ab.version), kv("配置版本", ab.schema)]));
+    // 启动提示 / 备份文件：分组标题 + 内容
+    ab.warnings = LX.el("div", { id: "about-warnings", class: "about-body" });
+    ab.backups = LX.el("div", { id: "about-backups", class: "about-body" });
+    card.appendChild(LX.el("div", { class: "group-title", text: "启动提示" }));
+    card.appendChild(ab.warnings);
+    card.appendChild(LX.el("div", { class: "group-title", text: "备份文件" }));
+    card.appendChild(ab.backups);
+    card.appendChild(alertBox("info", "配置在 AstrBot 自带的配置页里也能改，两边是同一份数据。" +
+      "两边同时开着时，后保存的会覆盖先保存的整块设置（私聊 / 群聊 / 覆盖表按整块覆盖），改之前先刷新一下。" +
+      "这里改完保存立即生效，不用重载插件。", "about-note"));
     root.appendChild(card);
     loadAbout();
   }
 
   LX.registerTab({
-    id: "about", title: "关于", order: 90,
+    id: "about", title: "关于", order: 90, icon: "info",
     mount: mountAbout,
     onShow: loadAbout
   });

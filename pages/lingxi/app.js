@@ -76,12 +76,22 @@
 
   function $(sel) { return document.querySelector(sel); }
 
+  // 图标由 icons.js 提供（加载顺序在 app.js 之后）；缺了就不画图标，别的照常。
+  function ic(name, size) {
+    return window.LX && typeof window.LX.icon === "function" ? window.LX.icon(name, size) : null;
+  }
+
+  var TOAST_ICONS = { ok: "check-circle", warn: "warning", error: "alert-circle" };
   var toastTimer = null;
   function toast(message, kind) {
     var t = $("#toast");
     if (!t) return;
-    t.textContent = String(message);
-    t.className = "toast show " + (kind || "ok");
+    kind = TOAST_ICONS[kind] ? kind : "ok";
+    while (t.firstChild) t.removeChild(t.firstChild);
+    var icon = ic(TOAST_ICONS[kind], 18);
+    if (icon) t.appendChild(icon);
+    t.appendChild(el("span", { class: "toast-text", text: String(message) }));
+    t.className = "toast show " + kind;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.className = "toast hidden"; }, kind === "error" ? 7000 : 3500);
   }
@@ -243,6 +253,9 @@
   };
 
   // ---- 标签 ----
+  // 标签图标：registerTab 可以传 icon（LX.icon 的名字）；没传就按标签 id 找默认图标，再没有用 list。
+  var TAB_ICONS = { "private": "chat", "group": "group", overrides: "sliders", about: "info", diag: "pulse" };
+
   LX.registerTab = function (tab) {
     if (!tab || !tab.id) return;
     var found = null;
@@ -250,6 +263,7 @@
     if (found) {
       found.title = tab.title || found.title;
       found.order = tab.order === undefined ? found.order : tab.order;
+      if (tab.icon) found.icon = tab.icon;
       if (tab.mount) found.mount = tab.mount;
       if (tab.onShow) found.onShow = tab.onShow;
       if (tab.isDirty) found.isDirty = tab.isDirty;
@@ -257,6 +271,7 @@
       LX._tabs.push({
         id: tab.id, title: tab.title || tab.id,
         order: tab.order === undefined ? 99 : tab.order,
+        icon: tab.icon || TAB_ICONS[tab.id] || "list",
         mount: tab.mount || null, onShow: tab.onShow || null,
         isDirty: tab.isDirty || null, _mounted: false
       });
@@ -278,18 +293,27 @@
     var host = $("#tab-host");
     if (!bar || !host) return;
     while (bar.firstChild) bar.removeChild(bar.firstChild);
+    bar.setAttribute("role", "tablist");
     LX._tabs.forEach(function (t) {
+      var kids = [];
+      var icon = ic(t.icon, 16);
+      if (icon) kids.push(icon);
+      kids.push(el("span", { class: "tab-label", text: t.title }));
       var b = el("button", {
         class: t.id === activeTabId ? "active" : "",
         dataset: { tab: t.id },
         on: { click: function () { showTab(t.id); } }
-      }, [t.title]);
+      }, kids);
       b.setAttribute("data-tab", t.id);
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", t.id === activeTabId ? "true" : "false");
+      b.setAttribute("aria-controls", "tab-" + t.id);
       bar.appendChild(b);
       var sec = document.getElementById("tab-" + t.id);
       if (!sec) {
         sec = el("section", { id: "", class: "tab" });
         sec.id = "tab-" + t.id;
+        sec.setAttribute("role", "tabpanel");
         host.appendChild(sec);
       }
       sec.classList.toggle("active", t.id === activeTabId);
@@ -297,6 +321,7 @@
     renderTabDots();
   }
 
+  // 标签上的"有未保存改动"小圆点：一个空 span（样式画圆），文字说明放 aria-label / title
   function renderTabDots() {
     LX._tabs.forEach(function (t) {
       var dirty = false;
@@ -307,7 +332,9 @@
         if (dirty && !dot) {
           var s = document.createElement("span");
           s.className = "dot";
-          s.textContent = "●";
+          s.setAttribute("role", "img");
+          s.setAttribute("aria-label", "有未保存的改动");
+          s.setAttribute("title", "有未保存的改动");
           b.appendChild(s);
         } else if (!dirty && dot) {
           dot.remove();
@@ -328,7 +355,9 @@
     var bar = $("#tabs");
     if (bar) {
       Array.prototype.forEach.call(bar.querySelectorAll("button"), function (b) {
-        b.classList.toggle("active", b.getAttribute("data-tab") === id);
+        var on = b.getAttribute("data-tab") === id;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
       });
     }
     var host = $("#tab-host");
@@ -374,12 +403,17 @@
       banner.className = "banner hidden";
       return;
     }
-    banner.className = "banner show" + (errs.length ? " error" : "");
+    banner.className = "banner alert show " + (errs.length ? "error alert-danger" : "alert-warn");
+    var icon = ic(errs.length ? "alert-circle" : "warning", 18);
+    if (icon) banner.appendChild(el("span", { class: "alert-icon" }, [icon]));
+    var body = el("div", { class: "alert-body" });
+    banner.appendChild(body);
     errs.forEach(function (m) {
-      banner.appendChild(el("div", { class: "banner-err", text: String(m) }));
+      body.appendChild(el("div", { class: "banner-err", text: String(m) }));
     });
     if (warns.length) {
       var box = el("div", { class: "warn-box" });
+      box.appendChild(el("div", { class: "alert-title", text: "加载配置时有 " + warns.length + " 条提示" }));
       // 展开状态存在模块变量里：每次 renderBanner 都会重建 box，存在节点上等于没存
       var showAll = warns.length <= 3 || warnOpen;
       var list = showAll ? warns : warns.slice(0, 3);
@@ -392,17 +426,17 @@
         });
         box.appendChild(btn);
       }
-      banner.appendChild(box);
+      body.appendChild(box);
     }
   }
 
   function hideConflict() {
     var c = $("#conflict-banner");
-    if (c) c.className = "banner conflict hidden";
+    if (c) c.className = "banner alert alert-danger conflict hidden";
   }
   function showConflict() {
     var c = $("#conflict-banner");
-    if (c) c.className = "banner conflict show";
+    if (c) c.className = "banner alert alert-danger conflict show";
   }
 
   function showFatal(msg) {
@@ -410,13 +444,16 @@
     if (!f) return;
     while (f.firstChild) f.removeChild(f.firstChild);
     f.className = "fatal show";
-    f.appendChild(el("span", { text: msg + " " }));
+    var icon = ic("alert-circle", 20);
+    if (icon) f.appendChild(el("span", { class: "alert-icon" }, [icon]));
+    f.appendChild(el("div", { class: "alert-body", text: String(msg) }));
     var btn = el("button", { class: "small primary", text: "重试" });
     btn.addEventListener("click", function () {
+      while (f.firstChild) f.removeChild(f.firstChild);
       f.className = "fatal hidden";
       boot();
     });
-    f.appendChild(btn);
+    f.appendChild(el("div", { class: "alert-actions" }, [btn]));
   }
 
   // ---- 加载 ----
@@ -457,8 +494,10 @@
   }
 
   function fmtVal(field, value) {
+    if (typeof value === "boolean") return value ? "开" : "关";
     if (Array.isArray(value)) return value.length + " 行";
     if (typeof value === "string") {
+      if (value === "") return "（空）";
       if (field && (field.type === "text" || field.type === "string") && value.length > 80) {
         return value.slice(0, 80) + "…";
       }
@@ -520,30 +559,53 @@
     LX.state.dirty.forEach(function (item) {
       var f = LX.fieldMeta(item.scope, item.path);
       var old = loadedValue(item.scope, item.path);
-      var head = scopeTitle(item.scope) + " · " + itemTitle(item.scope, item.path) +
-        "（" + item.path + "）：";
-      var line = Array.isArray(item.value) || Array.isArray(old)
-        ? head + listDiffText(old, item.value)
-        : head + fmtVal(f, old) + " → " + fmtVal(f, item.value);
-      var div = el("div", { class: "diff-item", text: line });
+      var head = el("div", { class: "diff-head" }, [
+        el("span", { class: "pill pill-accent", text: scopeTitle(item.scope) }),
+        el("span", { class: "diff-title", text: itemTitle(item.scope, item.path) }),
+        el("code", { class: "diff-path", text: item.path })
+      ]);
+      var change = el("div", { class: "diff-change" });
+      if (Array.isArray(item.value) || Array.isArray(old)) {
+        change.textContent = listDiffText(old, item.value);
+      } else {
+        var oldText = fmtVal(f, old);
+        var newText = fmtVal(f, item.value);
+        if (oldText.length + newText.length > 56) change.classList.add("diff-stack");
+        change.appendChild(el("span", { class: "diff-old", text: oldText }));
+        change.appendChild(el("span", { class: "diff-arrow", text: "→" }));
+        change.appendChild(el("span", { class: "diff-new", text: newText }));
+      }
+      var div = el("div", { class: "diff-item" }, [head, change]);
       div.setAttribute("data-scope", item.scope);
       div.setAttribute("data-path", item.path);
       list.appendChild(div);
     });
     if (LX.state.overridesDirty) {
       var n = (LX.state.overridesText || "").split("\n").length;
-      var odiv = el("div", { class: "diff-item", text: "分会话覆盖表已修改（" + n + " 行）" });
+      var odiv = el("div", { class: "diff-item" }, [
+        el("div", { class: "diff-head" }, [
+          el("span", { class: "pill pill-accent", text: "覆盖表" }),
+          el("span", { class: "diff-title", text: "分会话覆盖表已修改（" + n + " 行）" })
+        ])
+      ]);
       odiv.setAttribute("data-scope", "overrides");
       odiv.setAttribute("data-path", "session_overrides");
       list.appendChild(odiv);
     }
     var panel = $("#diff-panel");
     if (panel) panel.classList.remove("hidden");
+    var go = $("#btn-confirm-save");
+    if (go) go.focus();
   };
 
   LX._closeDiff = function () {
     var panel = $("#diff-panel");
-    if (panel) panel.classList.add("hidden");
+    if (!panel) return;
+    var wasOpen = !panel.classList.contains("hidden");
+    panel.classList.add("hidden");
+    // 键盘用户关掉清单后，焦点回到保存按钮
+    var save = $("#btn-save");
+    if (wasOpen && save && !save.disabled) save.focus();
   };
 
   LX._doSave = async function () {
@@ -554,7 +616,7 @@
     var body = { revision: LX.state.config ? LX.state.config.revision : "", changes: changes };
     if (LX.state.overridesDirty) body.session_overrides = LX.state.overridesText;
     var btn = $("#btn-confirm-save");
-    if (btn) btn.disabled = true;
+    if (btn) { btn.disabled = true; btn.classList.add("loading"); btn.setAttribute("aria-busy", "true"); }
     try {
       var data = await LX.api.post("config/save", body);
       if (data.saved) {
@@ -604,7 +666,7 @@
     } catch (e) {
       toast("保存失败：" + (e && e.message ? e.message : String(e)), "error");
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) { btn.disabled = false; btn.classList.remove("loading"); btn.removeAttribute("aria-busy"); }
     }
   };
 
@@ -632,35 +694,62 @@
     if (discard) {
       var armed = false;
       var timer = null;
+      var label = discard.querySelector(".btn-label") || discard; // 按钮里的文字节点，改它不会动按钮本身的结构
       discard.addEventListener("click", function () {
         // 先冲刷待决防抖：否则放弃之后 150ms 它又把刚输入的文字暂存回来
         flushPending();
         if (!armed) {
           if (dirtyCount() === 0) return;
           armed = true;
-          discard.textContent = "再点一次确认放弃";
+          label.textContent = "再点一次确认放弃";
           discard.classList.add("armed");
           timer = setTimeout(function () {
             armed = false;
-            discard.textContent = "放弃";
+            label.textContent = "放弃";
             discard.classList.remove("armed");
           }, 3000);
         } else {
           if (timer) clearTimeout(timer);
           armed = false;
-          discard.textContent = "放弃";
+          label.textContent = "放弃";
           discard.classList.remove("armed");
           try { LX.discardAll(); } catch (e) { console.error(e); }
           toast("已放弃未保存的改动", "ok");
         }
       });
     }
+    // Esc 关掉改动清单（键盘用户不用摸到"再想想"）
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      var panel = $("#diff-panel");
+      if (panel && !panel.classList.contains("hidden")) LX._closeDiff();
+    });
+  }
+
+  // 首次加载时先摆一张骨架屏，免得一片空白；加载完（或出错）就撤掉
+  function showBootSkeleton() {
+    var host = $("#tab-host");
+    if (!host || host.querySelector(".boot-skeleton")) return;
+    var card = el("div", { class: "card boot-skeleton", "aria-hidden": "true" }, [
+      el("span", { class: "skeleton skel-title" }),
+      el("span", { class: "skeleton skel-line" }),
+      el("span", { class: "skeleton skel-line skel-short" }),
+      el("span", { class: "skeleton skel-block" })
+    ]);
+    host.appendChild(card);
+  }
+  function hideBootSkeleton() {
+    var host = $("#tab-host");
+    var s = host && host.querySelector(".boot-skeleton");
+    if (s) s.remove();
   }
 
   async function boot() {
+    showBootSkeleton();
     try {
       if (bridge && bridge.ready) await bridge.ready();
       await LX.reload();
+      hideBootSkeleton();
       var first = null;
       try {
         var m = (window.location.hash || "").match(/tab=([A-Za-z0-9_-]+)/);
@@ -675,6 +764,7 @@
         }
       }
     } catch (e) {
+      hideBootSkeleton();
       showFatal("配置没加载出来：" + (e && e.message ? e.message : String(e)));
     }
   }

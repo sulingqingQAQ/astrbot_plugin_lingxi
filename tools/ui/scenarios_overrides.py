@@ -186,6 +186,67 @@ async def _extra_ui8(browser, harness, base):
         await chk(browser, harness, base)
 
 
+# ---- DIAG-4a 追加：覆盖表 / 试算 / 关于页重绘后的结构（长相由 shots_visual.py 的截图看）----
+
+async def _chk_diag4a_overrides_structure(browser, harness, base):
+    # 视口开高一点：试算卡片在编辑区下面，真点击要点得到屏幕内的坐标（无头里不滚动页面）
+    await browser.set_viewport(1440, 1800)
+    await _goto_overrides(browser, base)
+    # 没试算前：显示空状态，不画空表
+    assert await browser.eval(
+        "!document.querySelector('#tab-overrides .ex-empty').classList.contains('hidden')"), "试算前应显示空状态"
+    assert await browser.eval(
+        "document.querySelector('#ex-table').closest('.table-wrap').classList.contains('hidden')"), "试算前表格应隐藏"
+    # 检查结果：识别到的会话是"药丸 + 会话号"一行
+    await browser.fill("#ov-text", GOOD_YAML)
+    await browser.wait_for("document.querySelector('#ov-result').innerText.indexOf('识别到 1 个会话')>=0")
+    assert await browser.exists("#ov-result .ov-ok > svg.icon"), "检查成功行应带图标"
+    assert await browser.exists("#ov-result .ov-session .pill.pill-accent"), "会话行应有范围药丸"
+    # 检查失败：每条错误是一个红色提示条（.ov-err 同时是 .alert-danger）
+    await browser.fill("#ov-text", BAD_YAML)
+    await browser.wait_for("document.querySelectorAll('#ov-result .ov-err.alert.alert-danger').length > 0")
+    # 试算：表格显示、空状态收起；来源是徽章
+    await browser.fill("#ov-text", GOOD_YAML)
+    await browser.wait_for("document.querySelector('#ov-result').innerText.indexOf('识别到 1 个会话')>=0")
+    await _run_explain(browser)
+    assert await browser.eval(
+        "document.querySelector('#tab-overrides .ex-empty').classList.contains('hidden')"), "试算后空状态应收起"
+    assert await browser.exists("#ex-head .badge"), "试算头部应是一排状态徽章"
+    assert await browser.exists('#ex-table tr[data-source="default"] .badge.badge-neutral.src-default'), "默认来源徽章"
+    assert await browser.exists('#ex-table tr.ex-block.row-group th'), "块标题行应带 row-group"
+    assert await browser.exists("#ex-table", ), "试算表在"
+    # “只看不是默认的”是开关，真点击能切换
+    await browser.click("#ex-only-nondefault")
+    await browser.wait_for("document.querySelector('#ex-only-nondefault').checked === true")
+    await browser.click("#ex-only-nondefault")
+    await browser.wait_for("document.querySelector('#ex-only-nondefault').checked === false")
+    await browser.eval("LX.discardAll()")
+    await browser.set_viewport(1440, 900)
+    print("DIAG-4a 覆盖表 / 试算结构 OK")
+
+
+async def _chk_diag4a_about_structure(browser, harness, base):
+    await browser.set_viewport(1440, 900)
+    await browser.goto(base + "/", wait_ms=1200)
+    await browser.wait_for("!!document.querySelector('#tabs button[data-tab=\"about\"]')")
+    await browser.click('#tabs button[data-tab="about"]')
+    await browser.wait_for("document.querySelector('#about-version').innerText.length > 0")
+    assert await browser.count("#tab-about .kv-grid .kv") == 2, "关于页应有两张键值卡（插件版本 / 配置版本）"
+    assert await browser.exists("#about-version.kv-value"), "版本号应在键值卡的值位置"
+    assert await browser.exists("#about-backups .empty.about-empty"), "没有备份时应是空状态"
+    assert await browser.exists("#about-warnings .badge.badge-ok"), "没有启动提示时应是绿色徽章"
+    assert await browser.exists("#tab-about .alert.alert-info.about-note"), "说明文字应是提示条"
+    print("DIAG-4a 关于页结构 OK")
+
+
+DIAG4A_CHECKS = (_chk_diag4a_overrides_structure, _chk_diag4a_about_structure)
+
+
+async def _extra_diag4a(browser, harness, base):
+    for chk in DIAG4A_CHECKS:
+        await chk(browser, harness, base)
+
+
 async def _run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
     harness = Harness(page_dir=PAGE_DIR)
@@ -371,6 +432,9 @@ async def _run(out_dir):
 
         # ⑪ UI-8 追加
         await _extra_ui8(browser, harness, base)
+
+        # ⑫ DIAG-4a 追加
+        await _extra_diag4a(browser, harness, base)
 
         # ⑩ 全程无 JS 错误
         _check_no_errors(browser, "全程结束")

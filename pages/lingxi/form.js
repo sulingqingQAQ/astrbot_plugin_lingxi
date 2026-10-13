@@ -42,6 +42,7 @@
   }
 
   function fmtDefault(value) {
+    if (typeof value === "boolean") return value ? "开" : "关";
     if (Array.isArray(value)) return value.length + " 项";
     if (typeof value === "string") {
       if (value.length > 80) return value.slice(0, 80) + "…";
@@ -159,15 +160,36 @@
     return el;
   }
 
+  /* 开关：真 checkbox 铺在 .toggle-track 上方（透明），旁边写"开 / 关"。样式见 app.css 的 .toggle。 */
+  function makeToggle(LX, input, textEl) {
+    var label = LX.el("label", { class: "toggle" }, [input, LX.el("span", { class: "toggle-track" })]);
+    if (textEl) label.appendChild(textEl);
+    return label;
+  }
+
   function buildBool(LX, view, block, field, box) {
     var input = markControl(document.createElement("input"));
     input.type = "checkbox";
+    input.setAttribute("role", "switch");
+    input.setAttribute("aria-label", field.title || field.path);
     input.checked = !!LX.getValue(view.scope, field.path);
+    var state = LX.el("span", { class: "toggle-text", text: input.checked ? "开" : "关" });
     input.addEventListener("change", function () {
+      state.textContent = input.checked ? "开" : "关";
       LX.setValue(view.scope, field.path, input.checked);
     });
-    box.appendChild(input);
-    return { controls: [input] };
+    box.appendChild(makeToggle(LX, input, state));
+    return { controls: [input], toggleText: state };
+  }
+
+  /* 滑块已填充部分的长度（CSS 变量 --fill，app.css 里用它画进度色）。 */
+  function paintSlider(slider) {
+    var min = Number(slider.min);
+    var max = Number(slider.max);
+    var val = Number(slider.value);
+    var pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+    pct = Math.max(0, Math.min(100, pct));
+    slider.style.setProperty("--fill", pct + "%");
   }
 
   function buildNumber(LX, view, block, field, box) {
@@ -189,6 +211,7 @@
       slider.step = String(field.slider[2]);
       if (typeof cur === "number") slider.value = String(cur);
       slider.setAttribute("aria-label", (field.title || field.path) + "滑块");
+      paintSlider(slider);
     }
     var viewRef = view;
     var pathRef = field.path;
@@ -214,7 +237,7 @@
       var num = Number(raw);
       if (!isFinite(num)) { pushInvalid("应该是一个数字"); return; }
       if (type === "int" && Math.round(num) !== num) { pushInvalid("这一项只能填整数"); return; }
-      if (slider && document.activeElement !== slider) slider.value = String(num);
+      if (slider && document.activeElement !== slider) { slider.value = String(num); paintSlider(slider); }
       pushValid(num);
     });
     input.addEventListener("change", function () {
@@ -225,6 +248,7 @@
       slider.addEventListener("input", function () {
         var num = Number(slider.value);
         if (document.activeElement !== input) input.value = String(num);
+        paintSlider(slider);
         pushValid(num);
       });
     }
@@ -389,10 +413,12 @@
       if (c.type === "number" && view.localErr[rec.field.path]) continue;
       if (c.type === "checkbox") {
         c.checked = !!v;
+        if (rec.built && rec.built.toggleText) rec.built.toggleText.textContent = c.checked ? "开" : "关";
       } else if (c.tagName === "SELECT") {
         c.value = (v === null || v === undefined) ? "" : String(v);
       } else if (c.type === "number" || c.type === "range") {
         c.value = (typeof v === "number") ? String(v) : "";
+        if (c.type === "range") paintSlider(c);
       } else if (c.tagName === "TEXTAREA" && rec.built && rec.built.countKind === "items") {
         c.value = Array.isArray(v) ? v.join("\n") : "";
       } else {
@@ -414,6 +440,7 @@
     var path = rec.field.path;
     var dirty = LX.isDirty(scope, path);
     rec.badgeDirty.classList.toggle("hidden", !dirty);
+    rec.wrap.classList.toggle("is-dirty", dirty);
     var local = view.localErr[path];
     rec.resetBtn.disabled = !local && deepEqual(LX.getValue(scope, path), rec.field.default);
     var serverErr = LX.getError(scope, path);
@@ -432,36 +459,60 @@
   }
 
   /* ---- 项 ---- */
+  /* 版式：bool 是"左边说明、右边开关"的一行；text / list 是整行宽（说明在上、输入框在下）；
+   * 其余（数字 / 选择 / 单行文字）是"左边说明、右边控件"。窄屏下除 bool 外都上下叠放。 */
+  function fieldKind(field) {
+    if (field.type === "bool") return "field-bool";
+    if (field.type === "text" || field.type === "list") return "field-wide";
+    return "field-inline";
+  }
+
   function renderField(LX, view, block, field) {
-    var wrap = LX.el("div", { class: "field", dataset: { scope: view.scope, path: field.path } });
-    wrap.appendChild(LX.el("span", { class: "field-title", text: field.title || field.path }));
-    var badgeNew = LX.el("span", { class: "badge badge-new" + (field.new_default ? "" : " hidden"), text: "新默认待定" });
+    var isCond = !!(field.condition && field.condition.length);
+    var dirty0 = LX.isDirty(view.scope, field.path);
+    var wrap = LX.el("div", {
+      class: "field " + fieldKind(field) + (isCond ? " field-cond" : "") + (dirty0 ? " is-dirty" : ""),
+      dataset: { scope: view.scope, path: field.path }
+    });
+    /* 左 / 上：标题 + 徽章 + 说明 */
+    var main = LX.el("div", { class: "field-main" });
+    var badgeNew = LX.el("span", {
+      class: "badge badge-info badge-new" + (field.new_default ? "" : " hidden"), text: "新默认待定"
+    });
     var badgeDirty = LX.el("span", {
-      class: "badge badge-dirty" + (LX.isDirty(view.scope, field.path) ? "" : " hidden"),
-      text: "已改动"
+      class: "badge badge-warn badge-dirty" + (dirty0 ? "" : " hidden"), text: "已改动"
     });
-    wrap.appendChild(badgeNew);
-    wrap.appendChild(badgeDirty);
-    if (field.hint) wrap.appendChild(LX.el("div", { class: "field-hint", text: field.hint }));
+    main.appendChild(LX.el("div", { class: "field-titleline" }, [
+      LX.el("span", { class: "field-title", text: field.title || field.path }), badgeNew, badgeDirty
+    ]));
+    if (field.hint) main.appendChild(LX.el("div", { class: "field-hint", text: field.hint }));
+    wrap.appendChild(main);
+    /* 右 / 下：控件 + 红字错误 */
+    var side = LX.el("div", { class: "field-side" });
     var box = LX.el("div", { class: "field-control" });
-    wrap.appendChild(box);
+    side.appendChild(box);
     var built = buildControl(LX, view, block, field, box);
-    wrap.appendChild(LX.el("div", { class: "field-default muted", text: "默认：" + fmtDefault(field.default) }));
-    var cur = LX.getValue(view.scope, field.path);
-    var resetBtn = LX.el("button", {
-      class: "small secondary field-reset", text: "恢复默认",
-      disabled: deepEqual(cur, field.default)
-    });
-    resetBtn.addEventListener("click", function () {
-      delete view.localErr[field.path];
-      LX.setValue(view.scope, field.path, field.default);
-    });
-    wrap.appendChild(resetBtn);
     var errEl = LX.el("div", { class: "field-error" });
     var local = view.localErr[field.path];
     var serverErr = LX.getError(view.scope, field.path);
     if (local || serverErr) errEl.textContent = local || serverErr;
-    wrap.appendChild(errEl);
+    side.appendChild(errEl);
+    wrap.appendChild(side);
+    /* 底：默认值 + 恢复默认（和默认值一样时按钮隐藏） */
+    var cur = LX.getValue(view.scope, field.path);
+    var resetBtn = LX.el("button", {
+      class: "small ghost field-reset", text: "恢复默认",
+      disabled: deepEqual(cur, field.default)
+    });
+    var undo = LX.icon ? LX.icon("undo", 14) : null;
+    if (undo) resetBtn.insertBefore(undo, resetBtn.firstChild);
+    resetBtn.addEventListener("click", function () {
+      delete view.localErr[field.path];
+      LX.setValue(view.scope, field.path, field.default);
+    });
+    wrap.appendChild(LX.el("div", { class: "field-foot" }, [
+      LX.el("span", { class: "field-default", text: "默认：" + fmtDefault(field.default) }), resetBtn
+    ]));
     var rec = {
       wrap: wrap, badgeNew: badgeNew, badgeDirty: badgeDirty,
       resetBtn: resetBtn, errEl: errEl, field: field, blockKey: block.key, built: built
@@ -543,29 +594,47 @@
     }
     if (!shown) {
       if (!vis.length) {
-        host.appendChild(LX.el("div", { class: "form-empty muted", text: "没有匹配的项" }));
+        host.appendChild(emptyState(LX));
         return;
       }
       view.blockKey = vis[0].key;
       shown = vis[0];
     }
+    /* 一个块 = 一张卡片：块标题在上，下面一行一项 */
+    var card = LX.el("div", { class: "card form-card" });
     var head = LX.el("div", { class: "block-head" });
     head.appendChild(LX.el("h3", { text: shown.title || shown.key }));
     if (shown.hint) head.appendChild(LX.el("div", { class: "block-hint muted", text: shown.hint }));
     if (shown.overridable === false) {
-      head.appendChild(LX.el("div", { class: "block-locked muted", text: "这一块只能在全局设置，不能被分会话覆盖" }));
+      var lock = LX.el("div", { class: "block-locked pill" }, [
+        LX.el("span", { text: "这一块只能在全局设置，不能被分会话覆盖" })
+      ]);
+      if (LX.icon) lock.insertBefore(LX.icon("lock", 12), lock.firstChild);
+      head.appendChild(lock);
     }
-    host.appendChild(head);
+    card.appendChild(head);
+    host.appendChild(card);
     var fields = shown.fields || [];
     var any = false;
     for (var j = 0; j < fields.length; j++) {
       if (!matchField(fields[j], view.search, view.onlyChanged, view.scope)) continue;
       any = true;
-      host.appendChild(renderField(LX, view, shown, fields[j]));
+      card.appendChild(renderField(LX, view, shown, fields[j]));
     }
     if (!any) {
-      host.appendChild(LX.el("div", { class: "form-empty muted", text: "没有匹配的项" }));
+      card.appendChild(emptyState(LX));
     }
+  }
+
+  /* 空状态：搜索 / "只看不同于默认值"过滤后没有项。文案"没有匹配的项"场景脚本会找。 */
+  function emptyState(LX) {
+    var icon = LX.el("div", { class: "empty-icon" });
+    if (LX.icon) icon.appendChild(LX.icon("search", 22));
+    return LX.el("div", { class: "empty form-empty" }, [
+      icon,
+      LX.el("div", { class: "empty-title", text: "没有匹配的项" }),
+      LX.el("div", { class: "empty-text", text: "换个关键词再搜，或者关掉“只看和默认值不同的项”。" })
+    ]);
   }
 
   function renderAll(LX, view) {
@@ -584,20 +653,26 @@
       search.type = "text";
       search.className = "form-search";
       search.placeholder = "搜索（标题 / 说明 / 路径）";
+      search.setAttribute("aria-label", "搜索配置项");
       search.value = view.search;
       search.addEventListener("input", function () {
         view.search = search.value;
         renderAll(LX, view);
       });
-      bar.appendChild(search);
+      var searchBox = LX.el("div", { class: "search-box" });
+      if (LX.icon) searchBox.appendChild(LX.icon("search", 16));
+      searchBox.appendChild(search);
+      bar.appendChild(searchBox);
       view.searchInput = search;
-      var onlyLabel = LX.el("label", { class: "form-only-changed-label" });
+      var onlyLabel = LX.el("label", { class: "toggle form-only-changed-label" });
       var onlyBox = document.createElement("input");
       onlyBox.type = "checkbox";
+      onlyBox.setAttribute("role", "switch");
       onlyBox.className = "form-only-changed";
       onlyBox.checked = view.onlyChanged;
       onlyLabel.appendChild(onlyBox);
-      onlyLabel.appendChild(document.createTextNode("只看和默认值不同的项"));
+      onlyLabel.appendChild(LX.el("span", { class: "toggle-track" }));
+      onlyLabel.appendChild(LX.el("span", { class: "toggle-text", text: "只看和默认值不同的项" }));
       onlyBox.addEventListener("change", function () {
         view.onlyChanged = onlyBox.checked;
         renderAll(LX, view);
@@ -617,7 +692,10 @@
       var layout = LX.el("div", { class: "form-layout" });
       var nav = LX.el("nav", { class: "block-nav" });
       nav.setAttribute("aria-label", "配置块导航");
-      layout.appendChild(nav);
+      var aside = LX.el("aside", { class: "block-aside" }, [
+        LX.el("div", { class: "group-title", text: "配置块" }), nav
+      ]);
+      layout.appendChild(aside);
       view.navHost = nav;
       var items = LX.el("div", { class: "form-items" });
       layout.appendChild(items);
@@ -644,13 +722,13 @@
     /* 保存 / 放弃之前，壳会调用它把 150ms 防抖里还没落下的输入先暂存。 */
     if (typeof LX.addFlusher === "function") LX.addFlusher(flushAllPending);
     LX.registerTab({
-      id: "private", title: "私聊", order: 10,
+      id: "private", title: "私聊", order: 10, icon: "chat",
       mount: mountScope("private"),
       onShow: function () {},
       isDirty: function () { return isDirtyScope("private"); }
     });
     LX.registerTab({
-      id: "group", title: "群聊", order: 20,
+      id: "group", title: "群聊", order: 20, icon: "group",
       mount: mountScope("group"),
       onShow: function () {},
       isDirty: function () { return isDirtyScope("group"); }
