@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 from ..contracts import ImageRef, Msg, SessionKey
+from ..pure.tags import normalize_quote_id
 from ..session.key import from_umo
 
 
@@ -92,17 +93,45 @@ def _ts_of(event: Any, clock: Callable[[], float]) -> float:
         return 0.0
 
 
+def _image_url_of(comp: Any) -> Optional[str]:
+    """Image 组件取 url → file → path（第一个非空字符串，strip 后用）。"""
+    for attr in ("url", "file", "path"):
+        try:
+            value = getattr(comp, attr, None)
+        except Exception:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _images_of(chain: list) -> List[ImageRef]:
     images: List[ImageRef] = []
     for comp in chain:
         try:
-            if type(comp).__name__ != "Image":
-                continue
-            url = getattr(comp, "url", "") or ""
-            if not (isinstance(url, str) and url.strip()):
-                url = getattr(comp, "file", "") or ""
-            if isinstance(url, str) and url.strip():
-                images.append(ImageRef(url.strip()))
+            if type(comp).__name__ == "Image":
+                url = _image_url_of(comp)
+                if url:
+                    images.append(ImageRef(url))
+            elif type(comp).__name__ == "Reply":
+                # 引用一张图来问"这是什么"是高频场景：收 Reply.chain 内嵌图
+                try:
+                    inner = getattr(comp, "chain", None) or []
+                except Exception:
+                    inner = []
+                try:
+                    inner_list = list(inner)
+                except TypeError:
+                    continue
+                for reply_comp in inner_list:
+                    try:
+                        if type(reply_comp).__name__ != "Image":
+                            continue
+                        url = _image_url_of(reply_comp)
+                        if url:
+                            images.append(ImageRef(url))
+                    except Exception:
+                        continue
         except Exception:
             continue
     return images
@@ -113,10 +142,16 @@ def _quote_id_of(chain: list) -> Optional[str]:
         try:
             if type(comp).__name__ != "Reply":
                 continue
-            raw = getattr(comp, "id", "")
-            text = str(raw).strip() if raw is not None else ""
-            if text:
-                return text
+            try:
+                raw = getattr(comp, "id", None)
+            except Exception:
+                continue
+            try:
+                normalized = normalize_quote_id(raw)
+            except Exception:
+                continue
+            if normalized:
+                return normalized
         except Exception:
             continue
     return None
@@ -125,22 +160,46 @@ def _quote_id_of(chain: list) -> Optional[str]:
 def _addressed_of(event: Any, chain: list, self_id: str) -> Optional[str]:
     if not _group_id_of(event):
         return "private"
+    # 第 1 层（只对群聊生效）：框架已标注 is_at_or_wake_command
+    try:
+        if _get(event, "is_at_or_wake_command", False):
+            return "at"
+    except Exception:
+        pass
     if not self_id:
         return None
     for comp in chain:
         try:
             if type(comp).__name__ == "At":
-                qq = getattr(comp, "qq", "")
-                if qq == "all" or str(qq or "") == "all":
+                # qq 取不到再取 qq_str；"all" 不算
+                try:
+                    qq_raw = getattr(comp, "qq", None) or getattr(
+                        comp, "qq_str", None) or ""
+                except Exception:
+                    qq_raw = ""
+                qq = str(qq_raw).strip() if qq_raw is not None else ""
+                if qq == "all":
                     continue
-                if str(qq) == self_id:
+                if qq == self_id:
                     return "at"
         except Exception:
             continue
     for comp in chain:
         try:
             if type(comp).__name__ == "Reply":
-                sender_id = getattr(comp, "sender_id", None)
+                try:
+                    sender = getattr(comp, "sender", None)
+                except Exception:
+                    sender = None
+                try:
+                    sender_id = (
+                        getattr(comp, "sender_user_id", None)
+                        or (getattr(sender, "id", None) if sender is not None else None)
+                        or (getattr(sender, "user_id", None) if sender is not None else None)
+                        or getattr(comp, "sender_id", None)
+                    )
+                except Exception:
+                    sender_id = None
                 if sender_id is not None and str(sender_id) == self_id:
                     return "quote"
         except Exception:
