@@ -404,10 +404,13 @@ class FrameBrowser(Browser):
                 raise PageError("点不到：iframe 里没有这个元素：%s" % selector)
             if info["w"] <= 0 or info["h"] <= 0:
                 raise PageError("点不到：元素没有尺寸（被隐藏？）：%s" % selector)
-            if info["inView"]:
+            if info["inView"] and info["hit"]:
                 break
-            # 滚轮滚到视口里：鼠标放在 iframe 中心
+            # 滚轮滚到视口中央：鼠标放在 iframe 中心。"在视口里但被固定顶栏挡住"也要滚
+            # （视口判断不算顶栏；已经在正中央还挡着才是真被挡，交给下面的 hit 检查报错）
             dy = info["cy"] - info["vh"] / 2.0
+            if info["inView"] and abs(dy) < 1.0:
+                break
             await self._mouse("mouseWheel", off["x"] + info["vw"] / 2.0,
                               off["y"] + info["vh"] / 2.0,
                               deltaX=0, deltaY=dy)

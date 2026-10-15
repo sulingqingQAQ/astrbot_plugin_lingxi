@@ -546,8 +546,10 @@ main { max-width: 1200px; margin: 0 auto; padding: var(--sp-5) var(--sp-5) 64px;
     flex-wrap: wrap; padding: 10px var(--sp-3) var(--sp-2); background: var(--surface);
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
-  .tabs { flex: 1 1 100%; order: 2; display: flex; }
-  .tabs button { min-height: 40px; padding: 0 var(--sp-3); }
+  /* 5 个标签要一屏放下：手机上不画标签图标、收紧内边距，按内容宽度均分；真放不下（极窄屏）仍可横向滚动 */
+  .tabs { flex: 1 1 100%; order: 2; display: flex; gap: 0; }
+  .tabs button { flex: 1 1 auto; justify-content: center; gap: 4px; min-height: 40px; padding: 0 var(--sp-2); }
+  .tabs button > .icon { display: none; }
   .segmented > button { min-height: 40px; }
   .savebar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; margin-left: 0;

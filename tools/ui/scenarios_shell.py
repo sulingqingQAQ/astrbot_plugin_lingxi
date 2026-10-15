@@ -172,7 +172,31 @@ async def _chk_toast_mobile(browser, base):
     await browser.set_viewport(1440, 900)
 
 
-UI8_CHECKS = (_chk_banner_expand, _chk_contrast, _chk_toast_mobile)
+async def _chk_tabs_mobile(browser, base):
+    # ---- 手机宽度：5 个标签一屏放下，不用横向滚（390 / 360 两档常见宽度）----
+    for width in (390, 360):
+        await browser.set_viewport(width, 844, mobile=True)
+        await browser.goto(base + "/", wait_ms=1000)
+        await browser.wait_for("document.querySelectorAll('#tabs button').length >= 5")
+        info = await browser.eval(
+            "(function(){var bar=document.querySelector('#tabs');var bs=bar.querySelectorAll('button');"
+            "var last=bs[bs.length-1].getBoundingClientRect();"
+            "var ic=bar.querySelectorAll('button > .icon');var shown=0;"
+            "ic.forEach(function(i){if(i.getBoundingClientRect().width>0)shown++;});"
+            "var minh=1e9;bs.forEach(function(b){minh=Math.min(minh,b.getBoundingClientRect().height);});"
+            "return {n:bs.length,sw:bar.scrollWidth,cw:bar.clientWidth,right:last.right,vw:window.innerWidth,"
+            "icons:shown,minh:minh};})()")
+        print("手机 %d 宽标签条：%r" % (width, info))
+        assert info["n"] >= 5, "标签数不对：%r" % (info,)
+        assert info["sw"] <= info["cw"] + 1, "%d 宽下标签条还要横向滚：%r" % (width, info)
+        assert info["right"] <= info["vw"] + 0.5, "%d 宽下最后一个标签被挤出屏幕：%r" % (width, info)
+        assert info["icons"] == 0, "手机上不该画标签图标：%r" % (info,)
+        assert info["minh"] >= 40, "标签触控高度 < 40：%r" % (info,)
+    print("手机标签条一屏放下 OK")
+    await browser.set_viewport(1440, 900)
+
+
+UI8_CHECKS = (_chk_banner_expand, _chk_contrast, _chk_toast_mobile, _chk_tabs_mobile)
 
 
 async def _extra_ui8(browser, base):
