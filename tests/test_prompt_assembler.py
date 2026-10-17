@@ -327,7 +327,9 @@ class SystemTailFilesTest(unittest.TestCase):
         trig = _trig(reason="事由{{current_time}}。")
         out = asm.build(_key(), trig, _hist(), {},
                         {"trigger.next_reply_enabled": False,
-                         "context.status_note_enabled": False}).system_tail
+                         "context.status_note_enabled": False,
+                         "prompt.guard_common": False,
+                         "prompt.guard_group": False}).system_tail
         # 缺省无文件 + 两个可选说明关闭 → 只剩标签说明一块
         self.assertNotIn("[名词表]", out)
         self.assertNotIn("[成员档案]", out)
@@ -392,6 +394,97 @@ class SystemTailHintsTest(unittest.TestCase):
         self.assertNotIn("情景便签", out)
         self.assertNotIn("别写进长期记忆", out)  # 边界句只在回注，不在 system
         self.assertNotIn("话题翻篇", out)
+
+
+class Txt1GuardsWiringTest(unittest.TestCase):
+    """TXT-1：守则块接线（位置 / 范围 / 豁免句 / 开关）。"""
+
+    def _tail(self, cfg, key=None, source=Source.DIRECT, silent_ok=False):
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。", source=source,
+                     silent_ok=silent_ok)
+        return asm.build(key or _key(), trig, _hist(), {}, cfg).system_tail
+
+    def _gkey(self):
+        return SessionKey(scope=Scope.GROUP, id="合成群")
+
+    def test_common_after_status_hint(self):
+        out = self._tail({})
+        blocks = out.split("\n\n")
+        status_i = next(i for i, b in enumerate(blocks) if "chat_status" in b)
+        common_i = next(i for i, b in enumerate(blocks) if "[行为守则]" in b)
+        self.assertEqual(common_i, status_i + 1)
+
+    def test_old_block_order_unchanged(self):
+        out = self._tail({"prompt.style_text": "合成风格",
+                          "prompt.glossary_text": "合成词 = 合成解释",
+                          "prompt.members_text": "合成成员"})
+        blocks = out.split("\n\n")
+        idx = lambda frag: next(i for i, b in enumerate(blocks) if frag in b)
+        order = ["合成风格", "[名词表]", "[成员档案]", "Quote",
+                 "next_reply", "chat_status", "[行为守则]"]
+        got = [idx(f) for f in order]
+        self.assertEqual(got, sorted(got))
+
+    def test_no_group_block_in_private(self):
+        self.assertNotIn("[群聊守则]", self._tail({}))
+
+    def test_group_block_only_in_group_scope(self):
+        out = self._tail({}, key=self._gkey())
+        blocks = out.split("\n\n")
+        self.assertIn("[群聊守则]", out)
+        status_i = next(i for i, b in enumerate(blocks) if "chat_status" in b)
+        group_i = next(i for i, b in enumerate(blocks) if "[群聊守则]" in b)
+        self.assertGreater(group_i, status_i)
+
+    def test_group_switch_off(self):
+        out = self._tail({"prompt.guard_group": False}, key=self._gkey())
+        self.assertNotIn("[群聊守则]", out)
+        self.assertIn("[行为守则]", out)
+
+    def test_common_switch_off(self):
+        out = self._tail({"prompt.guard_common": False})
+        self.assertNotIn("[行为守则]", out)
+
+    def test_silent_ok_adds_sixth_line_in_tail(self):
+        out = self._tail({}, silent_ok=True)
+        self.assertIn("不开口也是正常结果", out)
+        self.assertIn("这次如果你觉得不该开口，就只输出 <refuse/>", out)
+
+    def test_idle_source_adds_seventh_line_in_tail(self):
+        out = self._tail({}, source=Source.IDLE)
+        self.assertIn("别重复你上次主动说过的话题或开场", out)
+        out2 = self._tail({}, source=Source.DIRECT)
+        self.assertNotIn("别重复你上次主动说过的话题或开场", out2)
+
+    def test_exempt_right_after_style_block(self):
+        out = self._tail({"prompt.style_text": "合成风格文本"})
+        blocks = out.split("\n\n")
+        style_i = next(i for i, b in enumerate(blocks) if "合成风格文本" in b)
+        self.assertIn("优先把信息讲完整", blocks[style_i + 1])
+
+    def test_exempt_from_style_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "style.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("文件里的合成风格")
+            out = self._tail({"prompt.style_file": p})
+            self.assertIn("优先把信息讲完整", out)
+
+    def test_no_exempt_without_style(self):
+        self.assertNotIn("优先把信息讲完整", self._tail({}))
+
+    def test_exempt_switch_off(self):
+        out = self._tail({"prompt.style_text": "合成风格文本",
+                          "prompt.style_exempt": False})
+        self.assertNotIn("优先把信息讲完整", out)
+        self.assertIn("合成风格文本", out)
+
+    def test_style_empty_string_means_no_style(self):
+        # 与 assembler 现有读取方式一致：空白文本框算无风格
+        out = self._tail({"prompt.style_text": "   "})
+        self.assertNotIn("优先把信息讲完整", out)
 
 
 class ModelRoundsTest(unittest.TestCase):

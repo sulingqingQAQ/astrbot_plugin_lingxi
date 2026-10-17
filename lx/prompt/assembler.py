@@ -17,9 +17,10 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from ..contracts import Assembled, HistoryView, ResolvedConfig, SessionKey, Source, Trigger
+from ..contracts import Assembled, HistoryView, ResolvedConfig, Scope, SessionKey, Source, Trigger
 from ..history.render import format_line
 from ..pure.tags import build_interaction_instructions
+from .guards import STYLE_EXEMPT, build_guard_blocks
 from .template import format_current_time, render_template
 
 _TZE = timezone(timedelta(hours=8))
@@ -118,7 +119,7 @@ class DefaultAssembler:
               status: Mapping[str, Any], cfg: ResolvedConfig) -> Assembled:
         try:
             user_text = self._build_user_text(trigger, hist, status, cfg)
-            system_tail = self._build_system_tail(trigger, cfg)
+            system_tail = self._build_system_tail(key, trigger, cfg)
             model_rounds = self._build_model_rounds(cfg)
             return Assembled(system_tail=system_tail, user_text=user_text,
                              model_rounds=model_rounds)
@@ -216,11 +217,14 @@ class DefaultAssembler:
         parts.append(box.strip() if isinstance(box, str) else "")
         return "\n\n".join(p for p in parts if p)
 
-    def _build_system_tail(self, trigger: Trigger, cfg: ResolvedConfig) -> str:
+    def _build_system_tail(self, key: SessionKey, trigger: Trigger, cfg: ResolvedConfig) -> str:
         blocks: list[str] = []
         style = self._file_and_text(cfg, "prompt.style_file", "prompt.style_text")
         if style:
             blocks.append(style)
+            # TXT-1 L9 风格豁免句：紧跟风格块之后；风格为空不加。
+            if bool(cfg.get("prompt.style_exempt", True)):
+                blocks.append(STYLE_EXEMPT)
         glossary = self._file_and_text(cfg, "prompt.glossary_file", "prompt.glossary_text")
         if glossary:
             blocks.append(f"[名词表]\n{glossary}")
@@ -244,6 +248,19 @@ class DefaultAssembler:
         if bool(cfg.get("context.status_note_enabled", True)) and bool(
                 cfg.get("context.status_note_hint", True)):
             blocks.append(self._CHAT_STATUS_HINT)
+        # TXT-1 L2–L12 守则块：在状态说明之后追加；其余拼装顺序不变。
+        try:
+            is_group = key.scope == Scope.GROUP
+        except Exception:
+            is_group = False
+        blocks.extend(build_guard_blocks(
+            common=bool(cfg.get("prompt.guard_common", True)),
+            group=bool(cfg.get("prompt.guard_group", True)),
+            silent_ok=bool(trigger.silent_ok),
+            source=trigger.source,
+            is_group=is_group,
+            log=self._log,
+        ))
         return "\n\n".join(b for b in blocks if b)
 
     def _build_model_rounds(self, cfg: ResolvedConfig) -> Optional[int]:

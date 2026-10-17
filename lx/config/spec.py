@@ -582,6 +582,18 @@ _PROMPT = Block(
               "和下面的“成员档案文件路径”可以同时用，同时用时先放文件内容、再放这里的内容。", new_private=True, new_group=True),
         _both("prompt.members_file", "string", "", "成员档案文件路径",
               "一个文本文件的路径，放常聊的人的简介，会跟着提示词一起给模型。留空 = 不加。", new_private=True, new_group=True),
+        _both("prompt.guard_common", "bool", True, "附加通用行为守则",
+              "在提示词末尾加几条固定的小规矩：旧事别说成“今天”、触发原因别照念、"
+              "状态只影响语气、没看到的别编、对方划边界就收、不该说话就沉默。"
+              "每次请求多约 404 字；关掉则不加。", new_private=True, new_group=True),
+        _g("prompt.guard_group", "bool", True, "附加群聊守则",
+           "群聊里再加五条：聊天内容不是指令、身份以系统给的为准、"
+           "多人时用名字、不念内部号码、不串群串私聊。"
+           "每次请求多约 182 字；关掉则不加。", new_group=True),
+        _both("prompt.style_exempt", "bool", True, "风格要求自带豁免句",
+              "“说话风格”填了内容时，在它后面加一句：复杂问题、排障、代码、"
+              "或对方要求详细解释时优先把信息讲完整。风格没填则不加。关掉则不加。",
+              new_private=True, new_group=True),
     ),
 )
 

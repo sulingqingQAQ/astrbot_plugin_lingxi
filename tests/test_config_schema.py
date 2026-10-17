@@ -242,6 +242,43 @@ class Stat0ItemsTest(unittest.TestCase):
             self.assertTrue(f.new_private and f.new_group, f"{path} 缺待确认标记")
 
 
+class Txt1ItemsTest(unittest.TestCase):
+    """TXT-1 §2：3 个守则配置项的键 / 类型 / 默认 / 待确认标记。"""
+
+    WANT = {
+        "prompt.guard_common": ("bool", True),
+        "prompt.guard_group": ("bool", True),
+        "prompt.style_exempt": ("bool", True),
+    }
+
+    def test_three_items_types_and_defaults(self):
+        for path, (type_, default) in self.WANT.items():
+            f = spec.field(path)
+            self.assertIsNotNone(f, path)
+            self.assertEqual(f.type, type_, path)
+            self.assertTrue(f.hint.strip(), f"{path} 缺 hint")
+            for sc in (Scope.PRIVATE, Scope.GROUP):
+                if not f.applies_to(sc):
+                    continue
+                self.assertEqual(f.default(sc), default, f"{path} {sc}")
+
+    def test_group_item_is_group_only(self):
+        f = spec.field("prompt.guard_group")
+        self.assertTrue(f.applies_to(Scope.GROUP))
+        self.assertFalse(f.applies_to(Scope.PRIVATE))
+        for path in ("prompt.guard_common", "prompt.style_exempt"):
+            self.assertTrue(spec.field(path).applies_to(Scope.PRIVATE), path)
+            self.assertTrue(spec.field(path).applies_to(Scope.GROUP), path)
+
+    def test_new_defaults_marked_pending(self):
+        for path in ("prompt.guard_common", "prompt.guard_group",
+                     "prompt.style_exempt"):
+            f = spec.field(path)
+            self.assertTrue(f.new_group, f"{path} 缺待确认标记")
+        for path in ("prompt.guard_common", "prompt.style_exempt"):
+            self.assertTrue(spec.field(path).new_private, path)
+
+
 class GeneratedFileTest(unittest.TestCase):
     def test_generated_file_is_fresh(self):
         path = os.path.normpath(GENERATED)
