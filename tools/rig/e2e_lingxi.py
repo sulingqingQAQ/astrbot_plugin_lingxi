@@ -33,7 +33,7 @@ from tools.rig.fake_llm import FakeLLM  # noqa: E402
 from tools.rig.fake_napcat import FakeNapCat  # noqa: E402
 from tools.rig.rig_config import install_plugin, prepare_root  # noqa: E402
 
-ROOT = r"F:\Gemini\agent临时测试目录\dsh\astrbot_rig"
+ROOT = r"F:\Gemini\agent临时测试目录\claude\astrbot_rig_lingxi"  # 我自己的专区（原先误写在 dsh 专区下）
 BASE_CMD_CONFIG = (
     r"F:\Gemini\agent临时测试目录\claude\astrbot_test_root\data\cmd_config.json"
 )

@@ -141,9 +141,14 @@ class StatusNotes:
                     old = status.get(name)
                     old_text = old.get("text") if isinstance(old, dict) else None
                     if isinstance(old, dict) and old_text == new:
-                        # 文本相同：只续命，written_at 不动（备忘无 confirmed_at，保持原样）
                         if name in ("mood", "state"):
+                            # 心情 / 状态原样重写：只续命，written_at 不动，"写于"保持诚实
                             old["confirmed_at"] = now
+                        else:
+                            # 备忘原样重写 = 模型明说"这事还挂着"（提示词就是这么教的）：
+                            # 按重写算，计数和写入时间都归零，否则模型照做了备忘还是会翻篇
+                            old["written_at"] = now
+                            old["msgs_since"] = 0
                     elif name == "memo":
                         status[name] = {"text": new, "written_at": now,
                                         "msgs_since": 0}

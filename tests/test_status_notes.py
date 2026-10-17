@@ -124,15 +124,33 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual(seg["written_at"], 1000000.0)
         self.assertEqual(seg["confirmed_at"], 1000000.0 + 3600.0)
 
-    def test_memo_same_text_keeps_written_and_count(self):
+    def test_memo_same_text_is_a_rewrite_and_resets_count_and_age(self):
+        # 提示词教模型"还需要的备忘就重写一遍"：原样重写必须算重写，不然模型照做了备忘还是翻篇
         self.c.notes.register_from_buffer(_key(), "备忘：合成事")
         self.c.notes.on_message(_key())
         self.c.notes.on_message(_key())
         self.c.clock.now += 60.0
         self.assertTrue(self.c.notes.register_from_buffer(_key(), "备忘：合成事"))
         seg = self.c.store.get(_key()).status["memo"]
-        self.assertEqual(seg["written_at"], 1000000.0)
-        self.assertEqual(seg["msgs_since"], 2)
+        self.assertEqual(seg["text"], "合成事")
+        self.assertEqual(seg["written_at"], 1000000.0 + 60.0)
+        self.assertEqual(seg["msgs_since"], 0)
+
+    def test_memo_same_text_rewrite_keeps_it_alive_past_the_limits(self):
+        cfg = {"context.status_memo_messages": 3, "context.status_memo_hours": 1}
+        c = _Ctx(cfg=cfg)
+        try:
+            c.notes.register_from_buffer(_key(), "备忘：合成事")
+            for _ in range(2):
+                c.notes.on_message(_key())
+            c.clock.now += 1800.0
+            c.notes.register_from_buffer(_key(), "备忘：合成事")  # 原样重写
+            for _ in range(2):
+                c.notes.on_message(_key())
+            c.clock.now += 1800.0  # 距首次写入 1 小时 + 4 条消息，但距重写只有 30 分钟 / 2 条
+            self.assertIn("备忘：合成事", c.notes.note_text(_key()))
+        finally:
+            c.cleanup()
 
     def test_memo_new_text_resets_count(self):
         self.c.notes.register_from_buffer(_key(), "备忘：合成旧事")
