@@ -436,22 +436,78 @@
             }
           },
           "status_note_enabled": {
-            "description": "允许模型留状态便签",
+            "description": "允许模型记状态块",
             "type": "bool",
             "default": true,
-            "hint": "允许模型用 <chat_status> 给自己留一条情景便签，下次回复时原样带回；便签对应的消息滚出聊天记录后自动作废。关掉则不留便签。"
+            "hint": "心情 / 状态 / 备忘，下次回复时带回；关掉则不记。"
           },
           "status_note_hint": {
-            "description": "提示模型可以留便签",
+            "description": "提示模型可以记状态",
             "type": "bool",
             "default": true,
-            "hint": "在提示词里说明便签怎么写。关掉后模型几乎不会主动写。"
+            "hint": "在提示词里说明状态块怎么写；关掉后模型几乎不会主动写。"
           },
           "status_persistence": {
-            "description": "便签保存到磁盘",
+            "description": "状态块保存到磁盘",
             "type": "bool",
-            "default": false,
-            "hint": "开启后便签写入磁盘，重启后还在；关掉则重启就忘。"
+            "default": true,
+            "hint": "开启后三段文字、写入时间和计数都写入磁盘，重启后还在；关掉则重启就忘。"
+          },
+          "status_mood_hours": {
+            "description": "心情保留多久（小时）",
+            "type": "int",
+            "default": 6,
+            "hint": "这么久没开口说话，心情回到下面的初始心情；每次真正说话重新计时；0 = 不按时间过期。",
+            "slider": {
+              "min": 0,
+              "max": 72,
+              "step": 1
+            }
+          },
+          "status_state_hours": {
+            "description": "状态保留多久（小时）",
+            "type": "int",
+            "default": 3,
+            "hint": "这么久没开口说话，状态回到下面的初始状态；每次真正说话重新计时；0 = 不按时间过期。",
+            "slider": {
+              "min": 0,
+              "max": 72,
+              "step": 1
+            }
+          },
+          "status_memo_messages": {
+            "description": "备忘过多少条消息算翻篇",
+            "type": "int",
+            "default": 200,
+            "hint": "写下备忘后，会话里又来了这么多条别人的消息就清掉；只有重写备忘才重新计数，模型开口说话不续命；0 = 不按条数。",
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 10
+            }
+          },
+          "status_memo_hours": {
+            "description": "备忘最长保留（小时）",
+            "type": "int",
+            "default": 24,
+            "hint": "从写下备忘算起，超过这么久就清掉；0 = 不限。",
+            "slider": {
+              "min": 0,
+              "max": 168,
+              "step": 1
+            }
+          },
+          "status_mood_initial": {
+            "description": "初始心情",
+            "type": "string",
+            "default": "",
+            "hint": "心情超时后回到这个；留空 = 超时后没有心情那一行。"
+          },
+          "status_state_initial": {
+            "description": "初始状态",
+            "type": "string",
+            "default": "",
+            "hint": "状态超时后回到这个；留空 = 超时后没有状态那一行。"
           },
           "image_budget_count": {
             "description": "原图张数预算",
@@ -1479,22 +1535,78 @@
             }
           },
           "status_note_enabled": {
-            "description": "允许模型留状态便签",
+            "description": "允许模型记状态块",
             "type": "bool",
             "default": true,
-            "hint": "允许模型用 <chat_status> 给自己留一条情景便签，下次回复时原样带回；便签对应的消息滚出聊天记录后自动作废。关掉则不留便签。"
+            "hint": "心情 / 状态 / 备忘，下次回复时带回；关掉则不记。"
           },
           "status_note_hint": {
-            "description": "提示模型可以留便签",
+            "description": "提示模型可以记状态",
             "type": "bool",
             "default": true,
-            "hint": "在提示词里说明便签怎么写。关掉后模型几乎不会主动写。"
+            "hint": "在提示词里说明状态块怎么写；关掉后模型几乎不会主动写。"
           },
           "status_persistence": {
-            "description": "便签保存到磁盘",
+            "description": "状态块保存到磁盘",
             "type": "bool",
-            "default": false,
-            "hint": "开启后便签写入磁盘，重启后还在；关掉则重启就忘。"
+            "default": true,
+            "hint": "开启后三段文字、写入时间和计数都写入磁盘，重启后还在；关掉则重启就忘。"
+          },
+          "status_mood_hours": {
+            "description": "心情保留多久（小时）",
+            "type": "int",
+            "default": 6,
+            "hint": "这么久没开口说话，心情回到下面的初始心情；每次真正说话重新计时；0 = 不按时间过期。",
+            "slider": {
+              "min": 0,
+              "max": 72,
+              "step": 1
+            }
+          },
+          "status_state_hours": {
+            "description": "状态保留多久（小时）",
+            "type": "int",
+            "default": 3,
+            "hint": "这么久没开口说话，状态回到下面的初始状态；每次真正说话重新计时；0 = 不按时间过期。",
+            "slider": {
+              "min": 0,
+              "max": 72,
+              "step": 1
+            }
+          },
+          "status_memo_messages": {
+            "description": "备忘过多少条消息算翻篇",
+            "type": "int",
+            "default": 200,
+            "hint": "写下备忘后，会话里又来了这么多条别人的消息就清掉；只有重写备忘才重新计数，模型开口说话不续命；0 = 不按条数。",
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 10
+            }
+          },
+          "status_memo_hours": {
+            "description": "备忘最长保留（小时）",
+            "type": "int",
+            "default": 24,
+            "hint": "从写下备忘算起，超过这么久就清掉；0 = 不限。",
+            "slider": {
+              "min": 0,
+              "max": 168,
+              "step": 1
+            }
+          },
+          "status_mood_initial": {
+            "description": "初始心情",
+            "type": "string",
+            "default": "",
+            "hint": "心情超时后回到这个；留空 = 超时后没有心情那一行。"
+          },
+          "status_state_initial": {
+            "description": "初始状态",
+            "type": "string",
+            "default": "",
+            "hint": "状态超时后回到这个；留空 = 超时后没有状态那一行。"
           },
           "image_budget_count": {
             "description": "原图张数预算",

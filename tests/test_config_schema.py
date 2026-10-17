@@ -208,6 +208,40 @@ class OverridesFieldOptionTest(unittest.TestCase):
         self.assertNotEqual(node["type"], "template_list")
 
 
+class Stat0ItemsTest(unittest.TestCase):
+    """STAT-0 §7：9 个状态块配置项的键 / 类型 / 默认 / 待确认标记。"""
+
+    WANT = {
+        "context.status_note_enabled": ("bool", True),
+        "context.status_note_hint": ("bool", True),
+        "context.status_persistence": ("bool", True),
+        "context.status_mood_hours": ("int", 6),
+        "context.status_state_hours": ("int", 3),
+        "context.status_memo_messages": ("int", 200),
+        "context.status_memo_hours": ("int", 24),
+        "context.status_mood_initial": ("string", ""),
+        "context.status_state_initial": ("string", ""),
+    }
+
+    def test_nine_items_types_and_defaults(self):
+        for path, (type_, default) in self.WANT.items():
+            f = spec.field(path)
+            self.assertIsNotNone(f, path)
+            self.assertEqual(f.type, type_, path)
+            self.assertTrue(f.hint.strip(), f"{path} 缺 hint")
+            for sc in (Scope.PRIVATE, Scope.GROUP):
+                self.assertEqual(f.default(sc), default, f"{path} {sc}")
+
+    def test_new_defaults_marked_pending(self):
+        # 6 个新增 + 存盘（默认翻转）两边都待确认；旧有两项沿用原来的单边标记
+        for path in ("context.status_persistence",
+                     "context.status_mood_hours", "context.status_state_hours",
+                     "context.status_memo_messages", "context.status_memo_hours",
+                     "context.status_mood_initial", "context.status_state_initial"):
+            f = spec.field(path)
+            self.assertTrue(f.new_private and f.new_group, f"{path} 缺待确认标记")
+
+
 class GeneratedFileTest(unittest.TestCase):
     def test_generated_file_is_fresh(self):
         path = os.path.normpath(GENERATED)
