@@ -451,6 +451,11 @@ class Txt1GuardsWiringTest(unittest.TestCase):
         self.assertIn("不开口也是正常结果", out)
         self.assertIn("这次如果你觉得不该开口，就只输出 <refuse/>", out)
 
+    def test_silent_not_ok_has_no_sixth_line_in_tail(self):
+        out = self._tail({}, silent_ok=False)
+        self.assertNotIn("不开口也是正常结果", out)
+        self.assertIn("[行为守则]", out)
+
     def test_idle_source_adds_seventh_line_in_tail(self):
         out = self._tail({}, source=Source.IDLE)
         self.assertIn("别重复你上次主动说过的话题或开场", out)

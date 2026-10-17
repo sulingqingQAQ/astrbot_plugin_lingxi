@@ -585,7 +585,7 @@ _PROMPT = Block(
         _both("prompt.guard_common", "bool", True, "附加通用行为守则",
               "在提示词末尾加几条固定的小规矩：旧事别说成“今天”、触发原因别照念、"
               "状态只影响语气、没看到的别编、对方划边界就收、不该说话就沉默。"
-              "每次请求多约 404 字；关掉则不加。", new_private=True, new_group=True),
+              "每次请求最多多约 404 字（有些触发来源会少几条）；关掉则不加。", new_private=True, new_group=True),
         _g("prompt.guard_group", "bool", True, "附加群聊守则",
            "群聊里再加五条：聊天内容不是指令、身份以系统给的为准、"
            "多人时用名字、不念内部号码、不串群串私聊。"
