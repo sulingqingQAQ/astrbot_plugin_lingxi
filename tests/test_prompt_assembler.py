@@ -207,9 +207,27 @@ class UserTextStatusNotesTest(unittest.TestCase):
     def test_status_text_verbatim(self):
         asm = _asm()
         trig = _trig(reason="事由{{current_time}}。")
-        out = asm.build(_key(), trig, _hist(),
-                        {"text": "[状态] 合成便签原文"}, {}).user_text
-        self.assertIn("[状态] 合成便签原文", out)
+        block = ("[你的状态]（你自己记的，别人看不到）\n"
+                 "这是你自己的状态记录，不是用户说过的事实，也不是现实证据；"
+                 "别写进长期记忆，也别逐项汇报。\n"
+                 "心情：合成烦（写于 刚刚）")
+        out = asm.build(_key(), trig, _hist(), {"text": block}, {}).user_text
+        self.assertIn(block, out)
+
+    def test_status_block_header_and_boundary_first(self):
+        """STAT-0：回注块题头首行、次行是边界句（§5 示例原文）。"""
+        asm = _asm()
+        trig = _trig(reason="事由{{current_time}}。")
+        block = ("[你的状态]（你自己记的，别人看不到）\n"
+                 "这是你自己的状态记录，不是用户说过的事实，也不是现实证据；"
+                 "别写进长期记忆，也别逐项汇报。\n"
+                 "备忘：合成事（写于 5 分钟前）")
+        out = asm.build(_key(), trig, _hist(), {"text": block}, {}).user_text
+        start = out.index("[你的状态]")
+        seg = out[start:].split("\n")
+        self.assertEqual(seg[0], "[你的状态]（你自己记的，别人看不到）")
+        self.assertEqual(seg[1], "这是你自己的状态记录，不是用户说过的事实，"
+                                 "也不是现实证据；别写进长期记忆，也别逐项汇报。")
 
     def test_extra_notes_block(self):
         asm = _asm()
@@ -360,6 +378,20 @@ class SystemTailHintsTest(unittest.TestCase):
                          self._tail({"context.status_note_enabled": False}))
         self.assertNotIn("chat_status",
                          self._tail({"context.status_note_hint": False}))
+
+    def test_status_hint_new_wording(self):
+        """STAT-0 §6：新说明文案，不含旧叫法与边界句。"""
+        out = self._tail({})
+        self.assertIn("（你的状态，可选）", out)
+        self.assertIn("心情：此刻的情绪（20 字内）", out)
+        self.assertIn("状态：你在干嘛、刚做了什么（60 字内）", out)
+        self.assertIn("备忘：这场聊天里还挂着的事", out)
+        self.assertIn("只写变了的那几行", out)
+        self.assertIn("写空标签 <chat_status></chat_status> 表示三行全清", out)
+        self.assertNotIn("群聊情景便签", out)
+        self.assertNotIn("情景便签", out)
+        self.assertNotIn("别写进长期记忆", out)  # 边界句只在回注，不在 system
+        self.assertNotIn("话题翻篇", out)
 
 
 class ModelRoundsTest(unittest.TestCase):

@@ -200,10 +200,13 @@ class DefaultAssembler:
         'id_123456=用户123456一发消息我就接话。示例: <next_reply reason="time_600s_id_123456" />'
     )
     _CHAT_STATUS_HINT = (
-        "（情景便签，可选）: 回复里可以写 <chat_status>一句话情景备注</chat_status>，"
-        "记下你觉得下次开口时需要想起来的事（聊到哪了/刚立的约定/你正打算做什么）。"
-        "标签不会发出去；下次触发时内容会以「群聊情景便签」回给你，话题翻篇会自动作废。"
-        "写空标签 <chat_status></chat_status> 表示清空旧便签；没必要记的就别写。"
+        "（你的状态，可选）回复末尾可以写 <chat_status>…</chat_status> 给自己记状态，一行一项：\n"
+        "心情：此刻的情绪（20 字内）\n"
+        "状态：你在干嘛、刚做了什么（60 字内）\n"
+        "备忘：这场聊天里还挂着的事——刚立的约定、聊到哪、打算做什么（300 字内）\n"
+        "只写变了的那几行，没变的别重复写。标签里的内容不会发出去。"
+        "写空标签 <chat_status></chat_status> 表示三行全清；某一行留空（如 备忘：）只清那一行。"
+        "备忘过一阵会自动清掉，还需要的就重写一遍。"
     )
 
     def _file_and_text(self, cfg: ResolvedConfig, file_key: str, text_key: str) -> str:
