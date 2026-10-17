@@ -43,6 +43,17 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(r.parts, ["合成正文"])
         self.assertIn("strip_tag:chat_status", r.actions)
 
+    def test_strip_chat_status_multiline_and_bare(self):
+        """STAT-0：多行正文整段剥掉，裸标签也被剥。"""
+        r = guard_output(
+            "合成<chat_status>\n心情：合成烦\n状态：合成忙\n备忘：合成事\n</chat_status>正文",
+            GuardRules(),
+        )
+        self.assertEqual(r.parts, ["合成正文"])
+        self.assertIn("strip_tag:chat_status", r.actions)
+        r2 = guard_output("合成正文</chat_status>尾巴", GuardRules())
+        self.assertNotIn("chat_status", "".join(r2.parts))
+
     def test_P1_8_non_self_closed_next_reply(self):
         """P1-8 情形 1：漏斜杠 <next_reply reason="..." > 不得泄漏。"""
         r = guard_output(

@@ -169,6 +169,10 @@ class Brain:
         except Exception as e:
             _safe_log(self._log, "[brain] observe 记历史失败：%r" % (e,))
         try:
+            self._notes.on_message(key)
+        except Exception as e:
+            _safe_log(self._log, "[brain] observe 状态计数失败：%r" % (e,))
+        try:
             self._ticker.notify_user_message(key)
         except Exception as e:
             _safe_log(self._log, "[brain] observe 通知 ticker 失败：%r" % (e,))
@@ -342,6 +346,10 @@ class Brain:
                             self._store.get(key).cooldown_until = now + seconds
                         except Exception as e:
                             _safe_log(self._log, "[brain] report 设冷却失败：%r" % (e,))
+                    try:
+                        self._notes.confirm(key)
+                    except Exception as e:
+                        _safe_log(self._log, "[brain] report 状态确认失败：%r" % (e,))
         except Exception as e:
             _safe_log(self._log, "[brain] report 送达处理失败：%r" % (e,))
         # f. 沉默：只写一行 log

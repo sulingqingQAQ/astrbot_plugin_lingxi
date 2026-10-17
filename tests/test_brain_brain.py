@@ -122,8 +122,12 @@ class FakeNotes:
     def __init__(self, text="合成便签"):
         self._text = text
         self.registered = []
+        self.on_messages = []
+        self.confirmed = []
         self.fail_note = False
         self.fail_register = False
+        self.fail_on_message = False
+        self.fail_confirm = False
 
     def note_text(self, key):
         if self.fail_note:
@@ -135,6 +139,16 @@ class FakeNotes:
             raise RuntimeError("合成便签登记故障")
         self.registered.append((key, text))
         return True
+
+    def on_message(self, key):
+        if self.fail_on_message:
+            raise RuntimeError("合成状态计数故障")
+        self.on_messages.append(key)
+
+    def confirm(self, key):
+        if self.fail_confirm:
+            raise RuntimeError("合成状态确认故障")
+        self.confirmed.append(key)
 
 
 class FakeNextReply:
@@ -194,6 +208,25 @@ class ObserveTest(unittest.TestCase):
         b.observe(_key(), _msg(is_bot=True))
         self.assertEqual(args["history"].recorded, [])
         self.assertEqual(args["ticker"].calls, [])
+
+    def test_user_message_triggers_on_message(self):
+        b, args, _ = _brain()
+        key = _key()
+        b.observe(key, _msg())
+        self.assertEqual(args["notes"].on_messages, [key])
+
+    def test_bot_message_no_on_message(self):
+        b, args, _ = _brain()
+        b.observe(_key(), _msg(is_bot=True))
+        self.assertEqual(args["notes"].on_messages, [])
+
+    def test_on_message_failure_does_not_block_rest(self):
+        b, args, _ = _brain()
+        args["notes"].fail_on_message = True
+        key = _key()
+        b.observe(key, _msg())
+        self.assertEqual(len(args["history"].recorded), 1)
+        self.assertEqual(args["ticker"].calls, [("user", key)])
 
     def test_mute_keyword_hit(self):
         cfg = DictCfg({"gate.mute_keywords": ["muteme"], "gate.mute_minutes": 30})
@@ -385,6 +418,26 @@ class ReportTest(unittest.TestCase):
         b, args, _ = _brain()
         b.report(_key(), _trigger(), _parsed(text="合成回复", note="合成便签正文"), True)
         self.assertEqual(len(args["notes"].registered), 1)
+
+    def test_delivered_true_confirms(self):
+        b, args, _ = _brain()
+        key = _key()
+        b.report(key, _trigger(), _parsed(text="合成回复"), True)
+        self.assertEqual(args["notes"].confirmed, [key])
+
+    def test_not_delivered_no_confirm(self):
+        for delivered in (False, None):
+            b, args, _ = _brain()
+            parsed = _parsed(text="合成回复", silent=(delivered is False))
+            b.report(_key(), _trigger(), parsed, delivered)
+            self.assertEqual(args["notes"].confirmed, [])
+
+    def test_confirm_failure_isolated(self):
+        b, args, logs = _brain()
+        args["notes"].fail_confirm = True
+        out = b.report(_key(), _trigger(), _parsed(text="合成回复"), True)
+        self.assertTrue(out.delivered)
+        self.assertTrue(logs)
 
     def test_empty_next_reason_skips_register(self):
         b, args, _ = _brain()
