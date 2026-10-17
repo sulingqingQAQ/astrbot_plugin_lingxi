@@ -408,10 +408,56 @@ async def _sc_F3(ctx):
     assert reqs2 == [], "期望假 LLM 无请求，实际 %d 条" % len(reqs2)
 
 
+async def _sc_S(ctx):
+    """S 状态块端到端（STAT-0 §9）：第一轮回复带三段标签 -> 发出去的 QQ 消息无标签；
+    第二轮请求的用户侧文本含 [你的状态] 回注；status.json 落盘。"""
+    first = ("知道啦。<chat_status>\n心情：有点困\n状态：刚整理完书签\n"
+             "备忘：和朋友约了周末打球\n</chat_status>")
+    ctx.llm.script([first, "第二轮回复"])
+    await ctx.napcat.send_private(USER_IN, "在吗")
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert texts and "知道啦" in texts[0], (
+        "期望第一轮发出'知道啦'，实际=%r" % (texts,))
+    assert all("<chat_status>" not in t and "</chat_status>" not in t for t in texts), (
+        "期望发出去的 QQ 消息里没有状态标签，实际=%r" % (texts,))
+
+    await asyncio.sleep(2)  # 与第一轮隔开，避免被聚合成同一轮
+    ctx.napcat.clear()
+    await ctx.napcat.send_private(USER_IN, "然后呢")
+    sent2 = await ctx.napcat.wait_sent(1, 30)
+    texts2 = [s["text"] for s in sent2]
+    assert texts2 and "第二轮回复" in texts2[0], (
+        "期望第二轮发出'第二轮回复'，实际=%r" % (texts2,))
+
+    reqs = ctx.llm.requests()
+    assert len(reqs) == 2, "期望假 LLM 恰收到 2 条请求，实际 %d" % len(reqs)
+    users = _user_texts(reqs[1].get("messages"))
+    assert any("[你的状态]" in t for t in users), (
+        "期望第二轮请求含 [你的状态] 回注，实际 user 文本尾=%r"
+        % ([t[-200:] for t in users],))
+    assert any("这是你自己的状态记录" in t for t in users), (
+        "期望第二轮请求含边界句，实际 user 文本尾=%r"
+        % ([t[-200:] for t in users],))
+    for frag in ("心情：有点困", "状态：刚整理完书签", "备忘：和朋友约了周末打球"):
+        assert any(frag in t for t in users), (
+            "期望第二轮请求含 %r，实际 user 文本尾=%r"
+            % (frag, [t[-300:] for t in users]))
+
+    cands = glob.glob(os.path.join(ROOT, "data", "plugin_data", "**",
+                                   "state", "status.json"), recursive=True)
+    assert cands, "期望 status.json 落盘，实际没找到（存盘默认应为开）"
+    with open(cands[0], encoding="utf-8") as f:
+        saved = f.read()
+    for frag in ("有点困", "刚整理完书签", "和朋友约了周末打球"):
+        assert frag in saved, (
+            "期望 status.json 里有 %r，实际前 500 字=%r" % (frag, saved[:500]))
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
-      ("G", _sc_G), ("H", _sc_H)]),
+      ("G", _sc_G), ("H", _sc_H), ("S", _sc_S)]),
     ("组2私聊不接管", _group2_config, [("E", _sc_E)]),
     ("组3群聊", _group3_config, [("F1", _sc_F1), ("F2", _sc_F2)]),
     ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
