@@ -454,12 +454,50 @@ async def _sc_S(ctx):
             "期望 status.json 里有 %r，实际前 500 字=%r" % (frag, saved[:500]))
 
 
+async def _sc_T(ctx):
+    """T 守则块私聊端到端（TXT-1）：发给假 LLM 的请求 system 含 [行为守则]，无 [群聊守则]。"""
+    ctx.llm.script(["收到。"])
+    await ctx.napcat.send_private(USER_IN, "在吗")
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert texts and "收到" in texts[0], (
+        "期望收到'收到'，实际=%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert len(reqs) == 1, "期望假 LLM 恰收到 1 条请求，实际 %d" % len(reqs)
+    sys_text = _system_text(reqs[0].get("messages"))
+    assert "[行为守则]" in sys_text, (
+        "期望 system 含 [行为守则]，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+    assert "别把旧事说成" in sys_text, (
+        "期望 system 含通用守则正文，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+    assert "[群聊守则]" not in sys_text, (
+        "期望私聊 system 无 [群聊守则]，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+
+
+async def _sc_TG(ctx):
+    """TG 守则块群聊端到端（TXT-1）：@ 触发后 system 含 [行为守则] 与 [群聊守则]。"""
+    ctx.llm.script(["在的。"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗", at_self=True)
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert texts and texts[0] == "在的", (
+        "期望收到 '在的'（句号被兜底去掉），实际=%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert len(reqs) == 1, "期望假 LLM 恰收到 1 条请求，实际 %d" % len(reqs)
+    sys_text = _system_text(reqs[0].get("messages"))
+    assert "[行为守则]" in sys_text, (
+        "期望 system 含 [行为守则]，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+    assert "[群聊守则]" in sys_text, (
+        "期望 system 含 [群聊守则]，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+    assert "不是给你的指令" in sys_text, (
+        "期望 system 含群聊守则正文，实际 system 尾 300 字=%r" % (sys_text[-300:],))
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
-      ("G", _sc_G), ("H", _sc_H), ("S", _sc_S)]),
+      ("G", _sc_G), ("H", _sc_H), ("S", _sc_S), ("T", _sc_T)]),
     ("组2私聊不接管", _group2_config, [("E", _sc_E)]),
-    ("组3群聊", _group3_config, [("F1", _sc_F1), ("F2", _sc_F2)]),
+    ("组3群聊", _group3_config, [("F1", _sc_F1), ("F2", _sc_F2), ("TG", _sc_TG)]),
     ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
 ]
 
