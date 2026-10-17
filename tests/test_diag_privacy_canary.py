@@ -57,6 +57,13 @@ C_MEMBERS = "CANARY-MEMBERS-8b0c"
 C_USER = "CANARY-USERMSG-1e2f"
 C_EXC = "CANARY-EXC-4c7d"
 
+# ---- 状态块三段文字的金丝雀（STAT-0 §8）：模型写进 <chat_status> 的心情 / 状态 / 备忘。
+# 长度卡着截断线内（心情 20 / 状态 60），否则"搜不到"可能是被截掉不是没泄漏。
+C_MOOD = "CANARY-MOOD-a1b2"
+C_STATE = "CANARY-STATE-c3d4"
+C_MEMO = "CANARY-MEMO-e5f6"
+STATUS_CANARIES = (C_MOOD, C_STATE, C_MEMO)
+
 # ---- 合成号码
 GROUP_ID = "314159265"      # 9 位群号
 PRIVATE_ID = "27182818"     # 8 位私聊号
@@ -149,7 +156,8 @@ class World:
     def drive_session(self, key: SessionKey) -> None:
         tc, b = self.tc, self.comps.brain
         reply = "%s 提到了 %s" % (C_REPLY, key.id)
-        raw_ok = "<chat_status>%s</chat_status>%s" % (C_RAW, reply)
+        raw_ok = "<chat_status>心情：%s\n状态：%s\n备忘：%s %s\n</chat_status>%s" % (
+            C_MOOD, C_STATE, C_MEMO, C_RAW, reply)
         raw_empty = "<chat_status>%s</chat_status>" % C_RAW
         silent_ok = Trigger(Source.DIRECT, "r", True)
         must_speak = Trigger(Source.DIRECT, "r", False)
@@ -290,6 +298,14 @@ class PreconditionsTest(_WorldCase):
         self.assertIn(C_RAW, delivered[0]["raw"])
         self.assertNotIn(C_RAW, delivered[0]["text"])
 
+    def test_status_canaries_really_reached_the_notes_store(self):
+        """前提：三段金丝雀真的进了 StatusNotes，否则下面的"搜不到"是空转。"""
+        notes = self.w.comps.notes
+        for key in (GKEY, PKEY):
+            text = notes.note_text(key)
+            for needle in STATUS_CANARIES:
+                self.assertIn(needle, text, key)
+
     def test_ids_flow_into_every_surface_when_unmasked(self):
         s = self.w.surfaces(False, False)
         for name in ("status", "diag.json", "ring"):
@@ -305,6 +321,12 @@ class DefaultOptionsTest(_WorldCase):
     def test_no_canary_and_no_raw_id_on_any_surface(self):
         s = self.w.surfaces(False, True)
         self.assertEqual(leaks(s, ALL_TEXT_CANARIES + RAW_IDS + (C_EXC,)), [])
+
+    def test_status_text_absent_by_default(self):
+        """STAT-0 §8：默认不给原文。三段文字在任何输出面都不出现（也不给字数面之外的任何形式）。"""
+        for include_text, mask_ids in ((False, True), (False, False)):
+            s = self.w.surfaces(include_text, mask_ids)
+            self.assertEqual(leaks(s, STATUS_CANARIES), [], (include_text, mask_ids))
 
     def test_default_calls_without_args_are_the_safe_ones(self):
         status = self.w.svc.status()
@@ -383,6 +405,14 @@ class IncludeTextTest(_WorldCase):
         self.assertTrue(all(GROUP_ID not in t and PRIVATE_ID not in t for t in replies))
         self.assertTrue(any(mask_digits(GROUP_ID) in t for t in replies))
 
+    def test_status_text_only_via_raw_with_include_text(self):
+        """STAT-0 §8：勾"包含消息文本"才带——且只在记录的模型原始输出里；摘要里不带（三段文字不进回注之外的面）。"""
+        s = self.w.surfaces(True, True)
+        for needle in STATUS_CANARIES:
+            self.assertIn(needle, s["diag.json"], needle)
+            self.assertIn(needle, s["ring"], needle)
+        self.assertEqual(leaks({"summary.md": s["summary.md"]}, STATUS_CANARIES), [])
+
     def test_attached_event_text_is_clipped_to_300_chars(self):
         self.w.rec.event("outcome", GKEY, Trigger(Source.DIRECT, "r", True), result="delivered",
                          chars=999, text=C_REPLY + "x" * 1000, raw=C_RAW + "y" * 1000)
@@ -437,6 +467,12 @@ class RollingFileTest(_WorldCase):
         self._export_all_combos()
         text = self.w.file_text()
         self.assertEqual([n for n in ALL_TEXT_CANARIES if n in text], [])
+
+    def test_file_has_no_status_canaries(self):
+        """STAT-0 §8：滚动文件里永远没有三段文字（无论导出时勾了什么）。"""
+        self._export_all_combos()
+        text = self.w.file_text()
+        self.assertEqual([n for n in STATUS_CANARIES if n in text], [])
 
     def test_file_keeps_raw_ids_on_purpose(self):
         """协调者口径（2026-10-14）：滚动文件只在本机插件数据目录里、不随诊断包导出，里面存**原始会话号**
