@@ -119,7 +119,41 @@ def legacy_sections(*, leaf_invisible: bool = False) -> dict[str, Any]:
     return items
 
 
-def build_schema(*, leaf_invisible: bool = False, overrides_field: bool = True) -> dict[str, Any]:
+_RULES_HINT = (
+    "给个别会话单独改设置，点『添加』选一种（例如『私聊·上下文』），填上会话号，再改里面要变的项。"
+    "一个会话想改几个块，就添加几行。\n"
+    "只有和默认值不一样的项才算这个会话的覆盖；没改的项仍然跟着上面的全局配置走。\n"
+    "会话号：私聊填对方 QQ 号，群聊填群号。同一个会话的同一个块写了两行，后面的盖过前面的。\n"
+    "想把某项固定成默认值（全局已改过它），这里表达不了，请用下面的文本（YAML）覆盖。"
+)
+
+
+def rule_templates() -> dict[str, Any]:
+    """每个（范围, 可覆盖的块）一个模板：session + 该块全部配置项，平铺一层。"""
+    from lx.config import session_rules as sr
+
+    templates: dict[str, Any] = {}
+    for scope, blk in sr.iter_templates():
+        items: dict[str, Any] = {
+            sr.SESSION_ITEM: {
+                "description": "会话号",
+                "type": "string",
+                "default": "",
+                "hint": "私聊填对方 QQ 号，群聊填群号。",
+            }
+        }
+        for f in blk.fields_for(scope):
+            items[f.name] = field_entry(f, scope)
+        templates[sr.template_key(scope, blk.key)] = {
+            "name": f"{sr._SCOPE_CN[scope]}·{blk.description}",
+            "hint": blk.hint,
+            "display_item": sr.SESSION_ITEM,
+            "items": items,
+        }
+    return templates
+
+
+def build_schema(*, leaf_invisible: bool = False, overrides_field: bool = True, rules_field: bool = True) -> dict[str, Any]:
     schema: dict[str, Any] = {
         "schema_version": {
             "description": "配置版本（内部使用，请勿修改）",
@@ -131,6 +165,14 @@ def build_schema(*, leaf_invisible: bool = False, overrides_field: bool = True) 
         "private": scope_entry(Scope.PRIVATE),
         "group": scope_entry(Scope.GROUP),
     }
+    if rules_field:
+        schema["session_rules"] = {
+            "description": "会话覆盖（逐项表单）",
+            "type": "template_list",
+            "default": [],
+            "hint": _RULES_HINT,
+            "templates": rule_templates(),
+        }
     if overrides_field:
         schema["session_overrides"] = {
             "description": "会话覆盖（只写要改的项）",
@@ -161,9 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=OUT_PATH)
     ap.add_argument("--check", action="store_true", help="只检查生成物是不是最新，不写文件")
     ap.add_argument("--no-overrides-field", action="store_true")
+    ap.add_argument("--no-rules-field", action="store_true", help="不生成 session_rules（template_list 逐项表单）")
     ap.add_argument("--leaf-invisible", action="store_true")
     args = ap.parse_args(argv)
-    kw = {"overrides_field": not args.no_overrides_field, "leaf_invisible": args.leaf_invisible}
+    kw = {"overrides_field": not args.no_overrides_field, "rules_field": not args.no_rules_field,
+          "leaf_invisible": args.leaf_invisible}
     if args.check:
         with open(args.out, encoding="utf-8") as f:
             current = f.read()

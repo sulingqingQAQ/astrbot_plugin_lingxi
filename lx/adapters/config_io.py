@@ -15,6 +15,7 @@ from ..config import migrate as _migrate
 from ..config import legacy_map as _lm
 from ..config import migrate_overrides as _mig_ov
 from ..config import overrides as _overrides
+from ..config import session_rules as _session_rules
 from ..config import spec
 from ..config.resolver import ConfigResolver
 
@@ -151,13 +152,9 @@ def load_plugin_config(
                     log(msg)
                     warnings.append(msg)
 
-        # 覆盖表：文本解析，有错 → 全部转 warning，错误项不生效，其余照常。
+        # 覆盖表：文本（YAML）+ 逐项表单（template_list）合并，有错 → 全部转 warning，错误项不生效，其余照常。
         try:
-            text = conf.get("session_overrides") or ""
-        except Exception:
-            text = ""
-        try:
-            parsed, errors = _overrides.parse_overrides_text(text)
+            parsed, errors = _session_rules.build_override_table(conf)
         except Exception as e:
             parsed, errors = {}, [f"覆盖表解析失败：{e}"]
         for err in errors:

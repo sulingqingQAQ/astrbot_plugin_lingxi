@@ -63,8 +63,9 @@ class SchemaShapeTest(unittest.TestCase):
         self.assertEqual(keys[0], "schema_version")
         self.assertEqual(keys[1:3], ["private", "group"])
         legacy_tops = list(spec.load_legacy_schema())
-        self.assertEqual(keys[3], "session_overrides")  # D1：分会话覆盖用 YAML 文本框，默认带
-        self.assertEqual(keys[4:], legacy_tops)
+        self.assertEqual(keys[3], "session_rules")  # B：分会话覆盖的逐项表单（template_list）
+        self.assertEqual(keys[4], "session_overrides")  # D1：YAML 文本框保留，高级用法
+        self.assertEqual(keys[5:], legacy_tops)
 
     def test_schema_version_invisible_int_default_zero(self):
         sv = self.schema["schema_version"]
@@ -83,10 +84,12 @@ class SchemaShapeTest(unittest.TestCase):
         for p, node in walk(self.schema):
             self.assertIn(node["type"], ASTRBOT_TYPES, p)
 
-    def test_no_template_list_anywhere(self):
-        # 用户还没定"template_list 还是 YAML 文本"，所以不生成 template_list
+    def test_template_list_only_session_rules(self):
+        # template_list 只给会话覆盖表单用，别处不准出现（宿主对嵌套 template_list 渲染不对）
         for p, node in walk(self.schema):
-            self.assertNotEqual(node["type"], "template_list", p)
+            if p != "session_rules":
+                self.assertNotEqual(node["type"], "template_list", p)
+        self.assertEqual(self.schema["session_rules"]["type"], "template_list")
 
     def test_new_defaults_equal_spec_defaults(self):
         for sc, key in ((Scope.PRIVATE, "private"), (Scope.GROUP, "group")):

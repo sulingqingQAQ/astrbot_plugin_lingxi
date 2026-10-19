@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable, Mapping, MutableMapping, Optional
 
 from ..config import overrides as _overrides
+from ..config import session_rules as _session_rules
 from ..config import spec
 from ..config.resolver import ConfigResolver
 from ..contracts import Scope, SessionKey
@@ -166,7 +167,7 @@ class ConfigService:
         except Exception:
             group = {}
         try:
-            parsed, _ = _overrides.parse_overrides_text(self._stored_overrides_text())
+            parsed, _ = _session_rules.build_override_table(self._conf)
         except Exception:
             parsed = {}
         try:

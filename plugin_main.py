@@ -284,11 +284,11 @@ class LingxiPlugin(star.Star):
             return None
 
         try:
-            from .lx.config.overrides import parse_overrides_text
+            from .lx.config.session_rules import build_override_table
         except Exception as e:
             return ["会话覆盖表解析模块缺失：%s（需要重载插件才生效）" % e]
         try:
-            parsed, errs = parse_overrides_text(_get("session_overrides") or "")
+            parsed, errs = build_override_table(conf)
         except Exception as e:
             return ["会话覆盖表解析失败：%s" % e]
         notes = ["会话覆盖表：" + e for e in (errs or [])]
@@ -347,13 +347,8 @@ class LingxiPlugin(star.Star):
         + resolver 现在的警告（白名单里不像号码的条目等）。给 ConfigService.get_config 用，不抛。"""
         out: list = list(getattr(self, "_webui_static_warnings", []) or [])
         try:
-            from .lx.config.overrides import parse_overrides_text
-            text = ""
-            try:
-                text = self.config.get("session_overrides") or ""
-            except Exception:
-                text = ""
-            _parsed, errs = parse_overrides_text(text)
+            from .lx.config.session_rules import build_override_table
+            _parsed, errs = build_override_table(self.config)
             out.extend("会话覆盖表：" + e for e in (errs or []))
         except Exception:
             pass
