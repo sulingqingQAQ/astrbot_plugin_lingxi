@@ -904,20 +904,19 @@ async def _sc_B10(ctx):
         "表单保存动了 YAML 覆盖表：%r -> %r"
         % (ov_before, _read_plug_cfg().get("session_overrides")))
 
-    # 5) 刷新：条目还在，值还是刚保存的
-    await fb.frame_click(f, "#btn-refresh")
-    await fb.ctx_wait_for(
-        f, "(function(){var t=document.querySelector('#toast');"
-        "return t.classList.contains('show')&&t.innerText.indexOf('已刷新')>=0;})()",
-        timeout=12)
-    await _wait_toast_hidden(ctx)
+    # 5) 重新打开插件页（真刷新：宿主页重进 -> 插件 iframe 重新加载）：条目还在，值还是刚保存的
+    #    （顶栏右上那个"刷新"只在冲突 / 出错的 banner 里才可见，不能当常规刷新用）
+    await _open_plugin_page(ctx)
+    f = await _fctx(ctx)
+    await _need_loaded(ctx)
+    await _show_tab(ctx, "overrides")
     await fb.ctx_wait_for(
         f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 1),
         timeout=10)
     after = await fb.ctx_eval(f, "document.querySelector(%s).value" % json.dumps(sel))
-    assert int(after) == new, "刷新后项值期望 %r，实际 %r" % (new, after)
+    assert int(after) == new, "重新打开插件页后项值期望 %r，实际 %r" % (new, after)
     left = await fb.ctx_eval(f, "LX._dirtyCount()")
-    assert left == 0, "刷新后期望 0 项未保存，实际 %r" % (left,)
+    assert left == 0, "重新打开插件页后期望 0 项未保存，实际 %r" % (left,)
     await _shot(ctx, "b10_sr_saved.png")
     evs = fb.events_since(mark)
     assert not evs, "B10 期间有 %d 条异常 / console.error / 网络失败：%r" % (

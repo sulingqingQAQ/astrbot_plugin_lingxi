@@ -289,7 +289,9 @@ class SrUiB10StaticTest(unittest.TestCase):
         self.assertIn('[data-item="%s"]', self.body)
 
     def test_b10_refreshes_and_shoots(self):
-        self.assertIn("#btn-refresh", self.body)
+        # 刷新 = 重新打开插件页（顶栏 #btn-refresh 只在冲突 banner 里才可见）
+        self.assertGreaterEqual(self.body.count("_open_plugin_page(ctx)"), 2)
+        self.assertNotIn("#btn-refresh", self.body)
         self.assertIn("b10_sr_form.png", self.body)
         self.assertIn("b10_sr_saved.png", self.body)
         self.assertIn("events_since(mark)", self.body)
