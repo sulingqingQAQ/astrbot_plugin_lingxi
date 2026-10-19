@@ -54,6 +54,8 @@ PLUGIN_NAME = base.PLUGIN_NAME
 # 深链是 /#/plugin-page/<插件>/<页面>；直接开 /plugin-page/... 会被宿主当 404
 PAGE_ROUTE = "/plugin-page/%s/lingxi" % PLUGIN_NAME
 PAGE_URL_TAIL = "/#" + PAGE_ROUTE
+# 4.29.1 起宿主把插件页路由改名为 /plugin-view/...（旧的 /plugin-page/... 会被重定向过去）；两种都算对
+PAGE_ROUTES_OK = ("#" + PAGE_ROUTE, "#/plugin-view/%s/lingxi" % PLUGIN_NAME)
 WEBUI_PORT = 16185
 WS_PORT = 16199
 SANDBOX = "allow-scripts allow-forms allow-downloads"
@@ -353,8 +355,8 @@ async def _sc_B2(ctx):
     await fb.goto(ctx.base + PAGE_URL_TAIL, wait_ms=300)
     await fb.wait_for("!!document.querySelector('iframe')", timeout=30)
     hash_ = await fb.eval("location.hash")
-    assert hash_ == "#" + PAGE_ROUTE, (
-        "期望停在 #%s，实际 %s（被路由守卫改走了？）" % (PAGE_ROUTE, hash_))
+    assert hash_ in PAGE_ROUTES_OK, (
+        "期望停在 %s 之一，实际 %s（被路由守卫改走了？）" % (PAGE_ROUTES_OK, hash_))
     sandbox = await fb.eval("document.querySelector('iframe').getAttribute('sandbox')")
     assert sandbox == SANDBOX, "iframe sandbox 期望 %r，实际 %r" % (SANDBOX, sandbox)
     ctx.fctx = await fb.wait_frame_context(timeout=30)
@@ -374,11 +376,11 @@ async def _sc_B2(ctx):
     ctx.note("iframe 内 window.origin=%r" % (await fb.ctx_eval(f, "window.origin"),))
     # 宿主侧边栏的“插件页面”分组里应有灵犀入口，链接指向同一路由
     link = await fb.eval(
-        "(function(){var a=document.querySelector('a[href*=\"plugin-page/%s/lingxi\"]');"
-        "return a?a.getAttribute('href'):null;})()" % PLUGIN_NAME)
+        "(function(){var a=document.querySelector('a[href*=\"plugin-page/%s/lingxi\"],a[href*=\"plugin-view/%s/lingxi\"]');"
+        "return a?a.getAttribute('href'):null;})()" % (PLUGIN_NAME, PLUGIN_NAME))
     ctx.note("宿主侧边栏灵犀入口 href=%r" % (link,))
-    assert link == "#" + PAGE_ROUTE, (
-        "宿主侧边栏里期望有指向 #%s 的入口，实际 %r" % (PAGE_ROUTE, link))
+    assert link in PAGE_ROUTES_OK, (
+        "宿主侧边栏里期望有指向 %s 之一的入口，实际 %r" % (PAGE_ROUTES_OK, link))
     if ctx.shim:
         # 诊断垫片：包回信封，再真点“重试”让页面重新 boot
         res = await fb.ctx_eval(f, _SHIM_JS)
