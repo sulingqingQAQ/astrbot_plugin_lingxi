@@ -13,7 +13,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from lx.config import spec
 from lx.contracts import Scope, SessionKey, Source, Trigger
+from lx.diag.mask import mask_digits
 from lx.diag.recorder import DiagRecorder
 from lx.webui.diag_service import DiagService, _flag
 from lx.webui.service import ConfigService
@@ -271,6 +273,45 @@ class ConfigViewTest(unittest.TestCase):
     def test_blank_overrides_become_none(self):
         svc, _rec, _clk, _ = make(conf={"session_overrides": "   "})
         self.assertIsNone(svc._config_view(svc._config())["session_overrides"])
+
+    def test_form_rows_become_the_overrides_table(self):
+        """SR-UI §2.4：诊断里的表单用 rows_to_overrides 转成覆盖表后走同一套清洗；没有表单行时是 None。"""
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        rows = [{"__template_key": "group.context", "session": GROUP_ID, "max_messages": d + 5}]
+        svc, _rec, _clk, _ = make(conf={"session_rules": rows})
+        view = svc._config_view(svc._config())
+        self.assertEqual(view["session_rules"], {"group:%s" % GROUP_ID: {"context": {"max_messages": d + 5}}})
+
+    def test_blank_or_absent_form_is_none(self):
+        for conf in ({}, {"session_rules": []}, {"session_rules": "坏内容"}):
+            svc, _rec, _clk, _ = make(conf=conf)
+            self.assertIsNone(svc._config_view(svc._config())["session_rules"], conf)
+
+    def test_export_masks_the_session_number_and_hides_text_boxes(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        rows = [{"__template_key": "group.prompt", "session": GROUP_ID,
+                 "style_text": "合成表单风格文本戊戊戊", "glossary_text": "合成表单名词己己己"}]
+        rows.append({"__template_key": "group.context", "session": GROUP_ID, "max_messages": d + 5})
+        svc, rec, _clk, _ = make(conf={"session_rules": rows})
+        out = unzip(svc.export({})["base64"])
+        blob = "\n".join(out.values())
+        self.assertNotIn(GROUP_ID, blob)
+        self.assertIn(mask_digits(GROUP_ID), blob)
+        bundle = json.loads(out["diag.json"])
+        rules = bundle["config"]["session_rules"]
+        self.assertIn(mask_digits(GROUP_ID), rules)
+        self.assertIn('"max_messages": %d' % (d + 5), rules)
+        self.assertNotIn("戊戊戊", rules)   # 默认只给字数
+        self.assertNotIn("己己己", rules)
+
+    def test_export_include_text_attaches_form_text_boxes(self):
+        rows = [{"__template_key": "group.prompt", "session": GROUP_ID,
+                 "style_text": "合成表单风格文本戊戊戊"}]
+        svc, _rec, _clk, _ = make(conf={"session_rules": rows})
+        out = unzip(svc.export({"include_text": True})["base64"])
+        rules = json.loads(out["diag.json"])["config"]["session_rules"]
+        self.assertIn("戊戊戊", rules)
+        self.assertNotIn(GROUP_ID, "\n".join(out.values()))
 
 
 class ModuleRulesTest(unittest.TestCase):

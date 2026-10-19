@@ -106,6 +106,15 @@ def all_text(bundle) -> str:
 SECRETS_AND_BODIES = (BODY_TEXT, BODY_RAW, STYLE, GLOSS, MEMBERS, NICK, SECRET)
 RAW_IDS = (GROUP_ID, USER_ID, MEMBER_ID)
 
+# SR-UI：面板逐项表单转成覆盖表后的样子（诊断视图里就是这张表）
+FORM_MAX_MESSAGES = 205
+FORM_RULES = {
+    "group:%s" % GROUP_ID: {
+        "prompt": {"style_text": STYLE + "表单", "glossary_text": GLOSS + "表单"},
+        "context": {"max_messages": FORM_MAX_MESSAGES},
+    },
+}
+
 
 class BundleStructureTest(unittest.TestCase):
     def test_top_level_shape(self):
@@ -118,7 +127,9 @@ class BundleStructureTest(unittest.TestCase):
         self.assertEqual(b["generated_at_ts"], NOW)
         self.assertRegex(b["generated_at"], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
         self.assertEqual(b["options"], {"include_text": False, "mask_ids": True})
-        self.assertEqual(set(b["config"]), {"private", "group", "whitelist", "session_overrides", "text_boxes"})
+        self.assertEqual(set(b["config"]),
+                         {"private", "group", "whitelist", "session_overrides", "session_rules",
+                          "text_boxes"})
         self.assertEqual(set(b["warnings"]), {"startup", "live"})
         self.assertEqual(set(b["migration"]), {"backups", "legacy_sections_present"})
         self.assertEqual(b["env"]["plugin_version"], "1.2.3")
@@ -230,6 +241,31 @@ class PrivacyDefaultTest(unittest.TestCase):
         self.assertNotIn(STYLE, text)
         self.assertNotIn(GROUP_ID, text)
         self.assertIn("无法解析", b["config"]["session_overrides"])
+
+    def test_privacy_form_rows_masked_and_text_reduced(self):
+        """SR-UI §2.4：面板逐项表单进诊断包时走和 YAML 覆盖同一套清洗（会话号打码、文本框只留字数）。"""
+        b = build(config_view=config_view(session_rules=FORM_RULES))
+        rules = json.loads(b["config"]["session_rules"])
+        node = rules["group:" + mask_digits(GROUP_ID)]
+        self.assertEqual(node["prompt"]["style_text"], {"chars": len(STYLE + "表单")})
+        self.assertEqual(node["prompt"]["glossary_text"], {"chars": len(GLOSS + "表单")})
+        self.assertEqual(node["context"]["max_messages"], FORM_MAX_MESSAGES)
+        text = all_text(b)
+        self.assertNotIn(GROUP_ID, text)
+        for needle in (STYLE + "表单", GLOSS + "表单"):
+            self.assertNotIn(needle, text, needle)
+
+    def test_include_text_attaches_form_text_but_still_masks_ids(self):
+        b = build(config_view=config_view(session_rules=FORM_RULES),
+                  options={"include_text": True, "mask_ids": True})
+        text = all_text(b)
+        self.assertIn(STYLE + "表单", text)
+        self.assertIn(mask_digits(GROUP_ID), text)
+        self.assertNotIn(GROUP_ID, text)
+        self.assertNotIn(SECRET, text)
+
+    def test_absent_form_is_none(self):
+        self.assertIsNone(build()["config"]["session_rules"])
 
     def test_privacy_unmasked_ids_but_still_no_text(self):
         text = all_text(build(options={"include_text": False, "mask_ids": False}))

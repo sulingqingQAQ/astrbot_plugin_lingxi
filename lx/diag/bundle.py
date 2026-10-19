@@ -173,7 +173,8 @@ def build_bundle(*, recorder: Any, state: Any, config_view: Any, warnings: Any, 
 
     ``config_view``（调用方已取出的配置视图）：
     ``{"private": {...}, "group": {...}, "whitelist": {"private": [...], "group": [...]},
-    "session_overrides": 文本或 None, "text_boxes": {"style_text": 文本, ...}}``，缺哪项就缺哪项。
+    "session_overrides": 文本或 None, "session_rules": 覆盖表 dict 或 None,
+    "text_boxes": {"style_text": 文本, ...}}``，缺哪项就缺哪项。
     文本框的值可以是字符串，也可以是 ``{"chars": n}``（调用方自己不想传正文时）。
     ``warnings`` = ``{"startup": [...], "live": [...]}``；``migration`` = ``{"backups": [...], "legacy_sections_present": bool}``；
     ``env`` 原样放进去（缺 python / platform 时补上）；``options`` = ``{"include_text": bool, "mask_ids": bool}``。
@@ -197,6 +198,7 @@ def build_bundle(*, recorder: Any, state: Any, config_view: Any, warnings: Any, 
             "group": _clean_str_list(wl.get("group"), mask_ids, as_id=True),
         },
         "session_overrides": _scrub_overrides(cv.get("session_overrides"), include_text, mask_ids),
+        "session_rules": _scrub_overrides(cv.get("session_rules"), include_text, mask_ids),
         "text_boxes": {str(name): _box_entry(val, include_text, mask_ids, name) for name, val in boxes_in.items()},
     }
 

@@ -109,6 +109,14 @@ class ConfigService:
             return ""
         return text if isinstance(text, str) else ""
 
+    def raw_session_rules(self) -> Any:
+        """conf 里的**原始**表单行（read-only 副本），给诊断包用——它要的是原始行，
+        不是 get_config 里的条目列表（口径见 SR-UI §1）。取不到就 None。"""
+        try:
+            return copy.deepcopy(self._conf.get(_session_rules.RULES_KEY))
+        except Exception:
+            return None
+
     def _overrides_entries(self) -> tuple[list, list]:
         """conf 里的表单行 → （条目列表, 提示列表）。读坏了只提示，不抛（堵住面板点不动的情况）。"""
         try:

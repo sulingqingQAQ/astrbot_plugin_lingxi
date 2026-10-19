@@ -17,6 +17,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
+from ..config.session_rules import rows_to_overrides
 from ..diag.bundle import build_bundle, build_zip
 from ..diag.mask import mask_digits
 
@@ -109,8 +110,14 @@ class DiagService:
             out.append(mask_digits(text) if mask_ids else text)
         return out
 
-    def _config_view(self, cfg: dict) -> dict:
-        """把当前配置整理成 build_bundle 要的 config_view（文本框拆出来、白名单拆出来，避免重复）。"""
+    def _config_view(self, cfg: dict, raw: Any = None) -> dict:
+        """把当前配置整理成 build_bundle 要的 config_view（文本框拆出来、白名单拆出来，避免重复）。
+
+        `cfg` 是 ConfigService.get_config() 的结果（表单那一项已经是**条目列表**）；
+        覆盖表文本（YAML）原样用它的字符串。逐项表单要的是**原始行**——get_config 不吐原始行
+        （口径见 SR-UI §1），默认从 ConfigService 里现取（`raw` 可显式覆盖，便于测试）。"""
+        if raw is None:
+            raw = self._raw_rules()
         private = copy.deepcopy(cfg.get("private") or {})
         group = copy.deepcopy(cfg.get("group") or {})
         boxes: dict = {}
@@ -132,8 +139,29 @@ class DiagService:
             "group": group,
             "whitelist": whitelist,
             "session_overrides": text if isinstance(text, str) and text.strip() else None,
+            "session_rules": self._form_rows(raw),
             "text_boxes": boxes,
         }
+
+    @staticmethod
+    def _form_rows(rows: Any) -> Optional[dict]:
+        """逐项表单的**原始行** → 覆盖表 dict，交给 build_bundle 走和 YAML 覆盖同一套清洗
+        （会话号打码、文本框只留字数）；没有表单行 / 整张读坏时 None。"""
+        try:
+            table, _errors = rows_to_overrides(rows)
+        except Exception:
+            return None
+        return table or None
+
+    def _raw_rules(self) -> Any:
+        """conf 里的**原始**表单行（诊断包要的就是它，get_config 只吐条目列表）。取不到就 None。"""
+        try:
+            getter = getattr(self._cs, "raw_session_rules", None)
+            if callable(getter):
+                return getter()
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _health(events: list, logs: list, notices: list, now: float) -> str:
