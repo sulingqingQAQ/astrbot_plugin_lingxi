@@ -315,6 +315,57 @@ class TestLingxiDiag4aStatic(unittest.TestCase):
             self.assertTrue(any(k.startswith(prefix) for k in light), "app.css 没有 %s 开头的令牌" % prefix)
 
 
+class TestLingxiSrUiStatic(unittest.TestCase):
+    """SR-UI：面板里的「逐项表单」卡片。先写死钩子名和两条结构约定，行为断言在
+    tools/rig/e2e_ui_browser.py 的 B10（真宿主 + 真磁盘配置）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = _read_all()
+        cls.js = cls.texts["tab_overrides.js"]
+        cls.form = cls.texts["form.js"]
+        cls.css = cls.texts["tab_overrides.css"]
+
+    def test_hooks_present(self):
+        for hook in ("sr-card", "sr-list", "sr-entry", "sr-block", "sr-scope", "sr-session",
+                     "sr-add-session", "sr-add-err", "sr-add-item", "sr-item-pick", "sr-field-pick",
+                     "sr-item-add", "sr-item-cancel", "sr-del-session", "sr-del-item", "sr-global",
+                     "sr-same-default", "sr-empty", "sr-save-note", "sr-hint"):
+            self.assertIn(hook, self.js, "逐项表单缺钩子 %s" % hook)
+
+    def sr_region(self):
+        """只取 tab_overrides.js 里「逐项表单」那一段：老的分会话覆盖表里那个试算输入框
+        不是字段控件，不该被这条断言管。"""
+        start = self.js.index("/* ================= 逐项表单（SR-UI） =================")
+        end = self.js.index("/* ================= 分会话覆盖标签 =================")
+        self.assertLess(start, end)
+        return self.js[start:end]
+
+    def test_editor_reuses_form_js_renderer(self):
+        # 卡 §3：控件复用 form.js 的渲染，不另写一套（断言只看逐项表单那一段）
+        region = self.sr_region()
+        self.assertIn("formKit", region, "逐项表单没有用 form.js 导出的控件渲染")
+        self.assertIn("LX.formKit", self.form, "form.js 没有导出 formKit")
+        for bad in ("createElement(\"input\")", "createElement('input')"):
+            self.assertNotIn(bad, region, "逐项表单里不该自己建输入控件（复用 formKit）")
+
+    def test_no_confirm_like_delete(self):
+        # 没有 allow-modals：删除会话要就地二次确认
+        self.assertIn("armed", self.js, "删除会话要就地二次确认")
+        for bad in ("confirm(", "alert(", "prompt("):
+            self.assertNotIn(bad, self.js, "逐项表单里不许出现 %s" % bad)
+
+    def test_entries_go_out_as_session_rules(self):
+        # 卡 §1：面板和后端用「条目列表」交换
+        self.assertIn("session_rules", self.texts["app.js"])
+        self.assertIn("markRulesDirty", self.texts["app.js"])
+        self.assertIn("markRulesDirty", self.js)
+
+    def test_css_has_mobile_rules_block(self):
+        self.assertIn(".sr-entry", self.css)
+        self.assertIn("@media (max-width: 700px)", self.css)
+
+
 class TestLingxiDiag3mStatic(unittest.TestCase):
     """DIAG-3m：诊断标签（最小版）的静态锁。行为断言在 tools/ui/scenarios_diag.py（起无头 Edge）和
     tools/rig/e2e_ui_browser.py 的 B9（真宿主）。钩子名来自 DIAG-0 §4.3，不许改名。"""

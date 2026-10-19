@@ -61,6 +61,46 @@ span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
 .ex-table tr.ex-row > td:nth-child(2) { width: 38%; }
 .ex-table tr.ex-row > td:last-child { white-space: nowrap; }
 
+/* ---- 逐项表单（SR-UI）---- */
+.sr-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.sr-empty { padding: var(--sp-3) 0; }
+.sr-entry {
+  padding: var(--sp-3) var(--sp-4) var(--sp-2);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.sr-entry-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px var(--sp-2); }
+.sr-entry-actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); flex: none; }
+.sr-entry-actions .armed { color: var(--danger); border-color: var(--danger); }
+.sr-entry-empty { padding: var(--sp-2) 0; font-size: var(--fs-13); }
+.sr-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center; gap: 4px var(--sp-3);
+  padding: var(--sp-2) 0; border-top: 1px solid var(--border);
+}
+.sr-item-title { min-width: 0; font-size: var(--fs-13); overflow-wrap: anywhere; }
+.sr-item-block { color: var(--text-2); }
+.sr-item-side { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.sr-control > input[type="number"] { flex: 0 0 120px; }
+.sr-control > input[type="range"] { flex: 1 1 120px; min-width: 96px; }
+.sr-control > input[type="text"], .sr-control > select { flex: 1 1 160px; }
+.sr-control textarea { width: 100%; }
+.sr-global { font-size: var(--fs-12); }
+.sr-same-default { grid-column: 1 / -1; font-size: var(--fs-12); color: var(--warn); }
+.sr-item-err { font-size: var(--fs-12); color: var(--danger); }
+.sr-add-item-panel {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px var(--sp-2);
+  margin: var(--sp-2) 0; padding: var(--sp-3);
+  background: var(--sunken); border: 1px solid var(--border); border-radius: var(--r-md);
+  font-size: var(--fs-13);
+}
+.sr-add-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); margin-top: var(--sp-4); }
+#sr-scope { flex: 0 0 auto; min-width: 96px; }
+#sr-session { flex: 1 1 200px; }
+.sr-add-bar + .sr-err { margin-top: var(--sp-2); }
+.sr-err { color: var(--danger); font-weight: 600; font-size: var(--fs-12); }
+.sr-err:empty { display: none; }
+.sr-hint { margin-top: var(--sp-3); font-size: var(--fs-12); }
+
 /* ---- 关于 ---- */
 .kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-3); }
 .kv { padding: var(--sp-3) var(--sp-4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); min-width: 0; }
@@ -89,4 +129,12 @@ span.ov-err, .ex-head .ov-err { color: var(--danger); font-weight: 600; }
   .ex-table tr.ex-row > td:last-child { text-align: right; }
   .ex-bar .ex-only { margin-left: 0; }
   .kv-grid { grid-template-columns: minmax(0, 1fr); }
+  /* 逐项表单：手机上"项名 / 控件 / 删掉"竖着排，别横向挤 */
+  .sr-entry { padding: var(--sp-3); }
+  .sr-entry-actions { margin-left: 0; width: 100%; }
+  .sr-entry-actions > button { flex: 1 1 auto; }
+  .sr-item { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .sr-item > .sr-del-item { justify-self: start; }
+  .sr-control > input[type="number"] { flex: 0 0 96px; }
+  .sr-add-bar > button { flex: 1 1 auto; }
 }

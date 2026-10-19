@@ -123,13 +123,15 @@
     },
     el: el,
     toast: toast,
-    state: { meta: null, config: null, choices: {}, dirty: new Map(), overridesText: null, overridesDirty: false },
+    state: { meta: null, config: null, choices: {}, dirty: new Map(), overridesText: null, overridesDirty: false,
+             rules: null, rulesDirty: false },
     _tabs: [],
     _changeFns: [],
     _reloadFns: [],
     _errors: new Map(), // key scope:path -> message
     _bannerErrors: [],   // 没归到具体项的错误条（顶部提示条）
     _overrideErrors: [], // 覆盖表被服务端拒绝的错误条；覆盖表一改文本就清
+    _rulesErrors: [],    // 逐项表单被服务端拒绝的错误条；表单一动就清
     _flushers: []        // 保存 / 放弃前要先冲刷的待决防抖（form.js 注册）
   };
 
@@ -222,9 +224,12 @@
     LX.state.dirty.clear();
     LX.state.overridesText = null;
     LX.state.overridesDirty = false;
+    LX.state.rules = null;
+    LX.state.rulesDirty = false;
     LX._errors.clear();
     LX._bannerErrors = [];
     LX._overrideErrors = [];
+    LX._rulesErrors = [];
     renderBanner();
     hideConflict();
     refreshSavebar();
@@ -250,6 +255,44 @@
     }
     refreshSavebar();
     fireChange(null, "session_overrides");
+  };
+
+  /* SR-UI：逐项表单（条目列表）的暂存。条目是 {scope, session, block, items} 的对象数组，
+   * 顺序无关：先按 (scope, session, block) 排好再比，免得只是排了个序也被算成改动。 */
+  function normEntries(list) {
+    if (!Array.isArray(list)) return [];
+    return list.map(function (e) {
+      var copy = {
+        scope: e && e.scope, session: String((e && e.session) === undefined ? "" : e.session).trim(),
+        block: e && e.block, items: {}
+      };
+      var items = (e && e.items) || {};
+      Object.keys(items).sort().forEach(function (k) { copy.items[k] = clone(items[k]); });
+      return copy;
+    }).sort(function (a, b) {
+      var ka = a.scope + "|" + a.session + "|" + a.block;
+      var kb = b.scope + "|" + b.session + "|" + b.block;
+      return ka < kb ? -1 : (ka > kb ? 1 : 0);
+    });
+  }
+
+  LX.markRulesDirty = function (entries) {
+    var base = LX.state.config && LX.state.config.session_rules;
+    if (deepEqual(normEntries(entries), normEntries(base))) {
+      LX.state.rules = null;
+      LX.state.rulesDirty = false;
+    } else {
+      LX.state.rules = entries;
+      LX.state.rulesDirty = true;
+    }
+    // 表单一动，上次保存时服务端对它的指责就作废了
+    if (LX._rulesErrors.length) {
+      LX._rulesErrors = [];
+      renderBanner();
+    }
+    refreshSavebar();
+    renderTabDots();
+    fireChange(null, "session_rules");
   };
 
   // ---- 标签 ----
@@ -379,7 +422,7 @@
 
   // ---- 顶栏 / 提示条 ----
   function dirtyCount() {
-    return LX.state.dirty.size + (LX.state.overridesDirty ? 1 : 0);
+    return LX.state.dirty.size + (LX.state.overridesDirty ? 1 : 0) + (LX.state.rulesDirty ? 1 : 0);
   }
   LX._dirtyCount = dirtyCount;
 
@@ -398,7 +441,7 @@
     if (!banner) return;
     while (banner.firstChild) banner.removeChild(banner.firstChild);
     var warns = (LX.state.config && LX.state.config.warnings) || [];
-    var errs = (LX._bannerErrors || []).concat(LX._overrideErrors || []);
+    var errs = (LX._bannerErrors || []).concat(LX._overrideErrors || []).concat(LX._rulesErrors || []);
     if (!warns.length && !errs.length) {
       banner.className = "banner hidden";
       return;
@@ -474,6 +517,10 @@
     if (LX.state.overridesDirty && normNl(LX.state.overridesText) === normNl(cfg.session_overrides)) {
       LX.state.overridesText = null;
       LX.state.overridesDirty = false;
+    }
+    if (LX.state.rulesDirty && deepEqual(normEntries(LX.state.rules), normEntries(cfg.session_rules))) {
+      LX.state.rules = null;
+      LX.state.rulesDirty = false;
     }
     renderBanner();
     hideConflict();
@@ -592,6 +639,18 @@
       odiv.setAttribute("data-path", "session_overrides");
       list.appendChild(odiv);
     }
+    if (LX.state.rulesDirty) {
+      var nRules = (LX.state.rules || []).length;
+      var rdiv = el("div", { class: "diff-item" }, [
+        el("div", { class: "diff-head" }, [
+          el("span", { class: "pill pill-accent", text: "逐项表单" }),
+          el("span", { class: "diff-title", text: "分会话逐项表单已修改（" + nRules + " 个会话）" })
+        ])
+      ]);
+      rdiv.setAttribute("data-scope", "rules");
+      rdiv.setAttribute("data-path", "session_rules");
+      list.appendChild(rdiv);
+    }
     var panel = $("#diff-panel");
     if (panel) panel.classList.remove("hidden");
     var go = $("#btn-confirm-save");
@@ -615,6 +674,7 @@
     });
     var body = { revision: LX.state.config ? LX.state.config.revision : "", changes: changes };
     if (LX.state.overridesDirty) body.session_overrides = LX.state.overridesText;
+    if (LX.state.rulesDirty) body.session_rules = LX.state.rules;
     var btn = $("#btn-confirm-save");
     if (btn) { btn.disabled = true; btn.classList.add("loading"); btn.setAttribute("aria-busy", "true"); }
     try {
@@ -624,9 +684,12 @@
         LX.state.dirty.clear();
         LX.state.overridesText = null;
         LX.state.overridesDirty = false;
+        LX.state.rules = null;
+        LX.state.rulesDirty = false;
         LX._errors.clear();
         LX._bannerErrors = [];
         LX._overrideErrors = [];
+        LX._rulesErrors = [];
         LX._closeDiff();
         renderBanner();
         hideConflict();
@@ -648,12 +711,14 @@
         LX._errors.clear();
         LX._bannerErrors = [];
         LX._overrideErrors = [];
+        LX._rulesErrors = [];
         errs.forEach(function (er) {
           if (er && er.scope && er.path) {
             LX._errors.set(er.scope + ":" + er.path, er.message || "没通过检查");
           } else if (er && er.message) {
-            // 覆盖表的错误单独记：覆盖表文本一改它就该消失，别的未归属错误不受影响
+            // 覆盖表 / 逐项表单的错误单独记：它们一改就该消失，别的未归属错误不受影响
             if (er.path === "session_overrides") LX._overrideErrors.push(er.message);
+            else if (er.path === "session_rules") LX._rulesErrors.push(er.message);
             else LX._bannerErrors.push(er.message);
           }
         });

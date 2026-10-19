@@ -117,6 +117,408 @@
   var SRC_TEXT = { "default": "默认", "global": "全局设置", "override": "分会话覆盖" };
   var SRC_TONE = { "default": "neutral", "global": "info", "override": "ok" };
 
+  /* ================= 逐项表单（SR-UI） =================
+   * 和 AstrBot 自带配置页的 template_list 读写**同一份** session_rules；
+   * 面板与后端之间走「条目列表」：{scope, session, block, items}（口径见 SR-UI 卡 §1）。
+   * 控件复用 form.js 的 LX.formKit（bool / 数字 / 滑块 / 下拉 / 文本），不另写一套。 */
+  var xr = {
+    card: null, list: null, empty: null, saveNote: null, addErr: null,
+    scopeSel: null, sessionInput: null, entries: [], pendingAdd: null, armed: {}
+  };
+
+  var ADD_ERR_EMPTY = "先填会话号（群号或 QQ 号）。";
+  var YAML_HINT = "注：值和出厂默认一样等于跟随全局；要固定成默认值请用下面的 YAML。";
+
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (typeof a !== typeof b) return false;
+    if (a === null || b === null) return a === b;
+    if (typeof a !== "object") return a === b;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (var i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+      return true;
+    }
+    var ka = Object.keys(a);
+    var kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (var j = 0; j < ka.length; j++) {
+      if (!Object.prototype.hasOwnProperty.call(b, ka[j])) return false;
+      if (!deepEqual(a[ka[j]], b[ka[j]])) return false;
+    }
+    return true;
+  }
+
+  function clone(v) {
+    return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+  }
+
+  /* 后端的条目列表 → 面板的工作副本（按 (scope, session, block) 排一下，看着稳）。 */
+  function savedEntries() {
+    var raw = LX.state.config && LX.state.config.session_rules;
+    var out = [];
+    if (Array.isArray(raw)) {
+      raw.forEach(function (e) {
+        if (!e || typeof e !== "object") return;
+        out.push({
+          scope: String(e.scope || ""), session: String(e.session === undefined ? "" : e.session).trim(),
+          block: String(e.block || ""), items: clone(e.items || {}) || {}
+        });
+      });
+    }
+    out.sort(function (a, b) {
+      var ka = a.scope + "|" + a.session + "|" + a.block;
+      var kb = b.scope + "|" + b.session + "|" + b.block;
+      return ka < kb ? -1 : (ka > kb ? 1 : 0);
+    });
+    return out;
+  }
+
+  function scopeBlocks(scope) {
+    var meta = LX.state.meta;
+    var list = (meta && meta.blocks && meta.blocks[scope]) || [];
+    return list.filter(function (b) { return b && b.overridable !== false; });
+  }
+
+  function fieldOf(scope, blockKey, name) {
+    var blocks = scopeBlocks(scope);
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].key !== blockKey) continue;
+      var fields = blocks[i].fields || [];
+      for (var j = 0; j < fields.length; j++) {
+        if (fields[j].path === blockKey + "." + name) return fields[j];
+      }
+    }
+    return null;
+  }
+
+  /* 该 scope 当前的全局值（含未保存的全局改动 → 用 LX.getValue）。 */
+  function globalValue(scope, blockKey, name) {
+    var path = blockKey + "." + name;
+    var v = LX.getValue(scope, path);
+    if (v !== undefined) return v;
+    var f = LX.fieldMeta(scope, path);
+    return f ? f.default : undefined;
+  }
+
+  function entryKey(e) { return e.scope + ":" + e.session; }
+
+  function touchRules() {
+    LX.markRulesDirty(xr.entries);
+    updateRulesSaveNote();
+  }
+
+  function removeItem(entry, name) {
+    if (entry.items && Object.prototype.hasOwnProperty.call(entry.items, name)) {
+      delete entry.items[name];
+    }
+    touchRules();
+    renderRules();
+  }
+
+  /* 一行：块 · 项名，右边是控件，再右边是全局值和删除。 */
+  function itemRow(entry, blockKey, name, field) {
+    var row = LX.el("div", { class: "sr-item", dataset: { block: blockKey, item: name } });
+    var title = LX.el("div", { class: "sr-item-title" }, [
+      LX.el("span", { class: "sr-item-block sr-block", text: blockTitle(entry.scope, blockKey) + " · " }),
+      LX.el("span", { class: "sr-item-name", text: fieldTitle(entry.scope, blockKey + "." + name) })
+    ]);
+    var box = LX.el("div", { class: "field-control sr-control" });
+    var errEl = LX.el("div", { class: "field-error sr-item-err" });
+    var st = { view: null };
+    var view = LX.formKit
+      ? LX.formKit.makeView(entry.scope, itemCtx(entry, name, field, row, st))
+      : null;
+    st.view = view;
+    if (view) {
+      view.fields[name] = { errEl: errEl, resetBtn: { disabled: false } };
+      LX.formKit.buildControl(view, field, box);
+    }
+    var cur = entry.items ? entry.items[name] : undefined;
+    var gv = globalValue(entry.scope, blockKey, name);
+    var side = LX.el("div", { class: "sr-item-side" }, [
+      box, errEl,
+      LX.el("div", { class: "sr-global muted", text: "（全局 " + fmtValue(gv) + "）" })
+    ]);
+    row.appendChild(title);
+    row.appendChild(side);
+    var del = iconButton({ class: "small ghost sr-del-item", text: "删掉这一项" }, "trash");
+    del.setAttribute("aria-label", "删掉这一项");
+    del.addEventListener("click", function () { removeItem(entry, name); });
+    row.appendChild(del);
+    if (deepEqual(cur, field.default)) {
+      row.appendChild(sameDefaultNote());
+    }
+    return row;
+  }
+
+  function sameDefaultNote() {
+    return LX.el("div", { class: "sr-same-default", text:
+      "这一项和出厂默认一样，等于跟随全局，保存时不会存这一项；想固定成默认值请用下面的 YAML。" });
+  }
+
+  /* 逐项表单自己的取值口：直接读写这条目里的项（form.js 的控件经它取值）。 */
+  function itemCtx(entry, name, field, row, st) {
+    return {
+      getValue: function () { return entry.items ? entry.items[name] : undefined; },
+      setValue: function (_scope, _path, value) {
+        if (!entry.items) entry.items = {};
+        entry.items[name] = clone(value);
+        touchRules();
+        refreshRowNote(row, entry, name, field, st);
+      },
+      /* 无效输入（清空 / 不是数）：这一项不生效，直接把它从条目里去掉，
+       * 免得保存时把上一次的有效值发出去，而输入框里已经是另一回事。 */
+      revertValue: function () {
+        if (entry.items) delete entry.items[name];
+        touchRules();
+        refreshRowNote(row, entry, name, field, st);
+      },
+      isDirty: function () { return true; },
+      getError: function () { return null; }
+    };
+  }
+
+  /* 输入之后只更新这一行的红字和"和默认一样"小字，不重建控件（否则会把光标弄丢）。 */
+  function refreshRowNote(row, entry, name, field, st) {
+    var cur = entry.items ? entry.items[name] : undefined;
+    var old = row.querySelector(".sr-same-default");
+    if (deepEqual(cur, field.default)) {
+      if (!old) row.appendChild(sameDefaultNote());
+    } else if (old) {
+      old.remove();
+    }
+    var errEl = row.querySelector(".sr-item-err");
+    if (errEl) {
+      var local = st && st.view ? st.view.localErr[name] : "";
+      errEl.textContent = local || "";
+    }
+  }
+
+  /* 「加一项」：先选块，再选项（排除已经加上的）。 */
+  function addItemPanel(entry, idx) {
+    var blocks = scopeBlocks(entry.scope);
+    var st = xr.pendingAdd;
+    if (st.block === undefined) st.block = blocks.length ? blocks[0].key : "";
+    var blkSel = document.createElement("select");
+    blkSel.id = "sr-item-pick";
+    blkSel.setAttribute("aria-label", "配置块");
+    blocks.forEach(function (b) {
+      var o = document.createElement("option");
+      o.value = b.key;
+      o.textContent = b.title || b.key;
+      if (b.key === st.block) o.selected = true;
+      blkSel.appendChild(o);
+    });
+    var cur = null;
+    blocks.forEach(function (b) { if (b.key === st.block) cur = b; });
+    var avail = ((cur && cur.fields) || []).filter(function (f) {
+      var name = f.path.slice(f.path.indexOf(".") + 1);
+      return !entry.items || !Object.prototype.hasOwnProperty.call(entry.items, name);
+    });
+    var fldSel = document.createElement("select");
+    fldSel.id = "sr-field-pick";
+    fldSel.setAttribute("aria-label", "配置项");
+    avail.forEach(function (f) {
+      var name = f.path.slice(f.path.indexOf(".") + 1);
+      var o = document.createElement("option");
+      o.value = name;
+      o.textContent = f.title || name;
+      fldSel.appendChild(o);
+    });
+    var addBtn = iconButton({ class: "small primary", text: "添加" }, "plus");
+    addBtn.id = "sr-item-add";
+    var cancel = LX.el("button", { class: "small ghost", text: "取消" });
+    cancel.id = "sr-item-cancel";
+    blkSel.addEventListener("change", function () {
+      st.block = blkSel.value;
+      renderRules();
+    });
+    fldSel.addEventListener("change", function () { st.field = fldSel.value; });
+    addBtn.addEventListener("click", function () {
+      if (!avail.length) return;
+      var f = avail[0];
+      for (var i = 0; i < avail.length; i++) {
+        var nm = avail[i].path.slice(avail[i].path.indexOf(".") + 1);
+        if (nm === (fldSel.value || st.field)) f = avail[i];
+      }
+      var name = f.path.slice(f.path.indexOf(".") + 1);
+      if (!entry.items) entry.items = {};
+      // 初值 = 这个 scope 当前的全局值：加了就能看着改，不动就是跟随全局
+      entry.items[name] = clone(globalValue(entry.scope, f.path.slice(0, f.path.indexOf(".")), name));
+      xr.pendingAdd = null;
+      touchRules();
+      renderRules();
+    });
+    cancel.addEventListener("click", function () {
+      xr.pendingAdd = null;
+      renderRules();
+    });
+    var panel = LX.el("div", { class: "sr-add-item-panel" }, [
+      LX.el("span", { class: "muted", text: "块" }), blkSel,
+      LX.el("span", { class: "muted", text: "项" }), fldSel, addBtn, cancel
+    ]);
+    if (!avail.length) {
+      panel.appendChild(LX.el("span", { class: "sr-err", text: "这一块能覆盖的项都已经加上了，换个块。" }));
+    }
+    panel.dataset.idx = String(idx);
+    return panel;
+  }
+
+  function entryCard(entry, idx) {
+    var head = LX.el("div", { class: "sr-entry-head" });
+    head.appendChild(LX.el("span", { class: "pill pill-accent", text: scopeTitle(entry.scope) }));
+    head.appendChild(LX.el("code", { class: "pill pill-mono sr-session-code", text: entry.session }));
+    var actions = LX.el("div", { class: "sr-entry-actions" });
+    var addBtn = iconButton({ class: "small", text: "加一项" }, "plus");
+    addBtn.id = "sr-add-item";
+    addBtn.dataset.idx = String(idx);
+    addBtn.addEventListener("click", function () {
+      xr.pendingAdd = { idx: idx, block: undefined, field: undefined };
+      renderRules();
+    });
+    var delBtn = iconButton({ class: "small ghost", text: "删除会话" }, "trash");
+    delBtn.id = "sr-del-session";
+    delBtn.dataset.idx = String(idx);
+    delBtn.addEventListener("click", function () {
+      var key = entryKey(entry) + "#" + idx;
+      if (!xr.armed[key]) {
+        // 插件页 iframe 没有 allow-modals：不能用系统弹窗，就地二次确认
+        xr.armed[key] = setTimeout(function () {
+          delete xr.armed[key];
+          renderRules();
+        }, 3000);
+        delBtn.classList.add("armed");
+        delBtn.textContent = "再点一次确认删除";
+        return;
+      }
+      clearTimeout(xr.armed[key]);
+      delete xr.armed[key];
+      xr.entries.splice(idx, 1);
+      xr.pendingAdd = null;
+      touchRules();
+      renderRules();
+    });
+    if (xr.armed[entryKey(entry) + "#" + idx]) {
+      delBtn.classList.add("armed");
+      delBtn.textContent = "再点一次确认删除";
+    }
+    actions.appendChild(addBtn);
+    actions.appendChild(delBtn);
+    head.appendChild(actions);
+    var card = LX.el("div", { class: "sr-entry", dataset: { scope: entry.scope, session: entry.session } }, [head]);
+    var names = Object.keys(entry.items || {}).sort();
+    if (xr.pendingAdd && xr.pendingAdd.idx === idx) {
+      card.appendChild(addItemPanel(entry, idx));
+    }
+    if (!names.length) {
+      card.appendChild(LX.el("div", { class: "sr-entry-empty muted", text: "这个会话还没改任何项：点“加一项”。" }));
+    }
+    names.forEach(function (name) {
+      var field = fieldOf(entry.scope, entry.block, name);
+      if (!field) {
+        // 配置里已经不存在的项（老表单留下的）：只报一句，别让整块渲染断掉
+        card.appendChild(LX.el("div", { class: "sr-item", dataset: { block: entry.block, item: name } }, [
+          LX.el("div", { class: "sr-item-title", text: entry.block + " · " + name }),
+          LX.el("div", { class: "sr-item-err", text: "这一项在现在的配置里找不到了，保存会被拒绝；删掉它或者改回去。" })
+        ]));
+        return;
+      }
+      card.appendChild(itemRow(entry, entry.block, name, field));
+    });
+    return card;
+  }
+
+  function renderRules() {
+    if (!xr.list) return;
+    clearNode(xr.list);
+    if (!xr.entries.length) {
+      xr.list.appendChild(LX.el("div", { id: "sr-empty", class: "sr-empty muted", text: "现在没有表单覆盖" }));
+      return;
+    }
+    xr.entries.forEach(function (e, i) { xr.list.appendChild(entryCard(e, i)); });
+  }
+
+  function updateRulesSaveNote() {
+    if (!xr.saveNote) return;
+    var show = (LX._rulesErrors || []).length > 0;
+    xr.saveNote.classList.toggle("hidden", !show);
+  }
+
+  function addSession() {
+    if (!xr.scopeSel || !xr.sessionInput) return;
+    var scope = xr.scopeSel.value;
+    var session = String(xr.sessionInput.value || "").replace(/^\s+|\s+$/g, "");
+    xr.addErr.textContent = "";
+    if (!session) {
+      xr.addErr.textContent = ADD_ERR_EMPTY;
+      return;
+    }
+    var dup = xr.entries.some(function (e) { return e.scope === scope && e.session === session; });
+    if (dup) {
+      xr.addErr.textContent = "这个会话已经在上面了（" + scopeTitle(scope) + " " + session + "）。";
+      return;
+    }
+    xr.entries.push({ scope: scope, session: session, block: scopeBlocks(scope).length
+      ? scopeBlocks(scope)[0].key : "", items: {} });
+    xr.sessionInput.value = "";
+    xr.pendingAdd = null;
+    touchRules();
+    renderRules();
+  }
+
+  function mountRulesCard(root) {
+    var card = LX.el("div", { class: "card sr-card" }, [
+      cardHead("sliders", "逐项表单", "给某个群 / 某个人单独改几项。只列改过的项，没列的跟全局走。")
+    ]);
+    card.id = "sr-card";
+    xr.saveNote = alertBox("warn", "保存时被服务端拒绝，见顶部提示。", "warn-line hidden");
+    xr.saveNote.id = "sr-save-note";
+    xr.list = LX.el("div", { id: "sr-list", class: "sr-list" });
+    card.appendChild(xr.list);
+    var bar = LX.el("div", { class: "sr-add-bar" });
+    xr.scopeSel = document.createElement("select");
+    xr.scopeSel.id = "sr-scope";
+    xr.scopeSel.setAttribute("aria-label", "会话类型");
+    [["private", "私聊"], ["group", "群聊"]].forEach(function (pair) {
+      var o = document.createElement("option");
+      o.value = pair[0];
+      o.textContent = pair[1];
+      if (pair[0] === "group") o.selected = true;
+      xr.scopeSel.appendChild(o);
+    });
+    xr.sessionInput = LX.el("input", {
+      id: "sr-session", type: "text",
+      placeholder: "会话号（群号 / QQ 号）", "aria-label": "会话号"
+    });
+    var addBtn = iconButton({ class: "small primary", text: "添加会话" }, "plus");
+    addBtn.id = "sr-add-session";
+    bar.appendChild(xr.scopeSel);
+    bar.appendChild(xr.sessionInput);
+    bar.appendChild(addBtn);
+    card.appendChild(bar);
+    xr.addErr = LX.el("div", { id: "sr-add-err", class: "sr-err" });
+    card.appendChild(xr.addErr);
+    card.appendChild(LX.el("div", { id: "sr-hint", class: "sr-hint muted", text: YAML_HINT }));
+    card.appendChild(xr.saveNote);
+    addBtn.addEventListener("click", addSession);
+    xr.sessionInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); addSession(); }
+    });
+    root.appendChild(card);
+  }
+
+  function reloadRules() {
+    if (!xr.list) return;
+    if (!LX.state.rulesDirty) {
+      xr.entries = savedEntries();
+      xr.pendingAdd = null;
+    }
+    renderRules();
+    updateRulesSaveNote();
+  }
+
   /* ================= 分会话覆盖标签 ================= */
   var ov = {
     ta: null, meta: null, result: null, exampleBtn: null,
@@ -381,6 +783,7 @@
   }
 
   function mountOverrides(root) {
+    mountRulesCard(root);
     var card = LX.el("div", { class: "card" }, [
       cardHead("sliders", "分会话覆盖（YAML）", "给某个群 / 某个人单独改几项设置，没写的项沿用全局配置。")
     ]);
@@ -512,6 +915,7 @@
     updateExDirtyWarn();
     refreshDatalist();
     runCheck();
+    reloadRules();
   }
 
   function reloadOverrides() {
@@ -523,17 +927,19 @@
     updateExDirtyWarn();
     updateSaveNote();
     refreshDatalist();
+    reloadRules();
   }
 
   LX.registerTab({
     id: "overrides", title: "分会话覆盖", order: 30, icon: "sliders",
     mount: mountOverrides,
-    isDirty: function () { return LX.state.overridesDirty; }
+    isDirty: function () { return LX.state.overridesDirty || LX.state.rulesDirty; }
   });
   LX.onReload(reloadOverrides);
   LX.onChange(function () {
     updateExDirtyWarn();
     updateSaveNote();
+    updateRulesSaveNote();
   });
 
   /* ================= 关于标签 ================= */

@@ -60,12 +60,29 @@
     return String(s).replace(/[^A-Za-z0-9_-]/g, "-");
   }
 
+  /* 取值口（SR-UI）：控件一律经 view.ctx 读写，别直接碰 LX。
+   * 默认是全局配置的读写（私聊 / 群聊标签用）；面板里的「逐项表单」拿同一套控件渲染，
+   * 但把 ctx 换成一个读写它自己条目的对象，控件就不用重写第二份。 */
+  var GLOBAL_CTX = {
+    getValue: function (scope, path) { return window.LX.getValue(scope, path); },
+    setValue: function (scope, path, value) { window.LX.setValue(scope, path, value); },
+    revertValue: function (scope, path) {
+      if (typeof window.LX.revertValue === "function") window.LX.revertValue(scope, path);
+    },
+    isDirty: function (scope, path) { return window.LX.isDirty(scope, path); },
+    getError: function (scope, path) { return window.LX.getError(scope, path); }
+  };
+
+  function ctxOf(view) {
+    return (view && view.ctx) || GLOBAL_CTX;
+  }
+
   /* 每个 scope 一份 UI 状态。 */
   var views = {};
   function viewOf(scope) {
     if (!views[scope]) {
       views[scope] = {
-        scope: scope, root: null, blockKey: null, search: "", onlyChanged: false,
+        scope: scope, ctx: GLOBAL_CTX, root: null, blockKey: null, search: "", onlyChanged: false,
         fields: {},  /* path -> rec */
         blockBtns: {},
         blockSelect: null, itemsHost: null, navHost: null,
@@ -168,15 +185,16 @@
   }
 
   function buildBool(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var input = markControl(document.createElement("input"));
     input.type = "checkbox";
     input.setAttribute("role", "switch");
     input.setAttribute("aria-label", field.title || field.path);
-    input.checked = !!LX.getValue(view.scope, field.path);
+    input.checked = !!ctx.getValue(view.scope, field.path);
     var state = LX.el("span", { class: "toggle-text", text: input.checked ? "开" : "关" });
     input.addEventListener("change", function () {
       state.textContent = input.checked ? "开" : "关";
-      LX.setValue(view.scope, field.path, input.checked);
+      ctx.setValue(view.scope, field.path, input.checked);
     });
     box.appendChild(makeToggle(LX, input, state));
     return { controls: [input], toggleText: state };
@@ -193,6 +211,7 @@
   }
 
   function buildNumber(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var type = field.type;
     var input = markControl(document.createElement("input"));
     input.type = "number";
@@ -200,7 +219,7 @@
     if (field.hi !== null && field.hi !== undefined) input.max = String(field.hi);
     var step = (field.slider && field.slider[2] !== undefined) ? field.slider[2] : (type === "int" ? 1 : "any");
     input.step = String(step);
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     if (typeof cur === "number") input.value = String(cur);
     var slider = null;
     if (field.slider) {
@@ -218,13 +237,13 @@
     var scopeRef = view.scope;
     function pushValid(num) {
       delete viewRef.localErr[pathRef];
-      LX.setValue(scopeRef, pathRef, num);
+      ctx.setValue(scopeRef, pathRef, num);
     }
     /* 无效输入（清空 / 不是数 / 给 int 项填小数）：不算改动，要把这一项的暂存撤销掉，
      * 否则保存会带上上一次的有效值，而输入框里已经是另一回事。 */
     function pushInvalid(msg) {
       viewRef.localErr[pathRef] = msg + "；这次输入没有生效，保存时不会带上它";
-      if (typeof LX.revertValue === "function") LX.revertValue(scopeRef, pathRef);
+      ctx.revertValue(scopeRef, pathRef);
       var rec = viewRef.fields[pathRef];
       if (rec) {
         rec.errEl.textContent = viewRef.localErr[pathRef];
@@ -259,6 +278,7 @@
   }
 
   function buildStringOptions(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var sel = markControl(document.createElement("select"));
     var opts = field.options || [];
     var labels = field.labels || [];
@@ -268,16 +288,17 @@
       opt.textContent = (labels[i] !== undefined && labels[i] !== null) ? labels[i] : opts[i];
       sel.appendChild(opt);
     }
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     sel.value = (cur === null || cur === undefined) ? "" : String(cur);
     sel.addEventListener("change", function () {
-      LX.setValue(view.scope, field.path, sel.value);
+      ctx.setValue(view.scope, field.path, sel.value);
     });
     box.appendChild(sel);
     return { controls: [sel] };
   }
 
   function buildStringDatalist(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var input = markControl(document.createElement("input"));
     input.type = "text";
     var choices = (LX.state.choices || {});
@@ -291,10 +312,10 @@
       dl.appendChild(opt);
     }
     input.setAttribute("list", dlId);
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     input.value = (cur === null || cur === undefined) ? "" : String(cur);
     var push = debounce(function () {
-      LX.setValue(view.scope, field.path, input.value);
+      ctx.setValue(view.scope, field.path, input.value);
     }, DEBOUNCE_MS);
     input.addEventListener("input", push);
     input.addEventListener("change", push.flush);
@@ -304,12 +325,13 @@
   }
 
   function buildStringText(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var input = markControl(document.createElement("input"));
     input.type = "text";
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     input.value = (cur === null || cur === undefined) ? "" : String(cur);
     var push = debounce(function () {
-      LX.setValue(view.scope, field.path, input.value);
+      ctx.setValue(view.scope, field.path, input.value);
     }, DEBOUNCE_MS);
     input.addEventListener("input", push);
     input.addEventListener("change", push.flush);
@@ -318,11 +340,12 @@
   }
 
   function buildText(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var tall = isTallPath(field.path);
     var area = markControl(document.createElement("textarea"));
     area.rows = tall ? 12 : 5;
     if (tall) area.className = "form-tall";
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     area.value = (cur === null || cur === undefined) ? "" : String(cur);
     var count = null;
     if (tall) {
@@ -330,7 +353,7 @@
     }
     var push = debounce(function () {
       if (count) count.textContent = String(area.value.length) + " 字";
-      LX.setValue(view.scope, field.path, area.value);
+      ctx.setValue(view.scope, field.path, area.value);
     }, DEBOUNCE_MS);
     area.addEventListener("input", function () {
       if (count) count.textContent = String(area.value.length) + " 字";
@@ -353,16 +376,17 @@
   }
 
   function buildList(LX, view, block, field, box) {
+    var ctx = ctxOf(view);
     var area = markControl(document.createElement("textarea"));
     area.rows = 5;
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctx.getValue(view.scope, field.path);
     var arr = Array.isArray(cur) ? cur : [];
     area.value = arr.join("\n");
     var count = LX.el("span", { class: "field-count muted", text: String(arr.length) + " 项" });
     var push = debounce(function () {
       var parsed = parseListLines(area.value);
       count.textContent = String(parsed.length) + " 项";
-      LX.setValue(view.scope, field.path, parsed);
+      ctx.setValue(view.scope, field.path, parsed);
     }, DEBOUNCE_MS);
     area.addEventListener("input", function () {
       count.textContent = String(parseListLines(area.value).length) + " 项";
@@ -391,10 +415,10 @@
     if (t === "list") return buildList(LX, view, block, field, box);
     var fallback = markControl(document.createElement("input"));
     fallback.type = "text";
-    var cur = LX.getValue(view.scope, field.path);
+    var cur = ctxOf(view).getValue(view.scope, field.path);
     fallback.value = (cur === null || cur === undefined) ? "" : String(cur);
     var push = debounce(function () {
-      LX.setValue(view.scope, field.path, fallback.value);
+      ctxOf(view).setValue(view.scope, field.path, fallback.value);
     }, DEBOUNCE_MS);
     fallback.addEventListener("input", push);
     fallback.addEventListener("change", push.flush);
@@ -402,9 +426,9 @@
     return { controls: [fallback] };
   }
 
-  /* 把控件值同步为 LX.getValue（聚焦中的控件不动，避免输入法/光标被打断）。 */
+  /* 把控件值同步为 ctx 里的值（聚焦中的控件不动，避免输入法/光标被打断）。 */
   function syncControl(LX, view, rec) {
-    var v = LX.getValue(view.scope, rec.field.path);
+    var v = ctxOf(view).getValue(view.scope, rec.field.path);
     var ctrls = rec.built ? rec.built.controls : [];
     for (var i = 0; i < ctrls.length; i++) {
       var c = ctrls[i];
@@ -438,12 +462,13 @@
   function refreshField(LX, view, rec) {
     var scope = view.scope;
     var path = rec.field.path;
-    var dirty = LX.isDirty(scope, path);
+    var ctx = ctxOf(view);
+    var dirty = ctx.isDirty(scope, path);
     rec.badgeDirty.classList.toggle("hidden", !dirty);
     rec.wrap.classList.toggle("is-dirty", dirty);
     var local = view.localErr[path];
-    rec.resetBtn.disabled = !local && deepEqual(LX.getValue(scope, path), rec.field.default);
-    var serverErr = LX.getError(scope, path);
+    rec.resetBtn.disabled = !local && deepEqual(ctx.getValue(scope, path), rec.field.default);
+    var serverErr = ctx.getError(scope, path);
     rec.errEl.textContent = local || serverErr || "";
     var vis = condVisible(LX, scope, blockOfKey(scope, rec.blockKey), rec.field);
     rec.wrap.style.display = vis ? "" : "none";
@@ -469,7 +494,8 @@
 
   function renderField(LX, view, block, field) {
     var isCond = !!(field.condition && field.condition.length);
-    var dirty0 = LX.isDirty(view.scope, field.path);
+    var ctx0 = ctxOf(view);
+    var dirty0 = ctx0.isDirty(view.scope, field.path);
     var wrap = LX.el("div", {
       class: "field " + fieldKind(field) + (isCond ? " field-cond" : "") + (dirty0 ? " is-dirty" : ""),
       dataset: { scope: view.scope, path: field.path }
@@ -494,12 +520,13 @@
     var built = buildControl(LX, view, block, field, box);
     var errEl = LX.el("div", { class: "field-error" });
     var local = view.localErr[field.path];
-    var serverErr = LX.getError(view.scope, field.path);
+    var serverErr = ctx0.getError(view.scope, field.path);
     if (local || serverErr) errEl.textContent = local || serverErr;
     side.appendChild(errEl);
     wrap.appendChild(side);
     /* 底：默认值 + 恢复默认（和默认值一样时按钮隐藏） */
-    var cur = LX.getValue(view.scope, field.path);
+    var ctx = ctx0;
+    var cur = ctx.getValue(view.scope, field.path);
     var resetBtn = LX.el("button", {
       class: "small ghost field-reset", text: "恢复默认",
       disabled: deepEqual(cur, field.default)
@@ -508,7 +535,7 @@
     if (undo) resetBtn.insertBefore(undo, resetBtn.firstChild);
     resetBtn.addEventListener("click", function () {
       delete view.localErr[field.path];
-      LX.setValue(view.scope, field.path, field.default);
+      ctx.setValue(view.scope, field.path, field.default);
     });
     wrap.appendChild(LX.el("div", { class: "field-foot" }, [
       LX.el("span", { class: "field-default", text: "默认：" + fmtDefault(field.default) }), resetBtn
@@ -719,6 +746,21 @@
   function boot() {
     var LX = window.LX;
     if (!LX || typeof LX.registerTab !== "function") return;
+    /* SR-UI：把控件渲染对外开放，面板里的「逐项表单」拿同一套控件渲染它自己的条目，
+     * 不另写第二份 bool / 数字 / 滑块 / 下拉 / 文本。 */
+    LX.formKit = {
+      /* 一个新控件视图：值读写全走 ctx（见 GLOBAL_CTX 的注释）。 */
+      makeView: function (scope, ctx) {
+        return { scope: scope, ctx: ctx, blockKey: null, localErr: {}, fields: {} };
+      },
+      /* 在 box 里建一个 field 的控件；返回 {controls, toggleText?, countEl?, countKind?}。 */
+      buildControl: function (view, field, box) {
+        return buildControl(LX, view, null, field, box);
+      },
+      fieldKind: fieldKind,
+      fmtDefault: fmtDefault,
+      sanitizeId: sanitizeId
+    };
     /* 保存 / 放弃之前，壳会调用它把 150ms 防抖里还没落下的输入先暂存。 */
     if (typeof LX.addFlusher === "function") LX.addFlusher(flushAllPending);
     LX.registerTab({
