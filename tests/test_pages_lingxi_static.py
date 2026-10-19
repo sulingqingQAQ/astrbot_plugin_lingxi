@@ -349,6 +349,29 @@ class TestLingxiSrUiStatic(unittest.TestCase):
         for bad in ("createElement(\"input\")", "createElement('input')"):
             self.assertNotIn(bad, region, "逐项表单里不该自己建输入控件（复用 formKit）")
 
+    def test_item_view_record_matches_form_js_shape(self):
+        """逐项表单借用 form.js 的控件渲染，就得给它 form.js 认得的字段记录：
+        syncControl 读 rec.field / rec.built，pushInvalid 读 rec.errEl / rec.resetBtn，
+        索引键是 field.path（不是短名）。少了哪个都在运行时才炸。"""
+        region = self.sr_region()
+        for need in ("field: field", "errEl: errEl", "built: built",
+                     "resetBtn:", "blockKey: blockKey", "field.path"):
+            self.assertIn(need, region, "逐项表单给 form.js 的字段记录缺 %s" % need)
+        self.assertIn("view.localErr[field.path]", region)
+        self.assertNotIn("view.localErr[name]", region, "localErr 要按 field.path 索引")
+
+    def test_panel_copy_is_per_session_and_converts_to_backend_rows(self):
+        """面板的一张卡 = 一个会话（项可以来自不同块，项名用全路径 "块.项"）；
+        交给 app.js / 后端的必须是「按块拆开」的条目列表。这两件事不对上，
+        行的块名就会和项的块名打岔（曾把项挂到 entry.block 上，行渲染成"找不到这一项"）。"""
+        region = self.sr_region()
+        self.assertIn("markRulesDirty(backendEntries())", region,
+                      "交给 app.js 的必须是后端形状（按块拆开），不是面板的按会话副本")
+        for need in ("function backendEntries()", "function savedEntries()",
+                     "function blockOfPath(", "function nameOfPath("):
+            self.assertIn(need, region, "逐项表单缺转换函数 %s" % need)
+        self.assertNotIn("entry.block", region, "面板副本里不该再有单个 entry.block")
+
     def test_no_confirm_like_delete(self):
         # 没有 allow-modals：删除会话要就地二次确认
         self.assertIn("armed", self.js, "删除会话要就地二次确认")

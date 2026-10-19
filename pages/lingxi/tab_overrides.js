@@ -120,6 +120,9 @@
   /* ================= 逐项表单（SR-UI） =================
    * 和 AstrBot 自带配置页的 template_list 读写**同一份** session_rules；
    * 面板与后端之间走「条目列表」：{scope, session, block, items}（口径见 SR-UI 卡 §1）。
+   * 面板里的工作副本是**按会话**的（一张卡片一个群 / 一个人），一张卡里的项可以来自不同块，
+   * 所以项名用全路径（"context.max_messages"）；发给后端前再按块拆回 (scope, session, block)
+   * ——见 savedEntries / backendEntries 这一对转换。
    * 控件复用 form.js 的 LX.formKit（bool / 数字 / 滑块 / 下拉 / 文本），不另写一套。 */
   var xr = {
     card: null, list: null, empty: null, saveNote: null, addErr: null,
@@ -154,25 +157,66 @@
     return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
   }
 
-  /* 后端的条目列表 → 面板的工作副本（按 (scope, session, block) 排一下，看着稳）。 */
+  /* 后端的条目列表 → 面板的工作副本：同一个会话的多个块并成一张卡，
+   * 项名改成全路径（"块.项"）。排序只为看着稳。 */
   function savedEntries() {
     var raw = LX.state.config && LX.state.config.session_rules;
     var out = [];
+    var byKey = {};
     if (Array.isArray(raw)) {
       raw.forEach(function (e) {
         if (!e || typeof e !== "object") return;
-        out.push({
-          scope: String(e.scope || ""), session: String(e.session === undefined ? "" : e.session).trim(),
-          block: String(e.block || ""), items: clone(e.items || {}) || {}
+        var scope = String(e.scope || "");
+        var session = String(e.session === undefined ? "" : e.session).trim();
+        var block = String(e.block || "");
+        var key = scope + "|" + session;
+        var entry = byKey[key];
+        if (!entry) {
+          entry = { scope: scope, session: session, items: {} };
+          byKey[key] = entry;
+          out.push(entry);
+        }
+        var items = e.items || {};
+        Object.keys(items).forEach(function (name) {
+          entry.items[block + "." + name] = clone(items[name]);
         });
       });
     }
     out.sort(function (a, b) {
-      var ka = a.scope + "|" + a.session + "|" + a.block;
-      var kb = b.scope + "|" + b.session + "|" + b.block;
+      var ka = a.scope + "|" + a.session;
+      var kb = b.scope + "|" + b.session;
       return ka < kb ? -1 : (ka > kb ? 1 : 0);
     });
     return out;
+  }
+
+  /* 面板的工作副本 → 后端的条目列表：按块拆回 (scope, session, block)；
+   * 一项都没有的（只加了会话还没加项）不发，不然会写出一行空覆盖。 */
+  function backendEntries() {
+    var out = [];
+    xr.entries.forEach(function (e) {
+      var byBlock = {};
+      Object.keys(e.items || {}).forEach(function (path) {
+        var block = blockOfPath(path);
+        if (!block) return;
+        if (!byBlock[block]) byBlock[block] = {};
+        byBlock[block][nameOfPath(path)] = clone(e.items[path]);
+      });
+      Object.keys(byBlock).sort().forEach(function (block) {
+        out.push({ scope: e.scope, session: e.session, block: block, items: byBlock[block] });
+      });
+    });
+    return out;
+  }
+
+  function blockOfPath(path) {
+    var dot = String(path).indexOf(".");
+    return dot < 0 ? "" : String(path).slice(0, dot);
+  }
+
+  function nameOfPath(path) {
+    var dot = String(path).indexOf(".");
+    return dot < 0 ? String(path) : String(path).slice(dot + 1);
   }
 
   function scopeBlocks(scope) {
@@ -181,21 +225,19 @@
     return list.filter(function (b) { return b && b.overridable !== false; });
   }
 
-  function fieldOf(scope, blockKey, name) {
+  function fieldOf(scope, path) {
     var blocks = scopeBlocks(scope);
     for (var i = 0; i < blocks.length; i++) {
-      if (blocks[i].key !== blockKey) continue;
       var fields = blocks[i].fields || [];
       for (var j = 0; j < fields.length; j++) {
-        if (fields[j].path === blockKey + "." + name) return fields[j];
+        if (fields[j].path === path) return fields[j];
       }
     }
     return null;
   }
 
   /* 该 scope 当前的全局值（含未保存的全局改动 → 用 LX.getValue）。 */
-  function globalValue(scope, blockKey, name) {
-    var path = blockKey + "." + name;
+  function globalValue(scope, path) {
     var v = LX.getValue(scope, path);
     if (v !== undefined) return v;
     var f = LX.fieldMeta(scope, path);
@@ -205,38 +247,48 @@
   function entryKey(e) { return e.scope + ":" + e.session; }
 
   function touchRules() {
-    LX.markRulesDirty(xr.entries);
+    LX.markRulesDirty(backendEntries());
     updateRulesSaveNote();
   }
 
-  function removeItem(entry, name) {
-    if (entry.items && Object.prototype.hasOwnProperty.call(entry.items, name)) {
-      delete entry.items[name];
+  function removeItem(entry, path) {
+    if (entry.items && Object.prototype.hasOwnProperty.call(entry.items, path)) {
+      delete entry.items[path];
     }
     touchRules();
     renderRules();
   }
 
   /* 一行：块 · 项名，右边是控件，再右边是全局值和删除。 */
-  function itemRow(entry, blockKey, name, field) {
+  function itemRow(entry, path, field) {
+    var blockKey = blockOfPath(path);
+    var name = nameOfPath(path);
     var row = LX.el("div", { class: "sr-item", dataset: { block: blockKey, item: name } });
     var title = LX.el("div", { class: "sr-item-title" }, [
       LX.el("span", { class: "sr-item-block sr-block", text: blockTitle(entry.scope, blockKey) + " · " }),
-      LX.el("span", { class: "sr-item-name", text: fieldTitle(entry.scope, blockKey + "." + name) })
+      LX.el("span", { class: "sr-item-name", text: fieldTitle(entry.scope, path) })
     ]);
     var box = LX.el("div", { class: "field-control sr-control" });
     var errEl = LX.el("div", { class: "field-error sr-item-err" });
     var st = { view: null };
     var view = LX.formKit
-      ? LX.formKit.makeView(entry.scope, itemCtx(entry, name, field, row, st))
+      ? LX.formKit.makeView(entry.scope, itemCtx(entry, path, field, row, st))
       : null;
     st.view = view;
     if (view) {
-      view.fields[name] = { errEl: errEl, resetBtn: { disabled: false } };
-      LX.formKit.buildControl(view, field, box);
+      /* 给 form.js 的字段记录：它的控件在 change 时会读 rec.field / rec.built（syncControl），
+       * 无效输入时会读 rec.errEl / rec.resetBtn（pushInvalid），少了哪个都会在运行时炸。
+       * 索引键用 field.path（和 form.js 内部一致），不是短名。
+       * 本行没有"恢复默认"按钮，resetBtn 只当个占位（form.js 只写它的 disabled）。 */
+      var built = LX.formKit.buildControl(view, field, box);
+      view.fields[field.path] = {
+        wrap: null, badgeNew: null, badgeDirty: null,
+        resetBtn: { disabled: false }, errEl: errEl,
+        field: field, blockKey: blockKey, built: built
+      };
     }
-    var cur = entry.items ? entry.items[name] : undefined;
-    var gv = globalValue(entry.scope, blockKey, name);
+    var cur = entry.items ? entry.items[path] : undefined;
+    var gv = globalValue(entry.scope, path);
     var side = LX.el("div", { class: "sr-item-side" }, [
       box, errEl,
       LX.el("div", { class: "sr-global muted", text: "（全局 " + fmtValue(gv) + "）" })
@@ -245,7 +297,7 @@
     row.appendChild(side);
     var del = iconButton({ class: "small ghost sr-del-item", text: "删掉这一项" }, "trash");
     del.setAttribute("aria-label", "删掉这一项");
-    del.addEventListener("click", function () { removeItem(entry, name); });
+    del.addEventListener("click", function () { removeItem(entry, path); });
     row.appendChild(del);
     if (deepEqual(cur, field.default)) {
       row.appendChild(sameDefaultNote());
@@ -259,21 +311,21 @@
   }
 
   /* 逐项表单自己的取值口：直接读写这条目里的项（form.js 的控件经它取值）。 */
-  function itemCtx(entry, name, field, row, st) {
+  function itemCtx(entry, path, field, row, st) {
     return {
-      getValue: function () { return entry.items ? entry.items[name] : undefined; },
+      getValue: function () { return entry.items ? entry.items[path] : undefined; },
       setValue: function (_scope, _path, value) {
         if (!entry.items) entry.items = {};
-        entry.items[name] = clone(value);
+        entry.items[path] = clone(value);
         touchRules();
-        refreshRowNote(row, entry, name, field, st);
+        refreshRowNote(row, entry, path, field, st);
       },
       /* 无效输入（清空 / 不是数）：这一项不生效，直接把它从条目里去掉，
        * 免得保存时把上一次的有效值发出去，而输入框里已经是另一回事。 */
       revertValue: function () {
-        if (entry.items) delete entry.items[name];
+        if (entry.items) delete entry.items[path];
         touchRules();
-        refreshRowNote(row, entry, name, field, st);
+        refreshRowNote(row, entry, path, field, st);
       },
       isDirty: function () { return true; },
       getError: function () { return null; }
@@ -281,8 +333,8 @@
   }
 
   /* 输入之后只更新这一行的红字和"和默认一样"小字，不重建控件（否则会把光标弄丢）。 */
-  function refreshRowNote(row, entry, name, field, st) {
-    var cur = entry.items ? entry.items[name] : undefined;
+  function refreshRowNote(row, entry, path, field, st) {
+    var cur = entry.items ? entry.items[path] : undefined;
     var old = row.querySelector(".sr-same-default");
     if (deepEqual(cur, field.default)) {
       if (!old) row.appendChild(sameDefaultNote());
@@ -291,12 +343,12 @@
     }
     var errEl = row.querySelector(".sr-item-err");
     if (errEl) {
-      var local = st && st.view ? st.view.localErr[name] : "";
+      var local = st && st.view ? st.view.localErr[field.path] : "";
       errEl.textContent = local || "";
     }
   }
 
-  /* 「加一项」：先选块，再选项（排除已经加上的）。 */
+  /* 「加一项」：先选块，再选项（选项的值 = 全路径，排除已经加上的）。 */
   function addItemPanel(entry, idx) {
     var blocks = scopeBlocks(entry.scope);
     var st = xr.pendingAdd;
@@ -314,17 +366,16 @@
     var cur = null;
     blocks.forEach(function (b) { if (b.key === st.block) cur = b; });
     var avail = ((cur && cur.fields) || []).filter(function (f) {
-      var name = f.path.slice(f.path.indexOf(".") + 1);
-      return !entry.items || !Object.prototype.hasOwnProperty.call(entry.items, name);
+      return !entry.items || !Object.prototype.hasOwnProperty.call(entry.items, f.path);
     });
     var fldSel = document.createElement("select");
     fldSel.id = "sr-field-pick";
     fldSel.setAttribute("aria-label", "配置项");
     avail.forEach(function (f) {
-      var name = f.path.slice(f.path.indexOf(".") + 1);
       var o = document.createElement("option");
-      o.value = name;
-      o.textContent = f.title || name;
+      o.value = f.path;
+      o.textContent = f.title || f.path;
+      if (f.path === st.field) o.selected = true;
       fldSel.appendChild(o);
     });
     var addBtn = iconButton({ class: "small primary", text: "添加" }, "plus");
@@ -333,6 +384,7 @@
     cancel.id = "sr-item-cancel";
     blkSel.addEventListener("change", function () {
       st.block = blkSel.value;
+      st.field = undefined;
       renderRules();
     });
     fldSel.addEventListener("change", function () { st.field = fldSel.value; });
@@ -340,13 +392,11 @@
       if (!avail.length) return;
       var f = avail[0];
       for (var i = 0; i < avail.length; i++) {
-        var nm = avail[i].path.slice(avail[i].path.indexOf(".") + 1);
-        if (nm === (fldSel.value || st.field)) f = avail[i];
+        if (avail[i].path === (fldSel.value || st.field)) f = avail[i];
       }
-      var name = f.path.slice(f.path.indexOf(".") + 1);
       if (!entry.items) entry.items = {};
       // 初值 = 这个 scope 当前的全局值：加了就能看着改，不动就是跟随全局
-      entry.items[name] = clone(globalValue(entry.scope, f.path.slice(0, f.path.indexOf(".")), name));
+      entry.items[f.path] = clone(globalValue(entry.scope, f.path));
       xr.pendingAdd = null;
       touchRules();
       renderRules();
@@ -415,17 +465,20 @@
     if (!names.length) {
       card.appendChild(LX.el("div", { class: "sr-entry-empty muted", text: "这个会话还没改任何项：点“加一项”。" }));
     }
-    names.forEach(function (name) {
-      var field = fieldOf(entry.scope, entry.block, name);
+    names.forEach(function (path) {
+      var field = fieldOf(entry.scope, path);
       if (!field) {
         // 配置里已经不存在的项（老表单留下的）：只报一句，别让整块渲染断掉
-        card.appendChild(LX.el("div", { class: "sr-item", dataset: { block: entry.block, item: name } }, [
-          LX.el("div", { class: "sr-item-title", text: entry.block + " · " + name }),
+        card.appendChild(LX.el("div", {
+          class: "sr-item",
+          dataset: { block: blockOfPath(path), item: nameOfPath(path) }
+        }, [
+          LX.el("div", { class: "sr-item-title", text: path }),
           LX.el("div", { class: "sr-item-err", text: "这一项在现在的配置里找不到了，保存会被拒绝；删掉它或者改回去。" })
         ]));
         return;
       }
-      card.appendChild(itemRow(entry, entry.block, name, field));
+      card.appendChild(itemRow(entry, path, field));
     });
     return card;
   }
@@ -460,8 +513,7 @@
       xr.addErr.textContent = "这个会话已经在上面了（" + scopeTitle(scope) + " " + session + "）。";
       return;
     }
-    xr.entries.push({ scope: scope, session: session, block: scopeBlocks(scope).length
-      ? scopeBlocks(scope)[0].key : "", items: {} });
+    xr.entries.push({ scope: scope, session: session, items: {} });
     xr.sessionInput.value = "";
     xr.pendingAdd = null;
     touchRules();
