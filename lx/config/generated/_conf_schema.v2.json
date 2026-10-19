@@ -345,7 +345,7 @@
       "context": {
         "description": "上下文",
         "type": "object",
-        "hint": "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
+        "hint": "bot 能看到多少聊天记录、怎么看、要不要记状态块。",
         "items": {
           "enabled": {
             "description": "启用历史缓冲",
@@ -1450,7 +1450,7 @@
       "context": {
         "description": "上下文",
         "type": "object",
-        "hint": "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
+        "hint": "bot 能看到多少聊天记录、怎么看、要不要记状态块。",
         "items": {
           "enabled": {
             "description": "启用历史缓冲",
@@ -2481,7 +2481,7 @@
       },
       "private.context": {
         "name": "私聊·上下文",
-        "hint": "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
+        "hint": "bot 能看到多少聊天记录、怎么看、要不要记状态块。",
         "display_item": "session",
         "items": {
           "session": {
@@ -3626,7 +3626,7 @@
       },
       "group.context": {
         "name": "群聊·上下文",
-        "hint": "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
+        "hint": "bot 能看到多少聊天记录、怎么看、要不要记状态块。",
         "display_item": "session",
         "items": {
           "session": {

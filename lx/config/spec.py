@@ -364,7 +364,7 @@ _GATE = Block(
 _CONTEXT = Block(
     "context",
     "上下文",
-    "bot 能看到多少聊天记录、怎么看、要不要记便签和长期记忆。",
+    "bot 能看到多少聊天记录、怎么看、要不要记状态块。",
     (
         _f("context.enabled", "bool", True, True, "启用历史缓冲",
            "开启后 lingxi 会把这个会话的消息记下来（含图片说明），回复时一并交给模型看。关掉则模型只能看到 AstrBot 自己的对话记录。"
