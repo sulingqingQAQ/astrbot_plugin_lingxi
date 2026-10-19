@@ -285,7 +285,7 @@ def entries_to_rows(entries: Any) -> tuple[list, list, list]:
                 continue
             ok, result = spec.validate_value(f, value)
             if not ok:
-                errors.append(f"{head}：『{f.description}』{result}")
+                errors.append(f"{head}：『{blk.description}』里的『{f.description}』{result}")
                 continue
             if result == f.default(Scope(scope_text)):
                 dropped.append((scope_text, session, blk.key, f.name))

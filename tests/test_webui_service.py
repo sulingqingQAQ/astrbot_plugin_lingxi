@@ -10,8 +10,9 @@ import json
 import os
 import unittest
 
+from lx.config import session_rules as sr
 from lx.config import spec
-from lx.contracts import Scope
+from lx.contracts import Scope, SessionKey
 from lx.webui.service import ConfigService
 
 
@@ -240,7 +241,190 @@ class SaveConfigTest(unittest.TestCase):
             json.dumps(data)
 
 
-class CheckOverridesTest(unittest.TestCase):
+class SessionRulesEntriesTest(unittest.TestCase):
+    """SR-UI §2：get_config 带条目列表、revision 跟着变、save 带 / 不带 / []、
+    整体拒绝、丢默认值进 warnings、YAML 不被表单保存动到、生效值对。"""
+
+    @staticmethod
+    def _entry(scope, session, block, items):
+        return {"scope": scope, "session": session, "block": block, "items": items}
+
+    @staticmethod
+    def _row(scope, block, session, **values):
+        row = {"__template_key": sr.template_key(Scope(scope), block), sr.SESSION_ITEM: session}
+        for f in spec.block(block).fields_for(Scope(scope)):
+            row[f.name] = f.default(Scope(scope))
+        row.update(values)
+        return row
+
+    def test_get_config_empty_form(self):
+        got = _Harness().svc().get_config()
+        self.assertEqual(got["session_rules"], [])
+        json.dumps(got)
+
+    def test_get_config_returns_entries(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        h = _Harness({"session_rules": [self._row("group", "context", " 900100200 ", max_messages=d + 5)]})
+        got = h.svc().get_config()
+        self.assertEqual(got["session_rules"],
+                         [self._entry("group", "900100200", "context", {"max_messages": d + 5})])
+        self.assertEqual(got["warnings"], [])
+        json.dumps(got)
+
+    def test_get_config_reports_bad_rows_as_warnings(self):
+        h = _Harness({"session_rules": ["坏行", {"__template_key": "nope.nope", "session": "1"}]})
+        got = h.svc().get_config()
+        self.assertEqual(got["session_rules"], [])
+        self.assertEqual(len(got["warnings"]), 2, got["warnings"])
+        self.assertTrue(all("会话覆盖表单第 " in w for w in got["warnings"]))
+
+    def test_revision_follows_the_form(self):
+        svc = _Harness().svc()
+        r1 = svc.get_config()["revision"]
+        svc = _Harness({"session_rules": [self._row("group", "context", "1",
+                                                    max_messages=spec.field("context.max_messages").default(Scope.GROUP) + 1)]}).svc()
+        self.assertNotEqual(r1, svc.get_config()["revision"])
+        # 内容一样、写法不一样（项顺序 / 条目顺序 / session 前后空白）→ revision 一样
+        rows_a = [self._row("group", "context", "1", max_messages=201, inject_chars=1000)]
+        rows_b = [self._row("group", "context", " 1 ", inject_chars=1000, max_messages=201)]
+        self.assertEqual(_Harness({"session_rules": rows_a}).svc().get_config()["revision"],
+                         _Harness({"session_rules": rows_b}).svc().get_config()["revision"])
+
+    def _save(self, h, changes=None, **body_kw):
+        svc = h.svc()
+        body = {"revision": _rev_of(svc), "changes": changes or []}
+        body.update(body_kw)
+        return svc, svc.save_config(body)
+
+    def test_save_writes_sparse_rows(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        h = _Harness()
+        _svc, data = self._save(h, session_rules=[
+            self._entry("group", "900100200", "context", {"max_messages": d + 5})])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_rules"],
+                         [{"__template_key": "group.context", "session": "900100200",
+                           "max_messages": d + 5}])
+        self.assertIn({"scope": None, "path": "session_rules"}, data["applied"])
+        self.assertEqual(h.save_calls, 1)
+        self.assertEqual(len(h.reload_calls), 1)
+        self.assertEqual(data["config"]["session_rules"],
+                         [self._entry("group", "900100200", "context", {"max_messages": d + 5})])
+        json.dumps(data)
+
+    def test_absent_or_none_leaves_form_alone(self):
+        rows = [self._row("group", "context", "1",
+                          max_messages=spec.field("context.max_messages").default(Scope.GROUP) + 1)]
+        for body_kw in ({}, {"session_rules": None}):
+            h = _Harness({"session_rules": list(rows)})
+            _svc, data = self._save(h, **body_kw)
+            self.assertTrue(data["saved"], data)
+            self.assertEqual(h.conf["session_rules"], rows)
+            self.assertNotIn({"scope": None, "path": "session_rules"}, data["applied"])
+
+    def test_empty_list_clears_the_form(self):
+        rows = [self._row("group", "context", "1",
+                          max_messages=spec.field("context.max_messages").default(Scope.GROUP) + 1)]
+        h = _Harness({"session_rules": rows})
+        _svc, data = self._save(h, session_rules=[])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_rules"], [])
+        self.assertIn({"scope": None, "path": "session_rules"}, data["applied"])
+
+    def test_validation_error_rejects_everything(self):
+        h = _Harness({"private": {"idle": {"base_minutes": 30}}})
+        before = json.loads(json.dumps(h.conf))
+        _svc, data = self._save(h, [{"scope": "private", "path": "idle.base_minutes", "value": 45}],
+                                session_rules=[self._entry("group", "1", "context", {"max_messages": 0})])
+        self.assertFalse(data["saved"])
+        self.assertTrue(data["errors"])
+        self.assertTrue(all(e["path"] == "session_rules" for e in data["errors"]), data["errors"])
+        self.assertIn("第 1 条", data["errors"][0]["message"])
+        self.assertEqual(h.conf, before)   # 表单错时别的改动也不写
+        self.assertEqual(h.save_calls, 0)
+        self.assertEqual(h.reload_calls, [])
+
+    def test_error_message_names_session_and_block(self):
+        h = _Harness()
+        _svc, data = self._save(h, session_rules=[
+            self._entry("group", "1", "context", {"max_messages": 5}),
+            self._entry("group", "900100200", "context", {"max_messages": 0})])
+        self.assertFalse(data["saved"])
+        msg = data["errors"][0]["message"]
+        self.assertIn("第 2 条", msg)
+        self.assertIn("900100200", msg)
+        self.assertIn(spec.block("context").description, msg)
+        self.assertIn(spec.field("context.max_messages").description, msg)
+
+    def test_not_a_list_rejected(self):
+        h = _Harness()
+        _svc, data = self._save(h, session_rules="不是列表")
+        self.assertFalse(data["saved"])
+        self.assertEqual(data["errors"][0]["path"], "session_rules")
+        self.assertNotIn("session_rules", h.conf)
+
+    def test_default_values_dropped_with_warning(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        h = _Harness()
+        _svc, data = self._save(h, session_rules=[
+            self._entry("private", "10001", "base", {"take_over": False}),
+            self._entry("group", "900100200", "context", {"max_messages": d, "inject_chars": d + 7})])
+        self.assertTrue(data["saved"], data)
+        # take_over 的私聊默认就是 False → 整条没有了；max_messages 被丢，inject_chars 留下
+        self.assertEqual(h.conf["session_rules"],
+                         [{"__template_key": "group.context", "session": "900100200",
+                           "inject_chars": d + 7}])
+        self.assertEqual(len(data["config"]["session_rules"]), 1)
+        # 加载提示（"加载提示A"）也在 warnings 里，这里只数"被丢掉"的那两句
+        warns = [w for w in data["config"]["warnings"] if "和出厂默认一样" in w]
+        self.assertEqual(len(warns), 2, data["config"]["warnings"])
+        self.assertTrue(any(spec.field("context.max_messages").description in w for w in warns), warns)
+        self.assertTrue(any("YAML" in w for w in warns), warns)
+
+    def test_save_does_not_touch_yaml_overrides(self):
+        text = 'group:900100200:\n  idle:\n    base_minutes: 12\n'
+        h = _Harness({"session_overrides": text})
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        _svc, data = self._save(h, session_rules=[
+            self._entry("group", "900100200", "context", {"max_messages": d + 1})])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_overrides"], text)
+        self.assertNotIn("session_overrides", [a["path"] for a in data["applied"]])
+
+    def test_save_both_yaml_and_form(self):
+        h = _Harness()
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        _svc, data = self._save(
+            h, session_overrides="private:2:\n  base:\n    take_over: true\n",
+            session_rules=[self._entry("group", "900100200", "context", {"max_messages": d + 1})])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_overrides"], "private:2:\n  base:\n    take_over: true\n")
+        self.assertEqual(sorted(a["path"] for a in data["applied"]),
+                         ["session_overrides", "session_rules"])
+
+    def test_effective_values_after_save(self):
+        h = _Harness()
+        svc, data = self._save(h, session_rules=[
+            self._entry("group", "900100200", "context", {"max_messages": 80})])
+        self.assertTrue(data["saved"], data)
+        r = svc._temp_resolver()
+        self.assertEqual(r.warnings, [])
+        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "900100200", "")).get("context.max_messages"), 80)
+        self.assertEqual(
+            r.resolve(SessionKey(Scope.GROUP, "555", "")).get("context.max_messages"),
+            spec.field("context.max_messages").default(Scope.GROUP))
+
+    def test_form_beats_yaml_for_the_same_item(self):
+        text = 'group:900100200:\n  context:\n    max_messages: 33\n'
+        h = _Harness({"session_overrides": text})
+        svc, data = self._save(h, session_rules=[
+            self._entry("group", "900100200", "context", {"max_messages": 44})])
+        self.assertTrue(data["saved"], data)
+        r = svc._temp_resolver()
+        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "900100200", "")).get("context.max_messages"), 44)
+
+
+
     def test_good_text(self):
         h = _Harness()
         got = h.svc().check_overrides('{"group:900100200": {"idle": {"base_minutes": 7}}}')

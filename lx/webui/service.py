@@ -109,6 +109,18 @@ class ConfigService:
             return ""
         return text if isinstance(text, str) else ""
 
+    def _overrides_entries(self) -> tuple[list, list]:
+        """conf 里的表单行 → （条目列表, 提示列表）。读坏了只提示，不抛（堵住面板点不动的情况）。"""
+        try:
+            rows = self._conf.get(_session_rules.RULES_KEY)
+        except Exception:
+            return [], []
+        try:
+            entries, errors = _session_rules.rows_to_entries(rows)
+        except Exception as e:  # noqa: BLE001
+            return [], [f"会话覆盖表单解析失败：{e}"]
+        return entries, errors
+
     def _overlay(self, scope: Scope) -> tuple[dict, list]:
         """该 scope 规整后的 {块: {键: 值}} + 本次产生的 warnings。
 
@@ -151,9 +163,11 @@ class ConfigService:
                 tree[block_key][name] = result
         return tree, warnings
 
-    def _revision(self, private: dict, group: dict, overrides_text: str) -> str:
-        payload = {"private": private, "group": group, "session_overrides": overrides_text}
-        text = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    def _revision(self, private: dict, group: dict, overrides_text: str,
+                  rules_entries: Optional[list] = None) -> str:
+        payload = {"private": private, "group": group, "session_overrides": overrides_text,
+                   "session_rules": _session_rules.normalize_entries(rules_entries or [])}
+        text = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
     def _temp_resolver(self) -> ConfigResolver:
@@ -191,12 +205,14 @@ class ConfigService:
             private, w1 = self._overlay(Scope.PRIVATE)
             group, w2 = self._overlay(Scope.GROUP)
             text = self._stored_overrides_text()
+            entries, w3 = self._overrides_entries()
             return {
                 "private": private,
                 "group": group,
                 "session_overrides": text,
-                "revision": self._revision(private, group, text),
-                "warnings": self._current_warnings() + w1 + w2,
+                "session_rules": entries,
+                "revision": self._revision(private, group, text, entries),
+                "warnings": self._current_warnings() + w1 + w2 + w3,
             }
         except Exception as e:  # noqa: BLE001
             return _err(f"读配置失败：{e}")
@@ -263,7 +279,7 @@ class ConfigService:
                     continue
             valid.append((scope, path, block_key, name, result))
 
-        # ① 覆盖表：有错就整体拒绝。
+        # ② 覆盖表：有错就整体拒绝。
         new_text: Optional[str] = None
         # None 当作"没带这个字段"（不写）；要清空覆盖表请传空字符串 ""（UI-7 #16）
         if body.get("session_overrides") is not None:
@@ -283,6 +299,22 @@ class ConfigService:
                     errors.append({"scope": None, "path": "session_overrides", "message": msg})
             else:
                 new_text = text if isinstance(text, str) else ""
+
+        # ③ 逐项表单（session_rules 条目列表）：有错就整体拒绝。
+        # None / 不带 = 不动；[] = 清空表单；有内容 = 校验通过后整体重写成稀疏行（SR-UI §2）。
+        new_rows: Optional[list] = None
+        dropped_defaults: list = []
+        if body.get("session_rules") is not None:
+            entries = body.get("session_rules")
+            try:
+                rows, rule_errors, dropped_defaults = _session_rules.entries_to_rows(entries)
+            except Exception as e:  # noqa: BLE001
+                rows, rule_errors, dropped_defaults = [], [f"会话覆盖表单检查失败：{e}"], []
+            if rule_errors:
+                for msg in rule_errors:
+                    errors.append({"scope": None, "path": _session_rules.RULES_KEY, "message": msg})
+            else:
+                new_rows = rows
         if errors:
             return _fail(errors)
 
@@ -313,6 +345,8 @@ class ConfigService:
                 blk[name] = copy.deepcopy(result)
             if new_text is not None:
                 self._conf["session_overrides"] = new_text
+            if new_rows is not None:
+                self._conf[_session_rules.RULES_KEY] = new_rows
         except Exception as e:  # noqa: BLE001
             if snapshot is not None:
                 try:
@@ -350,11 +384,19 @@ class ConfigService:
         applied = [{"scope": scope_value, "path": path} for scope_value, path in merged]
         if new_text is not None:
             applied.append({"scope": None, "path": "session_overrides"})
+        if new_rows is not None:
+            applied.append({"scope": None, "path": _session_rules.RULES_KEY})
         config = self.get_config()
         if "error" in config:
             return config
+        extra_warnings: list[str] = []
         if hints:
-            config["warnings"] = config.get("warnings", []) + hints
+            extra_warnings.extend(hints)
+        for scope_value, _session, block_key, name in dropped_defaults:
+            extra_warnings.append(
+                _session_rules.dropped_defaults_warning(scope_value, block_key, name))
+        if extra_warnings:
+            config["warnings"] = config.get("warnings", []) + extra_warnings
         data: dict[str, Any] = {"saved": True, "applied": applied,
                                 "config": config, "reloaded": reloaded}
         if not reloaded:
