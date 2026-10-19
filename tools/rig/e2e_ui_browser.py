@@ -12,10 +12,13 @@ tools/rig/e2e_ui.py。失败 = 要找的 bug：如实报现象 + 证据 + 原因
 流程：build 打包 -> prepare_root 写 cmd_config.json -> 写隔离根自己的
 dashboard 测试账号（随机密码，只在内存里，哈希才落盘）-> install_plugin 装插件
 并写插件配置（私聊白名单 ["10001"]）-> 起 FakeLLM / AstrBotProc / FakeNapCat
--> 起全新 profile 的无头 Edge -> 跑 B1..B7、B9 -> 全部停掉 -> B8 收尾核对。
+-> 起全新 profile 的无头 Edge -> 跑 B1..B7、B9、B10 -> 全部停掉 -> B8 收尾核对。
 B9（DIAG-3m）：诊断标签——先用假 NapCat + 假 LLM 发一轮私聊制造一条送达事件，再在页面里
 看磁贴 / 时间线、勾"包含回复正文"、点导出并用 CDP 接住下载，核对 zip 里默认没有回复正文。
 B9 自己会打开插件页，所以可以单跑：--only B1 B9。
+B10（SR-UI）：面板里的「逐项表单」——加一个群会话、加一项（上下文·聊天记录条数）改值、保存，
+核对磁盘 session_rules 的稀疏行、且 session_overrides 没被动，刷新后条目还在、值还在。
+B10 自己会打开插件页，所以可以单跑：--only B1 B10。
 
 运行（wt-UI6b 根目录）：
 F:\\Gemini\\AstrBot\\AstrBot\\backend\\python\\python.exe -I tools/rig/e2e_ui_browser.py [--only B1 B2 ...] [--out 截图目录]
@@ -65,6 +68,9 @@ DL_DIR = os.path.join(ROOT, "downloads")   # B9 用 CDP 把下载指到隔离根
 EXPECT_VERSION = "v3.0.0-dev.1"
 OV_GROUP = "900100200"
 OV_YAML = "group:%s:\n  idle:\n    base_minutes: 12\n" % OV_GROUP
+# B10 逐项表单：合成群号，和 OV_GROUP（覆盖表那个）分开，两条路径互不干扰
+SR_GROUP = "900100300"
+SR_ITEM_PATH = "context.max_messages"   # 上下文 · 聊天记录条数（整数，带滑块）
 STYLE_LINE = "合成风格：UI6b 浏览器端到端写入的一行"
 
 
@@ -772,6 +778,152 @@ async def _sc_B9(ctx):
         len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
 
 
+async def _set_select(ctx, selector, value):
+    """<select> 没法用真鼠标点选项：设 value + 派发 change，让页面自己的 change 处理跑
+    （本仓老 rig 也是这么做的，见 tools/ui/shots_visual.py）。选项不存在时返回 False。"""
+    f = await _fctx(ctx)
+    ok = await ctx.fb.ctx_eval(f, (
+        "(function(){var s=document.querySelector(%s);if(!s)return null;var hit=false;"
+        "for(var i=0;i<s.options.length;i++){if(s.options[i].value===%s)hit=true;}"
+        "if(!hit)return false;s.value=%s;"
+        "s.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
+        % (json.dumps(selector), json.dumps(value), json.dumps(value))))
+    assert ok is True, "选中 %s = %r 失败（select 不在，或没有这个选项）" % (selector, value)
+
+
+def _pick_sr_value(cur, dflt, lo, slider):
+    """挑一个既合法、又不等于出厂默认的值：等于默认会被后端当“没改”丢掉，
+    那就验不到稀疏行了（lo = 下界，slider = (min,max,step)）。"""
+    lo = 1 if lo is None else int(lo)
+    hi = None
+    if slider:
+        hi = int(slider[1])
+    for cand in (cur + 10, cur - 10, cur + 20, cur - 20, cur + 30, cur - 30):
+        if cand == dflt or cand == cur:
+            continue
+        if cand < lo:
+            continue
+        if hi is not None and cand > hi:
+            continue
+        return int(cand)
+    raise AssertionError(
+        "挑不出一个合法、且 ≠ 出厂默认 %r 的值（当前全局值 %r，范围 %r..%r）"
+        % (dflt, cur, lo, hi))
+
+
+async def _sc_B10(ctx):
+    """B10 逐项表单：分会话覆盖标签 -> 加一个群会话 -> 加一项（上下文·聊天记录条数）改值 ->
+    保存 -> 磁盘 session_rules 有对应稀疏行且 session_overrides 没被动 -> 刷新后条目还在。"""
+    fb = ctx.fb
+    await fb.set_viewport(1440, 900)  # B7 把窗口改成了手机宽度
+    if ctx.fctx is None:
+        await _open_plugin_page(ctx)
+    f = await _fctx(ctx)
+    await _need_loaded(ctx)
+    mark = fb.mark()
+    await _show_tab(ctx, "overrides")
+    await fb.ctx_wait_for(f, "!!document.querySelector('#sr-card')", timeout=10)
+    await fb.ctx_wait_for(
+        f, "(function(){var s=document.querySelector('#sr-scope');"
+        "return !!s&&s.value==='group';})()", timeout=8)  # 默认就是群聊
+    ov_before = _read_plug_cfg().get("session_overrides")
+    n_before = await fb.ctx_eval(f, "document.querySelectorAll('#sr-list .sr-entry').length")
+    ctx.note("B10 起始：表单条目 %d 个；session_overrides=%r" % (n_before, ov_before))
+
+    # 1) 添加会话：群聊 + 合成群号
+    await fb.frame_fill(f, "#sr-session", SR_GROUP)
+    await fb.frame_click(f, "#sr-add-session")
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 1),
+        timeout=8)
+    tup = await fb.ctx_eval(f, (
+        "(function(){var e=document.querySelector('#sr-list .sr-entry:last-child');"
+        "return {code:e.querySelector('.sr-session-code').innerText.trim(),"
+        "scope:e.dataset.scope,session:e.dataset.session,"
+        "items:e.querySelectorAll('.sr-item').length};})()"))
+    assert tup["code"] == SR_GROUP and tup["session"] == SR_GROUP, (
+        "新会话行不对：%r" % (tup,))
+    assert tup["scope"] == "group", "新会话应为群聊，实际 %r" % (tup["scope"],)
+    assert tup["items"] == 0, "新会话应当还没有任何项，实际 %r 项" % (tup["items"],)
+    err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert err == "", "添加会话不该报错，实际 %r" % (err,)
+
+    # 2) 加一项：块 + 项都从 meta 里查，不写死（卡片举例是上下文·聊天记录条数）
+    info = await _field_info(ctx, "group", SR_ITEM_PATH)
+    block_key = info["block_key"]
+    name = SR_ITEM_PATH.split(".", 1)[1]
+    fld = info["field"]
+    await fb.frame_click(f, "#sr-list .sr-entry:last-child #sr-add-item")
+    await fb.ctx_wait_for(f, "!!document.querySelector('#sr-item-pick')", timeout=8)
+    await _set_select(ctx, "#sr-item-pick", block_key)
+    await fb.ctx_wait_for(f, "!!document.querySelector('#sr-field-pick')", timeout=8)
+    opts = await fb.ctx_eval(f, (
+        "Array.prototype.map.call(document.querySelectorAll('#sr-field-pick option'),"
+        "function(o){return o.value;})"))
+    assert SR_ITEM_PATH in opts, "“加一项”的选项里没有 %s：%r" % (SR_ITEM_PATH, opts)
+    await _set_select(ctx, "#sr-field-pick", SR_ITEM_PATH)
+    await fb.frame_click(f, "#sr-item-add")
+
+    sel = '.sr-item[data-block="%s"][data-item="%s"] .sr-control input[type="number"]' % (
+        block_key, name)
+    await fb.ctx_wait_for(f, "!!document.querySelector(%s)" % json.dumps(sel), timeout=8)
+
+    # 3) 改值：值等于出厂默认会被后端当“没改”丢掉，所以必须挑个不一样的值
+    cur = await fb.ctx_eval(f, "LX.getValue('group',%s)" % json.dumps(SR_ITEM_PATH))
+    assert isinstance(cur, (int, float)), "%s 的群聊全局值不是数字：%r" % (SR_ITEM_PATH, cur)
+    new = _pick_sr_value(int(cur), fld["default"], fld.get("lo"), fld.get("slider"))
+    ctx.note("B10：%s 群聊全局值 %r、出厂默认 %r -> 组内改 %r"
+             % (SR_ITEM_PATH, cur, fld["default"], new))
+    await fb.frame_fill(f, sel, str(new))
+    await fb.ctx_wait_for(
+        f, "document.querySelector('#dirty-count').innerText.indexOf('1 项未保存')>=0",
+        timeout=8)
+    got = await fb.ctx_eval(f, (
+        "(function(){var r=LX.state.rules||[];for(var i=0;i<r.length;i++){"
+        "var e=r[i];if(e.session===%s&&e.block===%s&&e.items&&('%s' in e.items))"
+        "return e.items['%s'];}return null;})()"
+        % (json.dumps(SR_GROUP), json.dumps(block_key), name, name)))
+    assert got == new, "暂存的条目值期望 %r，实际 %r" % (new, got)
+    note_here = await fb.ctx_eval(
+        f, "!!document.querySelector('#sr-list .sr-item .sr-same-default')")
+    assert note_here is False, "改过的项不该显示“和出厂默认一样”的小字"
+    gtxt = await fb.ctx_eval(
+        f, "document.querySelector('#sr-list .sr-item .sr-global').innerText")
+    assert "全局" in gtxt, "行内右侧应当显示全局值，实际 %r" % (gtxt,)
+    n_items = await fb.ctx_eval(f, "document.querySelectorAll('#sr-list .sr-item').length")
+    assert n_items == 1, "期望 1 行（块 %s · 项 %s），实际 %r 行" % (block_key, name, n_items)
+    await _shot(ctx, "b10_sr_form.png")
+
+    # 4) 保存：改动清单里要有“逐项表单”那条
+    await _save_via_ui(ctx, "分会话逐项表单已修改", shot_name="b10_sr_diff.png")
+    want_row = {"__template_key": "group.%s" % block_key, "session": SR_GROUP, name: new}
+    await _poll_disk(lambda c: c.get("session_rules"), [want_row], "session_rules 稀疏行")
+    rows = _read_plug_cfg().get("session_rules")
+    assert len(rows[0]) == 3, "稀疏行应当只有 __template_key / session / 改过的那一项：%r" % (rows[0],)
+    assert _read_plug_cfg().get("session_overrides") == ov_before, (
+        "表单保存动了 YAML 覆盖表：%r -> %r"
+        % (ov_before, _read_plug_cfg().get("session_overrides")))
+
+    # 5) 刷新：条目还在，值还是刚保存的
+    await fb.frame_click(f, "#btn-refresh")
+    await fb.ctx_wait_for(
+        f, "(function(){var t=document.querySelector('#toast');"
+        "return t.classList.contains('show')&&t.innerText.indexOf('已刷新')>=0;})()",
+        timeout=12)
+    await _wait_toast_hidden(ctx)
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 1),
+        timeout=10)
+    after = await fb.ctx_eval(f, "document.querySelector(%s).value" % json.dumps(sel))
+    assert int(after) == new, "刷新后项值期望 %r，实际 %r" % (new, after)
+    left = await fb.ctx_eval(f, "LX._dirtyCount()")
+    assert left == 0, "刷新后期望 0 项未保存，实际 %r" % (left,)
+    await _shot(ctx, "b10_sr_saved.png")
+    evs = fb.events_since(mark)
+    assert not evs, "B10 期间有 %d 条异常 / console.error / 网络失败：%r" % (
+        len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
+
+
 # 宿主 WebUI 一打开就会联网做“检查更新”，没外网时它自己的日志里会带 Traceback。
 # 这类记录和灵犀无关，且随本机网络状态时有时无（UI-6a 没开浏览器所以没触发过）。
 # 只按“记录头里的模块名 + 文本里是外网域名且不提灵犀”窄匹配，其余一律算数。
@@ -833,7 +985,8 @@ def _post_B8(ctx, webui_port, ws_port):
 # -- 主流程 --------------------------------------------------------------------
 
 SCENARIOS = [("B1", _sc_B1), ("B2", _sc_B2), ("B3", _sc_B3), ("B4", _sc_B4),
-             ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7), ("B9", _sc_B9)]
+             ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7), ("B9", _sc_B9),
+             ("B10", _sc_B10)]
 
 
 async def amain(only, shim=False):
@@ -885,7 +1038,7 @@ async def amain(only, shim=False):
                 if skip_reason and name != "B1":
                     ctx.record(name, "SKIP", skip_reason)
                     continue
-                if name in ("B3", "B4", "B5", "B6", "B7") and ctx.fctx is None:
+                if name in ("B3", "B4", "B5", "B6", "B7", "B10") and ctx.fctx is None:
                     ctx.record(name, "SKIP", "前置 B2 没拿到 iframe 上下文")
                     continue
                 try:

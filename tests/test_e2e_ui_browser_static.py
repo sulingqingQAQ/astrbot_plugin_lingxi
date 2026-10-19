@@ -257,5 +257,48 @@ class DiagB9StaticTest(unittest.TestCase):
         self.assertIn("B9（DIAG-3m）", self.src.split('"""', 2)[1])
 
 
+class SrUiB10StaticTest(unittest.TestCase):
+    """SR-UI：B10（逐项表单）的静态约束。真跑要起隔离 AstrBot，见 e2e_ui_browser.py 文件头。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _read(SCRIPT)
+        body = cls.src[cls.src.index("async def _sc_B10("):]
+        cls.body = body[:body.index("\n# 宿主 WebUI 一打开")]
+
+    def test_b10_registered(self):
+        self.assertIn("def _sc_B10(", self.src)
+        self.assertIn('("B10", _sc_B10)', self.src)
+        self.assertIn("SR_GROUP = ", self.src)
+        self.assertIn("SR_ITEM_PATH = ", self.src)
+
+    def test_b10_drives_the_form_with_real_clicks(self):
+        for need in ("#sr-add-session", "#sr-session", "#sr-add-item", "#sr-item-pick",
+                     "#sr-field-pick", "#sr-item-add", "#sr-list .sr-entry",
+                     "1 项未保存", "分会话逐项表单已修改"):
+            self.assertIn(need, self.body, "B10 缺少操作 / 断言：%s" % need)
+
+    def test_b10_checks_sparse_row_and_yaml_untouched(self):
+        for need in ('c.get("session_rules")', "session_overrides\") == ov_before",
+                     "__template_key", "len(rows[0]) == 3"):
+            self.assertIn(need, self.body, "B10 缺少磁盘断言：%s" % need)
+
+    def test_b10_adds_item_by_full_path(self):
+        # 面板的项名是全路径（块.项）；选项的值也是它，缩略名只用来找行
+        self.assertIn('_set_select(ctx, "#sr-field-pick", SR_ITEM_PATH)', self.body)
+        self.assertIn('[data-item="%s"]', self.body)
+
+    def test_b10_refreshes_and_shoots(self):
+        self.assertIn("#btn-refresh", self.body)
+        self.assertIn("b10_sr_form.png", self.body)
+        self.assertIn("b10_sr_saved.png", self.body)
+        self.assertIn("events_since(mark)", self.body)
+
+    def test_b10_runs_standalone(self):
+        self.assertIn("def _open_plugin_page(", self.src)
+        self.assertIn("_open_plugin_page(ctx)", self.body)
+        self.assertIn("set_viewport(1440, 900)", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
