@@ -2129,7 +2129,7 @@
     "description": "会话覆盖（逐项表单）",
     "type": "template_list",
     "default": [],
-    "hint": "给个别会话单独改设置，点『添加』选一种（例如『私聊·上下文』），填上会话号，再改里面要变的项。一个会话想改几个块，就添加几行。\n只有和默认值不一样的项才算这个会话的覆盖；没改的项仍然跟着上面的全局配置走。\n会话号：私聊填对方 QQ 号，群聊填群号。同一个会话的同一个块写了两行，后面的盖过前面的。\n想把某项固定成默认值（全局已改过它），这里表达不了，请用下面的文本（YAML）覆盖。",
+    "hint": "给个别会话单独改设置，点『添加』选一种（例如『私聊·上下文』），填上会话号，再改里面要变的项。一个会话想改几个块，就添加几行。\n只有和默认值不一样的项才算这个会话的覆盖；没改的项仍然跟着上面的全局配置走。\n会话号：私聊填对方 QQ 号，群聊填群号；也可以直接粘贴会话列表里的完整标识（例如 napcat:GroupMessage:123456），会自动规整成纯号码。同一个会话的同一个块写了两行，后面的盖过前面的。\n想把某项固定成默认值（全局已改过它），这里表达不了，请用下面的文本（YAML）覆盖。",
     "templates": {
       "private.base": {
         "name": "私聊·基础",
@@ -2140,7 +2140,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用 lingxi",
@@ -2179,7 +2179,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "interval_count": {
             "description": "每 N 条消息触发一次",
@@ -2243,7 +2243,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用空闲触发",
@@ -2332,7 +2332,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用追发",
@@ -2393,7 +2393,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用定时唤醒工具",
@@ -2435,7 +2435,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "quiet_hours": {
             "description": "免打扰时段",
@@ -2488,7 +2488,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用历史缓冲",
@@ -2734,7 +2734,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "direct": {
             "description": "直呼时可沉默",
@@ -2795,7 +2795,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "segment_enabled": {
             "description": "启用分段回复",
@@ -3055,7 +3055,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "reason_direct": {
             "description": "直呼的触发原因",
@@ -3158,7 +3158,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用 lingxi",
@@ -3191,7 +3191,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "interval_count": {
             "description": "每 N 条消息触发一次",
@@ -3280,7 +3280,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用活跃度触发（原群聊接话）",
@@ -3382,7 +3382,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用空闲触发",
@@ -3471,7 +3471,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用追发",
@@ -3532,7 +3532,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用定时唤醒工具",
@@ -3574,7 +3574,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "quiet_hours": {
             "description": "免打扰时段",
@@ -3633,7 +3633,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "enabled": {
             "description": "启用历史缓冲",
@@ -3885,7 +3885,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "direct": {
             "description": "直呼时可沉默",
@@ -3952,7 +3952,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "segment_enabled": {
             "description": "启用分段回复",
@@ -4218,7 +4218,7 @@
             "description": "会话号",
             "type": "string",
             "default": "",
-            "hint": "私聊填对方 QQ 号，群聊填群号。"
+            "hint": "私聊填对方 QQ 号，群聊填群号，例如 napcat:GroupMessage:123456。可以直接粘贴 AstrBot 会话列表里的完整标识，会自动规整成纯号码；标识是群聊的不能填在私聊里，反之亦然。"
           },
           "reason_direct": {
             "description": "直呼的触发原因",

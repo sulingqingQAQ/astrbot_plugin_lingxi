@@ -66,6 +66,14 @@ class TemplateShapeTest(unittest.TestCase):
             for f in blk.fields_for(scope):
                 self.assertEqual(tpl["items"][f.name]["default"], f.default(scope), f"{key}.{f.name}")
 
+    def test_session_hint_explains_pasting_the_full_identifier(self):
+        # SR-UI-2：号码框可以直接粘贴完整标识，范围不能混——这句大白话要跟着 schema 出去
+        for key, tpl in self.templates.items():
+            hint = tpl["items"][sr.SESSION_ITEM]["hint"]
+            self.assertIn("napcat:GroupMessage:", hint, key)
+            self.assertIn("粘贴", hint, key)
+            self.assertIn("不能填", hint, key)
+
     def test_schema_entry(self):
         node = gs.build_schema()["session_rules"]
         self.assertEqual(node["type"], "template_list")
