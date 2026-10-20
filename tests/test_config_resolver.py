@@ -6,6 +6,7 @@ import copy
 import unittest
 
 from lx.config import defaults
+from lx.config import spec
 from lx.config.resolver import ConfigResolver, ResolvedConfig
 from lx.contracts import Scope, SessionKey
 from lx.session.key import from_umo
@@ -28,7 +29,11 @@ class DefaultsTest(unittest.TestCase):
         r = ConfigResolver()
         for key, scope in ((G, Scope.GROUP), (P, Scope.PRIVATE)):
             tree = defaults.defaults_for(scope)
-            tree.pop("whitelist")
+            # 不能按会话覆盖的块（白名单、群动作·全局）不进 resolve() 的结果树：
+            # 白名单走 whitelist_ids()，群动作·全局走 global_value()（ACT-1）。
+            for blk in spec.BLOCKS:
+                if not blk.overridable:
+                    tree.pop(blk.key, None)
             self.assertEqual(r.resolve(key).as_dict(), tree)
 
     def test_get_with_default_for_unknown_path(self):

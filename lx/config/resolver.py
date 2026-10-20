@@ -2,7 +2,11 @@
 
 输入全是普通 dict，不依赖 WebUI 怎么存（覆盖表怎么从 WebUI 字段读出来是 adapters 的事，见 overrides.py）：
 - private / group：全局私聊、全局群聊配置，`{块: {键: 值}}`；可以只写一部分，缺的用规格表默认值。
-  里面的 `whitelist` 块是白名单（开关 + ID 列表），不参与分会话覆盖。
+  里面的 `whitelist` 块是白名单（开关 + ID 列表）、`actions_global` 块是群动作·全局（bot 自己的资料 / 头像 /
+  加好友申请 / 协议端），这两个块的 `overridable=False`，不参与分会话覆盖；它们不进 `resolve()` 的结果树
+  （白名单走 `whitelist_ids()`，群动作·全局走 `global_value()`）。
+  `actions_global` 只放在群聊全局那一份（改的是整个号，两份会出现"改一边没生效"），私聊会话也按
+  `global_value(Scope.GROUP, ...)` 读它。
 - overrides：覆盖表，`{"group:900100200": {"context": {"max_messages": 80}}}`，**稀疏**，只写要改的项，逐字段覆盖。
   键写 `group:群号` / `private:QQ号`，也可以直接写完整 UMO；值里可以写嵌套 dict，也可以写 `"context.max_messages": 80`。
 - whitelist：可选，`{"private": {"enabled":..,"ids":[..]}, "group": {...}}`，给了就盖过全局块里的 `whitelist`。
@@ -78,7 +82,7 @@ class ConfigResolver:
         whitelist: Optional[Mapping[str, Any]] = None,
     ):
         self.warnings: list[str] = []
-        self._global: dict[Scope, dict[str, Any]] = {}  # 每个范围：{"块.键": 值}，只含非白名单项
+        self._global: dict[Scope, dict[str, Any]] = {}  # 每个范围：{"块.键": 值}，只含非白名单项（含群动作·全局，不进 resolve()）
         self._wl: dict[Scope, dict[str, Any]] = {}  # 每个范围：{"enabled": bool, "ids": frozenset[str]}
         self._overrides: dict[tuple[Scope, str], dict[str, Any]] = {}
         self._cache: dict[tuple[Scope, str], ResolvedConfig] = {}
@@ -243,7 +247,11 @@ class ConfigResolver:
         for layer in (self._global[key.scope], self._overrides.get(cache_key, {})):
             for path, value in layer.items():
                 block_key, name = path.split(".", 1)
-                tree[block_key][name] = copy.deepcopy(value)
+                slot = tree.get(block_key)
+                if slot is None:
+                    # `overridable=False` 的块（群动作·全局）不进结果树：同白名单，由 global_value() 读全局层。
+                    continue
+                slot[name] = copy.deepcopy(value)
         resolved = ResolvedConfig(key, tree)
         self._cache[cache_key] = resolved
         return resolved
@@ -267,6 +275,22 @@ class ConfigResolver:
             return frozenset(self._wl.get(scope, {}).get("ids", frozenset()))
         except Exception:
             return frozenset()
+
+    def global_value(self, scope: Scope, path: str) -> Any:
+        """读一个「只能写全局」的配置项在全局层的值（ACT-1：群动作·全局，如 `actions_global.protocol`）。
+
+        这些块 `overridable=False`，不进 `resolve()` 的结果树（同白名单），所以另开这个口子：
+        配过就用配的值，没配过（或配置里根本没有这个块）就用规格表默认值；写错的值在构造时已被忽略。
+        `actions_global.*` 只有群聊那一份，工具里一律 `global_value(Scope.GROUP, ...)`，私聊会话也读这里。
+        注意：白名单（`whitelist.*`）不走这里，用 `whitelist_ids()`；键不存在或不适用于该范围时抛 KeyError。
+        """
+        f = spec.field(path)
+        if f is None or not f.applies_to(scope):
+            raise KeyError(f"{scope.value} 没有配置项 {path}")
+        values = self._global.get(scope) or {}
+        if path in values:
+            return copy.deepcopy(values[path])
+        return f.default(scope)
 
     def is_enabled(self, key: SessionKey) -> bool:
         wl = self._wl[key.scope]
