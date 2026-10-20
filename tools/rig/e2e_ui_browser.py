@@ -647,8 +647,13 @@ async def _sc_B7(ctx):
 
 
 async def _open_plugin_page(ctx):
-    """B9 单跑（--only B1 B9）时没有 B2：自己打开插件页，等页面和标签画出来。"""
+    """B9 单跑（--only B1 B9）时没有 B2：自己打开插件页，等页面和标签画出来。
+
+    先去 about:blank 再回来：宿主是 hash 路由，页面已经停在插件页时直接 Page.navigate 到同一个
+    URL 只是同文档跳转（iframe 不重建、页面状态不丢），"重新打开"就成了空话（协调者 10-20 核实）。
+    登录态在 localStorage 里，about:blank 一来一回不会丢。"""
     fb = ctx.fb
+    await fb.goto("about:blank", wait_ms=200)
     await fb.goto(ctx.base + PAGE_URL_TAIL, wait_ms=300)
     await fb.wait_for("!!document.querySelector('iframe')", timeout=30)
     ctx.fctx = await fb.wait_frame_context(timeout=30)
@@ -984,7 +989,14 @@ async def _sc_B10(ctx):
 
     # 6) 重新打开插件页：条目还在，值还是刚保存的
     #    （顶栏右上那个"刷新"只在冲突 / 出错的 banner 里才可见，不能当常规刷新用）
+    #    先在宿主页上留个记号：真重新加载之后它必须没了——否则"条目还在"可能只是内存里没丢（空转）
+    await fb.eval("window.__b10_reload_marker = 1; true")
+    assert await fb.eval("window.__b10_reload_marker") == 1, "没能在宿主页上留下重新加载记号"
     await _open_plugin_page(ctx)
+    gone = await fb.eval("typeof window.__b10_reload_marker")
+    assert gone == "undefined", (
+        "重新打开插件页应当是一次真的整页重新加载（记号应当消失），实际 typeof=%r——"
+        "说明只是同文档跳转，下面的「条目还在」不能证明它是从后端读回来的" % (gone,))
     f = await _fctx(ctx)
     await _need_loaded(ctx)
     await _show_tab(ctx, "overrides")
@@ -999,8 +1011,8 @@ async def _sc_B10(ctx):
 
     # 7) 剩下三件前端行为（SR-UI-3）都靠「加一张临时卡」来做，所以放在刷新之后：卡片里一个项
     #    都没有，backendEntries() 不会把它们发出去，磁盘上的 session_rules 一动不动。
-    #    注：宿主是 hash 路由，上面第 6 步实际是同文档跳转、iframe 不重建（页面状态不会丢），
-    #    所以这里留下的临时卡片不会被"刷新"冲掉——B10 也就到此为止，不再依赖它们的状态。
+    #    （第 6 步现在是真的整页重新加载——见 _open_plugin_page——所以这里是从干净页面起步；
+    #    临时卡片是 B10 的最后一步，不再依赖它们的状态。）
     # 7a) 群聊里粘贴「发送者_群号」：卡片上只留真群号（开了 unique_session 的群会这么写）
     await _set_select(ctx, "#sr-scope", "group")
     await fb.frame_fill(f, "#sr-session", SR_ISO_RAW)
