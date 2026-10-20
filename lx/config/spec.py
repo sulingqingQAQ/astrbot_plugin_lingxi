@@ -414,35 +414,40 @@ _ACTIONS = Block(
 _ACTIONS_GLOBAL = Block(
     "actions_global",
     "群动作·全局",
-    "这几项改的是机器人自己（昵称、头像、加好友 / 加群申请、协议端），对所有群和私聊一起生效，"
-    "所以只能写在全局配置里，不能按会话覆盖。默认全关。",
+    "这几项改的是机器人自己（昵称、头像、加好友 / 加群申请、协议端），对整个机器人生效，私聊会话也按这里。"
+    "设置放在『群聊全局配置』里（只此一份，避免两边各改一边没生效），不能按会话覆盖。默认全关。",
     (
-        _both(
+        _g(
             "actions_global.request_enabled", "bool", False, "处理加好友 / 加群申请",
             "允许模型同意或拒绝别人加机器人好友、加群的申请。前置条件：得先有『收到过这条申请』的记录"
-            "（申请事件里的 flag），没记下来就做不了。同意就等于把陌生人放进来，默认关。",
-            new_private=True, new_group=True,
+            "（申请事件里的 flag），没记下来就做不了。同意就等于把陌生人放进来，默认关。"
+            "设置放在『群聊全局配置』里，但对整个机器人生效（私聊也按这里）。",
+            new_group=True,
         ),
-        _both(
+        _g(
             "actions_global.self_profile_enabled", "bool", False, "改机器人资料",
             "允许模型改机器人自己的昵称、签名这类资料。改的是整个号，所有群和私聊一起变，不只是当前会话。"
-            "LLOneBot 不支持改性别，协议端选 llbot 时这一项不发。默认关。",
-            new_private=True, new_group=True,
+            "LLOneBot 不支持改性别，协议端选 llbot 时这一项不发。默认关。"
+            "设置放在『群聊全局配置』里，但对整个机器人生效（私聊也按这里）。",
+            new_group=True,
         ),
-        _both(
+        _g(
             "actions_global.avatar_enabled", "bool", False, "改机器人头像",
             "允许模型换机器人自己的头像：给一个图片地址，http/https 的会先转成 base64 再发（图太大可能失败）。"
-            "改的也是整个号的头像。默认关。",
-            new_private=True, new_group=True,
+            "改的也是整个号的头像。默认关。"
+            "设置放在『群聊全局配置』里，但对整个机器人生效（私聊也按这里）。",
+            new_group=True,
         ),
-        _both(
+        _g(
             "actions_global.protocol", "string", "napcat", "协议端类型",
             "机器人跑在哪个协议端。少数动作的参数不一样：贴表情回应 NapCat 要多带 set: true、"
             "改自己资料时 LLOneBot 不发性别、有的端群号要数字有的要字符串。"
-            "选错只影响个别动作，不影响别的功能。默认 NapCat。",
-            new_private=True, new_group=True, options=("napcat", "llbot"), labels=("NapCat", "LLOneBot"),
+            "选错只影响个别动作，不影响别的功能。默认 NapCat。"
+            "设置放在『群聊全局配置』里，但对整个机器人生效（私聊也按这里）。",
+            new_group=True, options=("napcat", "llbot"), labels=("NapCat", "LLOneBot"),
         ),
     ),
+    scope=GROUP,
     overridable=False,
 )
 

@@ -35,9 +35,10 @@ SWITCHES = {
     "set_group_kick": ("actions.kick_enabled", "actions", spec.GROUP),
     "set_group_leave": ("actions.leave_enabled", "actions", spec.GROUP),
     "search_group_member": ("actions.member_search_enabled", "actions", spec.GROUP),
-    "handle_request": ("actions_global.request_enabled", "actions_global", spec.BOTH),
-    "set_self_profile": ("actions_global.self_profile_enabled", "actions_global", spec.BOTH),
-    "set_qq_avatar": ("actions_global.avatar_enabled", "actions_global", spec.BOTH),
+    # lead 定：改机器人自己的动作对整个号生效，配置只放群聊全局一份（私聊会话也按这里读）。
+    "handle_request": ("actions_global.request_enabled", "actions_global", spec.GROUP),
+    "set_self_profile": ("actions_global.self_profile_enabled", "actions_global", spec.GROUP),
+    "set_qq_avatar": ("actions_global.avatar_enabled", "actions_global", spec.GROUP),
 }
 
 
@@ -57,16 +58,30 @@ class ActionsBlocksShapeTest(unittest.TestCase):
             self.assertIn("actions.poke_enabled",
                           [f.path for f in spec.fields_for(sc, overridable_only=True)], sc.value)
 
-    def test_actions_global_not_overridable_but_present_in_both_global_scopes(self):
-        # 机制同白名单块：overridable=False（不能按会话覆盖），但私聊 / 群聊两边的全局配置里都有它。
+    def test_actions_global_not_overridable_and_group_only(self):
+        # 机制同白名单块：overridable=False（不能按会话覆盖）。
+        # 而且只放群聊全局一份（lead 定：改的是整个号，两份会出现"改一边没生效"）。
         blk = spec.block("actions_global")
         self.assertFalse(blk.overridable)
-        self.assertEqual(blk.scope, spec.BOTH)
-        for sc in (Scope.PRIVATE, Scope.GROUP):
-            self.assertIn("actions_global", [b.key for b in spec.blocks_for(sc)], sc.value)
-            paths = [f.path for f in spec.fields_for(sc, overridable_only=True)]
-            for f in blk.fields:
-                self.assertNotIn(f.path, paths, f"{sc.value} 不该能按会话覆盖 {f.path}")
+        self.assertEqual(blk.scope, spec.GROUP)
+        self.assertIn("actions_global", [b.key for b in spec.blocks_for(Scope.GROUP)])
+        self.assertNotIn("actions_global", [b.key for b in spec.blocks_for(Scope.PRIVATE)])
+        for f in blk.fields:
+            self.assertTrue(f.applies_to(Scope.GROUP), f.path)
+            self.assertFalse(f.applies_to(Scope.PRIVATE), f.path)
+        # 群聊里也不能按会话覆盖
+        paths = [f.path for f in spec.fields_for(Scope.GROUP, overridable_only=True)]
+        for f in blk.fields:
+            self.assertNotIn(f.path, paths, f"不该能按会话覆盖 {f.path}")
+        # 私聊全局里根本没有这个块（一项都没有）
+        self.assertNotIn("actions_global", spec.default_tree(Scope.PRIVATE))
+
+    def test_actions_global_hint_explains_single_group_global_copy(self):
+        blk = spec.block("actions_global")
+        self.assertIn("群聊全局配置", blk.hint)
+        self.assertIn("私聊", blk.hint)
+        for f in blk.fields:
+            self.assertIn("对整个机器人生效", f.hint, f.path)
 
     def test_block_hints_are_plain_language(self):
         for key in ("actions", "actions_global"):
@@ -116,6 +131,10 @@ class ActionsSwitchesTest(unittest.TestCase):
         for name in ("poke_enabled", "emoji_enabled", "recall_enabled"):
             self.assertIn(name, private_tree["actions"], name)
             self.assertIn(name, group_tree["actions"], name)
+        # 全局块只放群聊：私聊全局里一项都没有（改的是整个号，读的时候一律读群聊那份）
+        self.assertNotIn("actions_global", private_tree)
+        for name in ("request_enabled", "self_profile_enabled", "avatar_enabled", "protocol"):
+            self.assertIn(name, group_tree["actions_global"], name)
 
 
 class ActionsLimitsTest(unittest.TestCase):
@@ -146,7 +165,6 @@ class ActionsLimitsTest(unittest.TestCase):
         f = spec.field("actions_global.protocol")
         self.assertEqual(f.type, "string")
         self.assertEqual(f.options, ("napcat", "llbot"))
-        self.assertEqual(f.default(Scope.PRIVATE), "napcat")
         self.assertEqual(f.default(Scope.GROUP), "napcat")
         self.assertTrue(spec.validate_value(f, "napcat")[0])
         self.assertTrue(spec.validate_value(f, "llbot")[0])
@@ -154,10 +172,12 @@ class ActionsLimitsTest(unittest.TestCase):
         self.assertFalse(spec.validate_value(f, "NapCat")[0])
 
     def test_limits_are_json_serializable(self):
-        for sc in (Scope.PRIVATE, Scope.GROUP):
-            tree = spec.default_tree(sc)
-            json.dumps(tree["actions"], ensure_ascii=False)
-            json.dumps(tree["actions_global"], ensure_ascii=False)
+        group_tree = spec.default_tree(Scope.GROUP)
+        json.dumps(group_tree["actions"], ensure_ascii=False)
+        json.dumps(group_tree["actions_global"], ensure_ascii=False)
+        private_tree = spec.default_tree(Scope.PRIVATE)
+        json.dumps(private_tree["actions"], ensure_ascii=False)
+        self.assertNotIn("actions_global", private_tree)
 
 
 class ActionsOverrideRulesTest(unittest.TestCase):
@@ -207,8 +227,7 @@ class ActionsOverrideRulesTest(unittest.TestCase):
         self.assertIn("kick_enabled", errors[0])
 
     def test_resolver_ignores_per_session_override_of_actions_global(self):
-        r = ConfigResolver(private={"actions_global": {"avatar_enabled": True}},
-                           group={"actions_global": {"avatar_enabled": True}},
+        r = ConfigResolver(group={"actions_global": {"avatar_enabled": True}},
                            overrides={"group:900100200": {"actions_global": {"avatar_enabled": False}},
                                       "private:10001": {"actions": {"poke_enabled": True}}})
         key = SessionKey(Scope.GROUP, "900100200", "napcat")
@@ -221,16 +240,27 @@ class ActionsOverrideRulesTest(unittest.TestCase):
                         r.warnings)
         # 真正生效的仍是全局层的值（覆盖没把它改回 False）。
         self.assertIs(r.global_value(Scope.GROUP, "actions_global.avatar_enabled"), True)
-        self.assertIs(r.global_value(Scope.PRIVATE, "actions_global.avatar_enabled"), True)
+
+    def test_private_global_has_no_actions_global_block(self):
+        # 私聊全局里写 actions_global 会被当成未知块（进 warnings），也不会生效。
+        r = ConfigResolver(private={"actions_global": {"avatar_enabled": True}}, group={})
+        self.assertTrue(any("私聊没有 actions_global" in w for w in r.warnings), r.warnings)
+        self.assertNotIn("actions_global", r.resolve(SessionKey(Scope.PRIVATE, "10001", "napcat")).as_dict())
+        with self.assertRaises(KeyError):
+            r.global_value(Scope.PRIVATE, "actions_global.avatar_enabled")
+
+    def test_private_session_reads_group_global_value(self):
+        # lead 定：这几项对整个机器人生效，私聊会话也读群聊全局那份（工具里一律 global_value(Scope.GROUP, ...)）。
+        r = ConfigResolver(private={}, group={"actions_global": {"protocol": "llbot", "request_enabled": True}})
+        self.assertEqual(r.global_value(Scope.GROUP, "actions_global.protocol"), "llbot")
+        self.assertIs(r.global_value(Scope.GROUP, "actions_global.request_enabled"), True)
 
     def test_global_value_falls_back_to_spec_default(self):
         r = ConfigResolver(private={}, group={})
         self.assertEqual(r.global_value(Scope.GROUP, "actions_global.protocol"), "napcat")
-        self.assertIs(r.global_value(Scope.PRIVATE, "actions_global.request_enabled"), False)
+        self.assertIs(r.global_value(Scope.GROUP, "actions_global.request_enabled"), False)
         r2 = ConfigResolver(private={}, group={"actions_global": {"protocol": "llbot"}})
         self.assertEqual(r2.global_value(Scope.GROUP, "actions_global.protocol"), "llbot")
-        # 只写了群聊那一份，私聊那一份仍是默认（两份各自独立，同白名单）
-        self.assertEqual(r2.global_value(Scope.PRIVATE, "actions_global.protocol"), "napcat")
 
     def test_global_value_returns_copies_and_rejects_unknown(self):
         r = ConfigResolver(group={"actions_global": {"protocol": "llbot"}})
@@ -255,21 +285,23 @@ class ActionsOverrideRulesTest(unittest.TestCase):
 
 
 class ActionsSchemaTest(unittest.TestCase):
-    def test_schema_has_both_blocks_in_both_scopes(self):
+    def test_schema_has_actions_in_both_scopes_and_actions_global_only_in_group(self):
         schema = gs.build_schema()
         for scope in ("private", "group"):
             items = schema[scope]["items"]
             self.assertIn("actions", items, scope)
-            self.assertIn("actions_global", items, scope)
             self.assertTrue(items["actions"]["hint"].strip(), scope)
-            self.assertTrue(items["actions_global"]["hint"].strip(), scope)
+        # 全局块只在群聊那边（私聊全局里没有它，避免两份各改一边不生效）
+        self.assertIn("actions_global", schema["group"]["items"])
+        self.assertNotIn("actions_global", schema["private"]["items"])
+        self.assertTrue(schema["group"]["items"]["actions_global"]["hint"].strip())
 
     def test_schema_switch_defaults_are_false(self):
         schema = gs.build_schema()
         for scope in ("private", "group"):
             items = schema[scope]["items"]
             for key in ("actions", "actions_global"):
-                for name, node in items[key]["items"].items():
+                for name, node in items.get(key, {}).get("items", {}).items():
                     if node["type"] != "bool":
                         continue
                     self.assertIs(node["default"], False, f"{scope}.{key}.{name} 默认应为 False")
@@ -289,7 +321,8 @@ class ActionsSchemaTest(unittest.TestCase):
             data = json.load(f)
         for scope in ("private", "group"):
             self.assertIn("actions", data[scope]["items"], scope)
-            self.assertIn("actions_global", data[scope]["items"], scope)
+        self.assertIn("actions_global", data["group"]["items"])
+        self.assertNotIn("actions_global", data["private"]["items"])
         self.assertNotIn("actions_global", data["session_rules"]["templates"])
         self.assertIn("group.actions", data["session_rules"]["templates"])
 
