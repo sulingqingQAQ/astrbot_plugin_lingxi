@@ -18,12 +18,17 @@ from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 
 from .lx.adapters.assembly import build_components, seed_idle, whitelist_seed_keys
+from .lx.adapters.group_actions import group_actions
 from .lx.adapters.handlers import EHandlers
 from .lx.adapters.platform_io import make_history_puller, make_send_text
 from .lx.adapters.timers import TimerRunner, make_generate_t, wake_tools
+from .lx.adapters.tool_gate import sync_tools
 
 _PLUGIN_DATA_DIR_NAME = "astrbot_plugin_lingxi"
 _TZ_FALLBACK = timezone(timedelta(hours=8))
+
+#: 群动作工具在插件初始化失败时的兜底回答（正常情况看不到这句）
+_ACTIONS_DOWN = "群动作工具没装上（初始化失败），这个动作现在做不了。"
 
 
 def _resolve_tz(context: Any):
@@ -189,6 +194,11 @@ class LingxiPlugin(star.Star):
         self._runner = TimerRunner(
             self._c, make_generate_t(context, self._c.resolver, log))
         self._wake = wake_tools(self._c, tz)
+        try:
+            self._actions = group_actions(self._c, log=log, diag=self._diag)
+        except Exception as e:
+            self._actions = None
+            _warn("[lingxi] 群动作工具初始化失败：%r" % (e,))
         self._webui_service = None
         self._webui_api = None
         try:
@@ -526,6 +536,7 @@ class LingxiPlugin(star.Star):
     async def on_message(self, event: AstrMessageEvent):
         """消息入口：先记身份，再转 EHandlers（异步生成器）。"""
         try:
+            self._note_request(event)
             if not self._identity_set:
                 self._ensure_identity(event)
             async for item in self._h.on_message(event):
@@ -533,12 +544,39 @@ class LingxiPlugin(star.Star):
         except Exception as e:
             _warn("[lingxi] on_message 异常：%r" % (e,))
 
+    def _tool_manager(self):
+        """AstrBot 的 LLM 工具管理器（``core/star/context.py:388``）；拿不到返回 None。"""
+        try:
+            return self._context.get_llm_tool_manager()
+        except Exception:
+            return None
+
+    def _note_request(self, event: AstrMessageEvent) -> None:
+        """加好友 / 加群申请事件：把 flag 记下来，模型才办得了 handle_request（ACT-1）。
+
+        aiocqhttp 适配器把 request 事件的原始报文放在 ``message_obj.raw_message``
+        （aiocqhttp_platform_adapter.py:165）；RequestLog 认不出就安静跳过。
+        """
+        actions = getattr(self, "_actions", None)
+        if actions is None:
+            return
+        try:
+            actions.requests.note(event)
+        except Exception as e:
+            _warn("[lingxi] 记加好友 / 加群申请失败：%r" % (e,))
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req) -> None:
         try:
             await self._h.on_llm_request(event, req)
         except Exception as e:
             _warn("[lingxi] on_llm_request 异常：%r" % (e,))
+        # 群动作：把该会话开着的工具塞进这次请求、把关着的摘掉，模型只看得到开着的
+        try:
+            sync_tools(
+                req, event, self._c.resolver, self._tool_manager(), log=self._log_fn)
+        except Exception as e:
+            _warn("[lingxi] 同步群动作工具失败：%r" % (e,))
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent) -> None:
@@ -605,3 +643,195 @@ class LingxiPlugin(star.Star):
         except Exception as e:
             _warn("[lingxi] wake delete 异常：%r" % (e,))
             return "删任务失败，稍后再试。"
+
+    # ---------------------------------------------------------- 群动作工具（ACT-1）
+    # 逻辑全在 lx/adapters/group_actions.py；这里只做薄包装：转发 + 兜异常成一句人话。
+    # 开 / 关在 on_llm_request 里由 tool_gate.strip_disabled_tools 摘除（关着的模型看不到），
+    # 工具内部还会再判一次开关（保险）。
+
+    @llm_tool(name="poke_user")
+    async def poke_user(self, event: AstrMessageEvent, user_id: str = "") -> str:
+        """Poke someone in the chat (a "nudge"): in a group it uses group_poke, in a private chat friend_poke.
+
+        Args:
+            user_id(string): QQ number of the person to poke. Leave empty to poke the sender of the current message.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.poke_user(event, user_id)
+        except Exception as e:
+            _warn("[lingxi] poke_user 异常：%r" % (e,))
+            return "戳一戳失败，稍后再试。"
+
+    @llm_tool(name="set_msg_emoji")
+    async def set_msg_emoji(self, event: AstrMessageEvent, message_id: str = "", emoji_id: str = "") -> str:
+        """React to a specific message with an emoji (the OneBot set_msg_emoji_like action).
+
+        Args:
+            message_id(string): The message id to react to. Chat history shows every message as #<message_id>. Leave empty to use the message that triggered this reply.
+            emoji_id(string): OneBot emoji id. Empty uses the default thumbs up (128077).
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_msg_emoji(event, message_id, emoji_id)
+        except Exception as e:
+            _warn("[lingxi] set_msg_emoji 异常：%r" % (e,))
+            return "贴表情失败，稍后再试。"
+
+    @llm_tool(name="delete_msg")
+    async def delete_msg(self, event: AstrMessageEvent, message_id: str = "") -> str:
+        """Recall a message someone else sent. The bot cannot recall the messages it sent itself (OneBot does not hand their ids back), and it must be a group admin for this to work.
+
+        Args:
+            message_id(string): The message id to recall. Chat history shows every message as #<message_id>. Leave empty to use the message that triggered this reply.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.delete_msg(event, message_id)
+        except Exception as e:
+            _warn("[lingxi] delete_msg 异常：%r" % (e,))
+            return "撤回失败，稍后再试。"
+
+    @llm_tool(name="set_group_ban")
+    async def set_group_ban(self, event: AstrMessageEvent, user_id: str = "", duration_seconds: int = 0) -> str:
+        """Mute a group member, or unmute one with 0 seconds. Group only. The bot must be an admin, and acting on the group owner or another admin needs the "allow target admin" setting turned on.
+
+        Args:
+            user_id(string): QQ number of the member to mute. Leave empty to target the sender of the current message.
+            duration_seconds(int): Mute length in seconds. 0 means unmute. A value above the configured limit is cut down, and the result tells you the length actually used.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_group_ban(event, user_id, duration_seconds)
+        except Exception as e:
+            _warn("[lingxi] set_group_ban 异常：%r" % (e,))
+            return "禁言失败，稍后再试。"
+
+    @llm_tool(name="set_group_card")
+    async def set_group_card(self, event: AstrMessageEvent, user_id: str = "", card: str = "") -> str:
+        """Change a member's group card (the nickname shown inside this group). An empty card clears it. Group only. The bot must be an admin, and acting on the group owner or another admin needs the "allow target admin" setting turned on.
+
+        Args:
+            user_id(string): QQ number of the member. Leave empty to target the sender of the current message.
+            card(string): The new card. Empty clears the card.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_group_card(event, user_id, card)
+        except Exception as e:
+            _warn("[lingxi] set_group_card 异常：%r" % (e,))
+            return "改群名片失败，稍后再试。"
+
+    @llm_tool(name="set_group_special_title")
+    async def set_group_special_title(self, event: AstrMessageEvent, user_id: str = "", title: str = "") -> str:
+        """Set or clear a member's special title in this group. Group only. This usually needs the bot to be the group owner, and acting on the group owner or another admin needs the "allow target admin" setting turned on.
+
+        Args:
+            user_id(string): QQ number of the member. Leave empty to target the sender of the current message.
+            title(string): The new title. Empty clears the current title.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_group_special_title(event, user_id, title)
+        except Exception as e:
+            _warn("[lingxi] set_group_special_title 异常：%r" % (e,))
+            return "改群头衔失败，稍后再试。"
+
+    @llm_tool(name="set_group_kick")
+    async def set_group_kick(self, event: AstrMessageEvent, user_id: str = "", reject_add_request: bool = False) -> str:
+        """Remove a member from this group. Group only, and it cannot be undone. The bot must be an admin, and acting on the group owner or another admin needs the "allow target admin" setting turned on.
+
+        Args:
+            user_id(string): QQ number of the member to remove.
+            reject_add_request(boolean): Also block this person from joining again. Defaults to false.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_group_kick(event, user_id, reject_add_request)
+        except Exception as e:
+            _warn("[lingxi] set_group_kick 异常：%r" % (e,))
+            return "踢人失败，稍后再试。"
+
+    @llm_tool(name="set_group_leave")
+    async def set_group_leave(self, event: AstrMessageEvent) -> str:
+        """Make the bot leave THIS group (the one the current message came from). Group only and cannot be undone. Takes no arguments.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_group_leave(event)
+        except Exception as e:
+            _warn("[lingxi] set_group_leave 异常：%r" % (e,))
+            return "退群失败，稍后再试。"
+
+    @llm_tool(name="search_group_member")
+    async def search_group_member(self, event: AstrMessageEvent, keyword: str = "", by: str = "auto") -> str:
+        """Look up members of THIS group by nickname, group card or QQ number. Group only, at most 10 matches.
+
+        Args:
+            keyword(string): What to look for. Empty lists the first few members, which helps when you do not know who is in the group yet.
+            by(string): How to match: auto (nickname, card or QQ), nickname (nickname or card only), qq (QQ number only). Defaults to auto.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.search_group_member(event, keyword, by)
+        except Exception as e:
+            _warn("[lingxi] search_group_member 异常：%r" % (e,))
+            return "查群成员失败，稍后再试。"
+
+    @llm_tool(name="handle_request")
+    async def handle_request(self, event: AstrMessageEvent, flag: str = "", approve: bool = True, reason: str = "") -> str:
+        """Approve or reject a pending friend request or group join request that the bot has received.
+
+        Args:
+            flag(string): The request flag. Empty handles the most recent pending request.
+            approve(boolean): True approves, false rejects. Defaults to true.
+            reason(string): Optional note passed to the requester when rejecting a group join request.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.handle_request(event, flag, approve, reason)
+        except Exception as e:
+            _warn("[lingxi] handle_request 异常：%r" % (e,))
+            return "处理申请失败，稍后再试。"
+
+    @llm_tool(name="set_self_profile")
+    async def set_self_profile(self, event: AstrMessageEvent, nickname: str = "", signature: str = "", sex: str = "") -> str:
+        """Change the bot's own profile (nickname, signature, gender). This edits the account, so every group and every private chat sees the change. When the protocol is llbot the gender part is skipped, because LLOneBot does not support it.
+
+        Args:
+            nickname(string): New nickname. Empty keeps the current one.
+            signature(string): New signature (personal note). Empty keeps the current one.
+            sex(string): New gender, one of 男 / 女 / 未知. Empty keeps the current one.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_self_profile(event, nickname, signature, sex)
+        except Exception as e:
+            _warn("[lingxi] set_self_profile 异常：%r" % (e,))
+            return "改资料失败，稍后再试。"
+
+    @llm_tool(name="set_qq_avatar")
+    async def set_qq_avatar(self, event: AstrMessageEvent, file: str = "") -> str:
+        """Change the bot's own avatar. This edits the account, so every group and private chat sees it.
+
+        Args:
+            file(string): The image to use: an http(s) URL (downloaded first, must be under 4MB) or a base64:// string.
+        """
+        if self._actions is None:
+            return _ACTIONS_DOWN
+        try:
+            return await self._actions.set_qq_avatar(event, file)
+        except Exception as e:
+            _warn("[lingxi] set_qq_avatar 异常：%r" % (e,))
+            return "换头像失败，稍后再试。"

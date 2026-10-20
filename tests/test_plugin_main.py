@@ -114,7 +114,12 @@ def tearDownModule():
     try:
         from astrbot.core.provider.register import llm_tools
         for name in ("wake_up_reply_query", "wake_up_reply_create",
-                     "wake_up_reply_update", "wake_up_reply_delete"):
+                     "wake_up_reply_update", "wake_up_reply_delete",
+                     # ACT-1：12 个群动作工具
+                     "poke_user", "set_msg_emoji", "delete_msg",
+                     "set_group_ban", "set_group_card", "set_group_special_title",
+                     "set_group_kick", "set_group_leave", "search_group_member",
+                     "handle_request", "set_self_profile", "set_qq_avatar"):
             try:
                 llm_tools.remove_func(name)
             except Exception:
@@ -480,6 +485,175 @@ class TestWebuiWiring(unittest.TestCase):
         self.assertEqual(_plugin_mod._diag_sink, plugin._diag.log)
         asyncio.run(plugin.terminate())
         self.assertIsNone(_plugin_mod._diag_sink)
+
+
+ACT1_TOOLS = ("poke_user", "set_msg_emoji", "delete_msg", "set_group_ban",
+              "set_group_card", "set_group_special_title", "set_group_kick",
+              "set_group_leave", "search_group_member", "handle_request",
+              "set_self_profile", "set_qq_avatar")
+
+
+class FakeToolSet:
+    """假 ToolSet：只有 names / remove_tool 两个嘴脸（astrbot.core.agent.tool.ToolSet 的子集）。"""
+
+    def __init__(self, names):
+        self._names = list(names)
+        self.removed = []
+
+    def names(self):
+        return list(self._names)
+
+    def remove_tool(self, name):
+        if name not in self._names:
+            raise ValueError("没有这个工具：%s" % name)
+        self._names.remove(name)
+        self.removed.append(name)
+        return True
+
+
+def make_group_event(self_id="bot9", group_id="900100200"):
+    ev = make_event(self_id=self_id,
+                    umo="aiocqhttp:GroupMessage:%s" % group_id)
+    ev.get_group_id = lambda: group_id
+    return ev
+
+
+class TestGroupActionsWiring(unittest.TestCase):
+    """ACT-1 be3：12 个 @llm_tool 包装 + 关着的工具从请求里摘掉 + 申请事件登记。"""
+
+    def _make_plugin(self, ctx=None, conf=None):
+        import astrbot.api.star as star
+        tmp = tempfile.mkdtemp(prefix="lx_pm_actions_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real_get_data_dir = star.StarTools.get_data_dir
+        star.StarTools.get_data_dir = classmethod(
+            lambda cls, name=None: __import__("pathlib").Path(tmp))
+        self.addCleanup(setattr, star.StarTools, "get_data_dir",
+                        real_get_data_dir)
+        plugin = _plugin_mod.LingxiPlugin(ctx or make_ctx(), dict(conf or {}))
+        self.addCleanup(_close_diag, plugin)
+        return plugin
+
+    # ---- 注册与构造
+
+    def test_twelve_llm_tools_registered(self):
+        from astrbot.core.provider.register import llm_tools
+        names = {getattr(f, "name", "") for f in llm_tools.func_list}
+        for name in ACT1_TOOLS:
+            self.assertIn(name, names, "工具 %s 没登记" % name)
+
+    def test_actions_object_built(self):
+        plugin = self._make_plugin()
+        self.assertIsNotNone(getattr(plugin, "_actions", None), "_actions 没装好")
+        self.assertIsNotNone(plugin._actions.requests)
+
+    def test_tool_schema_is_readable(self):
+        """docstring 的 Args 要能被 AstrBot 解析成参数表（不然模型看不到参数）。"""
+        from astrbot.core.provider.register import llm_tools
+        by_name = {getattr(f, "name", ""): f for f in llm_tools.func_list}
+        with_args = {n for n in ACT1_TOOLS if n != "set_group_leave"}
+        for name in ACT1_TOOLS:
+            func = by_name[name]
+            self.assertTrue(func.description, "%s 没有描述" % name)
+            params = func.parameters
+            self.assertIsInstance(params, dict, "%s 的参数表不是 dict" % name)
+            props = params.get("properties", {})
+            if name in with_args:
+                self.assertTrue(props, "%s 的参数表是空的" % name)
+            for pname, pval in props.items():
+                self.assertIn(pval.get("type"),
+                              ("string", "number", "boolean", "array", "object"),
+                              "%s.%s 类型异常：%r" % (name, pname, pval))
+
+    # ---- 开关关着：包装只回一句人话
+
+    def test_wrappers_refuse_when_off(self):
+        plugin = self._make_plugin()
+        ev = make_group_event()
+        for name in ACT1_TOOLS:
+            out = asyncio.run(getattr(plugin, name)(ev))
+            self.assertIsInstance(out, str, name)
+            self.assertIn("没开", out, "%s 关着时的回答不对：%r" % (name, out))
+
+    def test_wrappers_never_raise_when_actions_missing(self):
+        plugin = self._make_plugin()
+        plugin._actions = None
+        ev = make_group_event()
+        for name in ACT1_TOOLS:
+            out = asyncio.run(getattr(plugin, name)(ev))
+            self.assertEqual(out, _plugin_mod._ACTIONS_DOWN, name)
+
+    # ---- on_llm_request：摘工具
+
+    def test_on_llm_request_strips_all_when_off(self):
+        plugin = self._make_plugin()
+        tools = FakeToolSet(list(ACT1_TOOLS) + ["web_search"])
+        req = types.SimpleNamespace(func_tool=tools)
+
+        async def _go():
+            await plugin.on_llm_request(make_group_event(), req)
+        asyncio.run(_go())
+        self.assertEqual(tools.names(), ["web_search"], "关着的工具该全摘掉")
+        self.assertEqual(sorted(tools.removed), sorted(ACT1_TOOLS))
+
+    def test_on_llm_request_keeps_enabled_and_drops_group_only_in_private(self):
+        conf = {"group": {"actions": {"poke_enabled": True, "ban_enabled": True}},
+                "private": {"actions": {"poke_enabled": True}}}
+        plugin = self._make_plugin(conf=conf)
+        tools = FakeToolSet(["poke_user", "set_group_ban", "web_search"])
+        req = types.SimpleNamespace(func_tool=tools)
+
+        async def _go():
+            # 私聊会话：群专属的禁言要摘掉，戳一戳留着
+            await plugin.on_llm_request(make_event(), req)
+        asyncio.run(_go())
+        self.assertEqual(sorted(tools.names()), ["poke_user", "web_search"])
+
+    def test_on_llm_request_keeps_group_tool_in_group(self):
+        conf = {"group": {"actions": {"poke_enabled": True, "ban_enabled": True}}}
+        plugin = self._make_plugin(conf=conf)
+        tools = FakeToolSet(["poke_user", "set_group_ban"])
+        req = types.SimpleNamespace(func_tool=tools)
+
+        async def _go():
+            await plugin.on_llm_request(make_group_event(), req)
+        asyncio.run(_go())
+        self.assertEqual(sorted(tools.names()), ["poke_user", "set_group_ban"])
+
+    def test_on_llm_request_without_func_tool_never_raises(self):
+        plugin = self._make_plugin()
+        req = types.SimpleNamespace(system_prompt="", extra_user_content_parts=[], contexts=[])
+
+        async def _go():
+            await plugin.on_llm_request(make_event(), req)
+        asyncio.run(_go())
+
+    # ---- 申请事件登记
+
+    def test_note_request_records_friend_request(self):
+        plugin = self._make_plugin()
+        ev = make_event()
+        # aiocqhttp 的 Event 是 dict 子类（aiocqhttp/event.py:8 class Event(dict)），
+        # 适配器原样塞进 message_obj.raw_message（aiocqhttp_platform_adapter.py:165）
+        ev.message_obj = types.SimpleNamespace(
+            raw_message={"post_type": "request", "request_type": "friend",
+                         "flag": "F-1", "user_id": "123456", "comment": "合成申请"})
+        plugin._note_request(ev)
+        rec = plugin._actions.requests.find("")
+        self.assertIsNotNone(rec, "加好友申请没记下来")
+        self.assertEqual(rec["flag"], "F-1")
+
+    def test_note_request_ignores_normal_message(self):
+        plugin = self._make_plugin()
+        ev = make_event()
+        ev.message_obj = types.SimpleNamespace(raw_message=None)
+        plugin._note_request(ev)
+        self.assertIsNone(plugin._actions.requests.find(""))
+
+    def test_note_request_survives_broken_event(self):
+        plugin = self._make_plugin()
+        plugin._note_request(types.SimpleNamespace())  # 没有 message_obj
+        plugin._note_request(make_event())             # 没有 message_obj
 
 
 if __name__ == "__main__":

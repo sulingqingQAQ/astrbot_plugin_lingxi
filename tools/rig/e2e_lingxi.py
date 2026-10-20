@@ -82,6 +82,45 @@ def _system_text(messages) -> str:
     )
 
 
+# -- 群动作（ACT-1）用的取出工具 -------------------------------------------------
+
+#: ACT-1 加的 12 个工具名（与 plugin_main.py 的 @llm_tool 名一致）
+ACT1_TOOLS = (
+    "poke_user", "set_msg_emoji", "delete_msg", "set_group_ban",
+    "set_group_card", "set_group_special_title", "set_group_kick",
+    "set_group_leave", "search_group_member", "handle_request",
+    "set_self_profile", "set_qq_avatar",
+)
+
+#: 戳一戳几种叫法（NapCat 群里是 group_poke，私聊是 friend_poke）
+POKE_ACTIONS = ("friend_poke", "group_poke", "send_poke")
+
+
+def _tool_names(body) -> "list[str]":
+    """从假 LLM 收到的请求体里取 tools 列表里的函数名（模型能看到的工具）。"""
+    out = []
+    for item in (body or {}).get("tools") or []:
+        fn = item.get("function") if isinstance(item, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            out.append(fn["name"])
+    return out
+
+
+def _poke_calls(napcat) -> "list[dict]":
+    """假 NapCat 收到的戳一戳类调用（不管成功与否，看的是有没有发出去）。"""
+    return [c for c in napcat.calls() if c.get("action") in POKE_ACTIONS]
+
+
+async def _wait_for(pred, timeout=30.0, step=0.2) -> bool:
+    """轮询等到 pred() 为真；超时返回 False（不抛，交给断言说人话）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        await asyncio.sleep(step)
+    return bool(pred())
+
+
 # -- 端口 --------------------------------------------------------------------
 
 def _port_free(port: int) -> bool:
@@ -196,6 +235,8 @@ def _group3_config():
             "activity": {"enabled": False},
             "trigger": {"interval_count": 0,
                          "direct_aggregate_seconds": 1},
+            # ACT-1：群聊里打开戳一戳，P3 场景用（其余群动作保持默认关）
+            "actions": {"poke_enabled": True},
         },
         "session_overrides": "",
     }
@@ -206,6 +247,16 @@ def _group4_config():
     cfg = _group3_config()
     cfg["group"]["trigger"]["keyword_enabled"] = True
     cfg["group"]["trigger"]["wake_keywords"] = ["小苏"]
+    return cfg
+
+
+def _group5_config():
+    """组5私聊戳一戳开：组1基础上只把私聊「群动作·戳一戳」打开（P1 场景）。
+
+    群动作默认全关，要和「关着收不到」的 P2 对比，必须有一组把开关真打开。
+    """
+    cfg = _group1_config()
+    cfg["private"]["actions"] = {"poke_enabled": True}
     return cfg
 
 
@@ -492,13 +543,103 @@ async def _sc_TG(ctx):
         "期望 system 含群聊守则正文，实际 system 尾 300 字=%r" % (sys_text[-300:],))
 
 
+# -- ACT-1 群动作端到端 ---------------------------------------------------------
+#
+# 假 LLM 不能自己发明工具，所以剧本里直接写 tool_calls：AstrBot 会照着调插件
+# 注册的 @llm_tool，最终走 OneBot 通道打到假 NapCat 上 —— 假 NapCat 会把每个
+# API 调用记进 calls()，于是「模型调 poke_user 之后群里/私聊有没有真的戳出去」
+# 就能在进程外断言。开关关着的那一组，工具在 on_llm_request 里就被摘了，模型
+# 根本看不到（请求体 tools 里没有），剧本硬要调也只会得到「工具不存在」。
+
+def _poke_call(user_id=""):
+    """剧本元素：让假模型调一次 poke_user（user_id 留空 = 戳发消息的人）。"""
+    args = {}
+    if user_id:
+        args["user_id"] = user_id
+    return {"text": "", "tool_calls": [{"name": "poke_user", "arguments": args}]}
+
+
+async def _sc_P1(ctx):
+    """P1 私聊开着：模型调 poke_user -> 假 NapCat 收到 friend_poke（目标=用户）。"""
+    ctx.llm.script([_poke_call(USER_IN), "戳过啦"])
+    await ctx.napcat.send_private(USER_IN, "戳我一下")
+    assert await _wait_for(lambda: bool(ctx.llm.requests()), 30), (
+        "期望假 LLM 收到请求，实际 0 条")
+    names = _tool_names(ctx.llm.requests()[0])
+    print("P1 模型看到的工具：%r" % (names,), flush=True)
+    assert "poke_user" in names, (
+        "期望开关打开时请求体 tools 里有 poke_user，实际=%r" % (names,))
+    assert await _wait_for(lambda: bool(_poke_calls(ctx.napcat)), 30), (
+        "期望假 NapCat 收到 friend_poke，实际一条戳一戳都没有；收到的调用=%r"
+        % ([c["action"] for c in ctx.napcat.calls()],))
+    calls = _poke_calls(ctx.napcat)
+    assert len(calls) == 1, "期望只戳 1 次，实际 %d 次：%r" % (len(calls), calls)
+    assert calls[0]["action"] == "friend_poke", (
+        "期望私聊走 friend_poke，实际=%r" % (calls[0]["action"],))
+    assert calls[0]["params"].get("user_id") == int(USER_IN), (
+        "期望戳的是 %s，实际参数=%r" % (USER_IN, calls[0]["params"]))
+    assert await _wait_for(
+        lambda: any("戳过啦" in s["text"] for s in ctx.napcat.sent()), 30), (
+        "期望这一轮正常收尾（发出「戳过啦」），实际发出的文本=%r"
+        % ([s["text"] for s in ctx.napcat.sent()],))
+
+
+async def _sc_P2(ctx):
+    """P2 私聊关着（默认）：请求体 tools 里没有 12 个群动作，硬调也戳不出去。"""
+    ctx.llm.script([_poke_call(USER_IN), "那就这样吧"])
+    await ctx.napcat.send_private(USER_IN, "戳我一下")
+    assert await _wait_for(lambda: bool(ctx.llm.requests()), 30), (
+        "期望假 LLM 收到请求，实际 0 条")
+    names = _tool_names(ctx.llm.requests()[0])
+    print("P2 模型看到的工具：%r" % (names,), flush=True)
+    leaked = [n for n in ACT1_TOOLS if n in names]
+    assert not leaked, (
+        "期望开关全关时模型看不到任何群动作工具，实际还看得到 %r（全部 tools=%r）"
+        % (leaked, names))
+    assert await _wait_for(
+        lambda: any("那就这样吧" in s["text"] for s in ctx.napcat.sent()), 30), (
+        "期望这一轮正常收尾（发出「那就这样吧」），实际发出的文本=%r"
+        % ([s["text"] for s in ctx.napcat.sent()],))
+    calls = _poke_calls(ctx.napcat)
+    assert calls == [], (
+        "期望工具关着时一条戳一戳都没发出去，实际发出 %d 条：%r"
+        % (len(calls), calls))
+
+
+async def _sc_P3(ctx):
+    """P3 群聊开着：模型调 poke_user -> 假 NapCat 收到 group_poke（带群号）。"""
+    ctx.llm.script([_poke_call(USER_IN), "戳过啦"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "戳我一下", at_self=True)
+    assert await _wait_for(lambda: bool(ctx.llm.requests()), 30), (
+        "期望假 LLM 收到请求，实际 0 条")
+    names = _tool_names(ctx.llm.requests()[0])
+    print("P3 模型看到的工具：%r" % (names,), flush=True)
+    assert "poke_user" in names, (
+        "期望群聊开关打开时请求体 tools 里有 poke_user，实际=%r" % (names,))
+    assert await _wait_for(lambda: bool(_poke_calls(ctx.napcat)), 30), (
+        "期望假 NapCat 收到 group_poke，实际一条戳一戳都没有；收到的调用=%r"
+        % ([c["action"] for c in ctx.napcat.calls()],))
+    calls = _poke_calls(ctx.napcat)
+    assert len(calls) == 1, "期望只戳 1 次，实际 %d 次：%r" % (len(calls), calls)
+    assert calls[0]["action"] == "group_poke", (
+        "期望群里走 group_poke，实际=%r" % (calls[0]["action"],))
+    params = calls[0]["params"]
+    assert params.get("group_id") == int(GROUP_ID), (
+        "期望带群号 %s，实际参数=%r" % (GROUP_ID, params))
+    assert params.get("user_id") == int(USER_IN), (
+        "期望戳的是 %s，实际参数=%r" % (USER_IN, params))
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
-      ("G", _sc_G), ("H", _sc_H), ("S", _sc_S), ("T", _sc_T)]),
+      ("G", _sc_G), ("H", _sc_H), ("S", _sc_S), ("T", _sc_T),
+      ("P2", _sc_P2)]),
     ("组2私聊不接管", _group2_config, [("E", _sc_E)]),
-    ("组3群聊", _group3_config, [("F1", _sc_F1), ("F2", _sc_F2), ("TG", _sc_TG)]),
+    ("组3群聊", _group3_config,
+     [("F1", _sc_F1), ("F2", _sc_F2), ("TG", _sc_TG), ("P3", _sc_P3)]),
     ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
+    ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
 ]
 
 
