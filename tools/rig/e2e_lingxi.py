@@ -95,6 +95,12 @@ ACT1_TOOLS = (
 #: 戳一戳几种叫法（NapCat 群里是 group_poke，私聊是 friend_poke）
 POKE_ACTIONS = ("friend_poke", "group_poke", "send_poke")
 
+#: WAKE-1 的 4 个定时唤醒工具名（与 plugin_main.py 的 @llm_tool 名一致）
+WAKE_TOOLS = (
+    "wake_up_reply_query", "wake_up_reply_create",
+    "wake_up_reply_update", "wake_up_reply_delete",
+)
+
 
 def _tool_names(body) -> "list[str]":
     """从假 LLM 收到的请求体里取 tools 列表里的函数名（模型能看到的工具）。"""
@@ -103,6 +109,15 @@ def _tool_names(body) -> "list[str]":
         fn = item.get("function") if isinstance(item, dict) else None
         if isinstance(fn, dict) and isinstance(fn.get("name"), str):
             out.append(fn["name"])
+    return out
+
+
+def _tool_texts(body) -> "list[str]":
+    """请求体里 role=tool 的消息内容（上一轮工具执行的返回串，W3 用它验工具真跑了）。"""
+    out = []
+    for msg in (body or {}).get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            out.append(_content_text(msg.get("content", "")))
     return out
 
 
@@ -257,6 +272,28 @@ def _group5_config():
     """
     cfg = _group1_config()
     cfg["private"]["actions"] = {"poke_enabled": True}
+    return cfg
+
+
+def _wake_config():
+    """组6定时唤醒（WAKE-1）：同一份配置里私聊开、群聊关。
+
+    私聊：白名单 + 接管 + 私聊 `wake.enabled` 显式 true（W1 / W3 在这里跑；**不靠默认值**）。
+    群聊：全局那份也写 true，再用会话覆盖表把本群 `wake.enabled` 关掉（W2 在这里跑）——
+    一份配置两种会话，正好证明「分会话」而不是「一处关全关」。
+    群聊其余设置沿用组3（P3 验证过的群聊触发条件）。
+    """
+    cfg = _group3_config()
+    cfg["private"] = {
+        "whitelist": {"enabled": True, "ids": [USER_IN]},
+        "base": {"take_over": True},
+        "trigger": {"wait_seconds": 1},
+        "speech": {"paragraph_split": False},
+        "wake": {"enabled": True},
+    }
+    cfg["group"]["wake"] = {"enabled": True}
+    cfg["session_overrides"] = json.dumps(
+        {"group:%s" % GROUP_ID: {"wake": {"enabled": False}}}, ensure_ascii=False)
     return cfg
 
 
@@ -630,6 +667,86 @@ async def _sc_P3(ctx):
         "期望戳的是 %s，实际参数=%r" % (USER_IN, params))
 
 
+# -- WAKE-1 定时唤醒端到端 ------------------------------------------------------
+#
+# 4 个 wake_up_reply_* 以前既不在请求里（插件 @llm_tool 进不了请求，根因见 ACT-1 be5），
+# 闸门也没按开关补它们 —— 而 wake.enabled 的默认值还是「开」，等于用户以为能用、
+# 模型永远看不到。修好后：开着的会话请求体 tools 里就有这 4 个；关着的会话一个都没有；
+# 模型真调 create / query 会执行，返回串回到下一轮请求里（role=tool）。
+
+
+def _wake_call(name, **arguments):
+    """剧本元素：让假模型调一次定时唤醒工具。"""
+    return {"text": "", "tool_calls": [{"name": name, "arguments": arguments}]}
+
+
+async def _sc_W1(ctx):
+    """W1 私聊开着（显式 true）：请求体 tools 里有 4 个 wake_up_reply_*。"""
+    ctx.llm.script(["好的"])
+    await ctx.napcat.send_private(USER_IN, "明早八点提醒我喝水")
+    assert await _wait_for(lambda: bool(ctx.llm.requests()), 30), (
+        "期望假 LLM 收到请求，实际 0 条")
+    names = _tool_names(ctx.llm.requests()[0])
+    print("W1 模型看到的工具：%r" % (names,), flush=True)
+    missing = [n for n in WAKE_TOOLS if n not in names]
+    assert not missing, (
+        "期望 wake.enabled 打开时请求体 tools 里有 4 个唤醒工具，实际缺 %r（全部 tools=%r）"
+        % (missing, names))
+    assert await _wait_for(
+        lambda: any("好的" in s["text"] for s in ctx.napcat.sent()), 30), (
+        "期望这一轮正常收尾（发出「好的」），实际发出的文本=%r"
+        % ([s["text"] for s in ctx.napcat.sent()],))
+
+
+async def _sc_W2(ctx):
+    """W2 同一份配置的另一个会话（群聊，覆盖表关掉）：请求体里一个 wake 工具都没有。"""
+    ctx.llm.script(["好吧"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "明早八点提醒我喝水", at_self=True)
+    assert await _wait_for(lambda: bool(ctx.llm.requests()), 30), (
+        "期望假 LLM 收到请求，实际 0 条")
+    names = _tool_names(ctx.llm.requests()[0])
+    print("W2 模型看到的工具：%r" % (names,), flush=True)
+    leaked = [n for n in WAKE_TOOLS if n in names]
+    assert not leaked, (
+        "期望 wake.enabled 关着时模型看不到任何唤醒工具，实际还看得到 %r（全部 tools=%r）"
+        % (leaked, names))
+    assert await _wait_for(
+        lambda: any("好吧" in s["text"] for s in ctx.napcat.sent()), 30), (
+        "期望这一轮正常收尾（发出「好吧」），实际发出的文本=%r"
+        % ([s["text"] for s in ctx.napcat.sent()],))
+
+
+async def _sc_W3(ctx):
+    """W3 私聊开着：假模型调 create / query，工具真被执行（返回串回到下一轮请求）。"""
+    ctx.llm.script([
+        _wake_call("wake_up_reply_create",
+                   time_str="2099/01/01-08:00:00", reason="合成提醒喝水"),
+        _wake_call("wake_up_reply_query"),
+        "记下啦",
+    ])
+    await ctx.napcat.send_private(USER_IN, "帮我记一个明早的提醒")
+    assert await _wait_for(lambda: len(ctx.llm.requests()) >= 3, 40), (
+        "期望假 LLM 至少收到 3 条请求（建任务 → 查任务 → 收尾），实际 %d 条"
+        % len(ctx.llm.requests()))
+    reqs = ctx.llm.requests()
+    created = _tool_texts(reqs[1])
+    print("W3 建任务后工具返回：%r" % (created,), flush=True)
+    assert any("记好了" in t for t in created), (
+        "期望 wake_up_reply_create 真的执行（返回串含「记好了」），实际 tool 消息=%r（第一条请求 tools=%r）"
+        % (created, _tool_names(reqs[0])))
+    assert not any("建不了" in t or "失败" in t for t in created), (
+        "期望建任务成功，实际返回串=%r" % (created,))
+    listed = _tool_texts(reqs[2])
+    print("W3 查任务后工具返回：%r" % (listed,), flush=True)
+    assert any("定时唤醒" in t for t in listed), (
+        "期望 wake_up_reply_query 真的执行（返回串列出本会话任务），实际 tool 消息=%r"
+        % (listed,))
+    assert await _wait_for(
+        lambda: any("记下啦" in s["text"] for s in ctx.napcat.sent()), 30), (
+        "期望这一轮正常收尾（发出「记下啦」），实际发出的文本=%r"
+        % ([s["text"] for s in ctx.napcat.sent()],))
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
@@ -640,6 +757,8 @@ GROUPS = [
      [("F1", _sc_F1), ("F2", _sc_F2), ("TG", _sc_TG), ("P3", _sc_P3)]),
     ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
     ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
+    ("组6定时唤醒（私聊开 / 群里关）", _wake_config,
+     [("W1", _sc_W1), ("W2", _sc_W2), ("W3", _sc_W3)]),
 ]
 
 

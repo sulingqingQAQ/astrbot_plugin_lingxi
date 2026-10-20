@@ -1,4 +1,9 @@
-"""AD-6 适配器 tool_gate：让模型只看得到「该会话开着」的群动作工具（ACT-1 be3 / be5）。
+"""AD-6 适配器 tool_gate：让模型只看得到「该会话开着」的工具（ACT-1 be3 / be5，WAKE-1）。
+
+管的工具是**我们自己的 16 个**：12 个群动作（``TOOL_SWITCH``，分会话 + 全局四项）
++ 4 个定时唤醒 ``wake_up_reply_*``（``WAKE_TOOL_SWITCH``，分会话 ``wake.enabled``）。
+两张表分开是为了 ``tool_names()`` / ``all_switch_paths()`` 仍然只说「12 个群动作」
+（面板 / spec 对账 / 老测试按 12 个数），查找时才合成 ``ALL_TOOL_SWITCH``。
 
 AstrBot 4.29.1 里工具集合是 ``core/agent/tool.py:78`` 的 ``ToolSet``：
 - ``remove_tool(name)``（同文件 :110）从集合里删掉一个工具；
@@ -48,14 +53,28 @@ GROUP_ONLY: frozenset[str] = frozenset({
     "set_group_kick", "set_group_leave", "search_group_member",
 })
 
+#: WAKE-1：4 个定时唤醒工具 → 分会话开关 ``wake.enabled``（私聊 + 群聊都适用，默认开）。
+#: 为什么单开一张表：``tool_names()`` / ``all_switch_paths()`` 说的是「12 个群动作」，
+#: 面板 / spec 对账 / 老测试都按 12 个数，并进去就变 16 了（WAKE-1 明令不许）。
+#: 但**查找**（``switch_of`` / 该摘谁 / 该补谁）要把两张表合起来看 → ``ALL_TOOL_SWITCH``。
+WAKE_TOOL_SWITCH: dict[str, str] = {
+    "wake_up_reply_query": "wake.enabled",
+    "wake_up_reply_create": "wake.enabled",
+    "wake_up_reply_update": "wake.enabled",
+    "wake_up_reply_delete": "wake.enabled",
+}
+
+#: 两张表合起来的全表（只给内部查找用）：12 个群动作 + 4 个定时唤醒。
+ALL_TOOL_SWITCH: dict[str, str] = {**TOOL_SWITCH, **WAKE_TOOL_SWITCH}
+
 
 def _noop(msg: str) -> None:
     return None
 
 
 def switch_of(tool: str) -> str:
-    """工具名 → 开关路径（不认识的工具返回 ""）。"""
-    return TOOL_SWITCH.get(str(tool or ""), "")
+    """工具名 → 开关路径（不认识的工具返回 ""；群动作和定时唤醒都认）。"""
+    return ALL_TOOL_SWITCH.get(str(tool or ""), "")
 
 
 def is_global_tool(tool: str) -> bool:
@@ -98,6 +117,32 @@ def enabled_tools(resolver: Any, key: SessionKey) -> set[str]:
     return out
 
 
+def enabled_wake_tools(resolver: Any, key: Optional[SessionKey]) -> set[str]:
+    """这个会话里开着的定时唤醒工具名（开关 ``wake.enabled``，私聊 + 群聊都适用）。
+
+    默认值是「开」（旧配置 ``wake_up_reply.wake_up_reply_enable`` 的默认 true 迁过来的），
+    所以**没改过配置的用户，修好后每个会话的模型请求里会多这 4 个工具** —— 这是这个功能
+    本来的设计，不是新功能（WAKE-1 交接里写明）。
+    读配置出错 / 树里没这个键一律当**关着**（摘掉比乱试安全），绝不抛。
+    """
+    if key is None:
+        return set()
+    try:
+        cfg = resolver.resolve(key)
+    except Exception:
+        return set()
+    try:
+        on = bool(cfg.get("wake.enabled", False))
+    except Exception:
+        return set()
+    return set(WAKE_TOOL_SWITCH) if on else set()
+
+
+def wake_tool_names() -> tuple[str, ...]:
+    """4 个定时唤醒工具名（顺序固定）。注意 ``tool_names()`` 仍然只回 12 个群动作。"""
+    return tuple(WAKE_TOOL_SWITCH)
+
+
 def _tool_names(tool_set: Any) -> list[str]:
     names = getattr(tool_set, "names", None)
     if callable(names):
@@ -124,7 +169,10 @@ def strip_disabled(
     resolver: Any,
     log: Optional[LogFn] = None,
 ) -> list[str]:
-    """把 ``req.func_tool`` 里该会话关着的群动作工具删掉；返回删掉的名字。
+    """把 ``req.func_tool`` 里该会话关着的工具删掉；返回删掉的名字。
+
+    摘的是「我们自己的」工具：12 个群动作（``TOOL_SWITCH``）+ WAKE-1 的 4 个定时唤醒
+    （``WAKE_TOOL_SWITCH``，开关 ``wake.enabled``）。别人的工具一个都不碰。
 
     任何一步出问题（没 func_tool、没有 remove_tool、认不出会话）都安静退出，不抛：
     工具调用本身还会再判一次开关（adapters/group_actions.py 里），这里只是让模型"看不到"。
@@ -146,9 +194,10 @@ def strip_disabled(
         except Exception:
             pass
         return []
+    keep |= enabled_wake_tools(resolver, key)  # WAKE-1：定时唤醒 4 个也按开关摘
     drop: list[str] = []
     for name in _tool_names(tool_set):
-        if name not in TOOL_SWITCH:
+        if name not in ALL_TOOL_SWITCH:
             continue  # 别人的工具不动
         if name in keep:
             continue
@@ -219,7 +268,9 @@ def inject_enabled(
     manager: Any,
     log: Optional[LogFn] = None,
 ) -> list[str]:
-    """把该会话开着的群动作工具塞进 ``req.func_tool``；返回塞进去的名字。
+    """把该会话开着的工具塞进 ``req.func_tool``；返回塞进去的名字。
+
+    塞的是「我们自己的」工具：12 个群动作 + WAKE-1 的 4 个定时唤醒（按各自开关）。
 
     为什么要塞（ACT-1 be5 查出来的实情）：lingxi 出话走的是
     ``lx/adapters/handlers.py`` 里 ``yield event.request_llm(prompt=..., image_urls=...)``，
@@ -229,7 +280,7 @@ def inject_enabled(
     插件注册的 ``@llm_tool``（我们 12 个 + wake_up_reply_* 4 个）全都不在请求里，
     模型只看到 AstrBot 自己的内置工具。这里按开关自己灌一遍，跟有没有 conversation 无关。
 
-    只灌我们这 12 个名字，别人的工具不碰；管理器拿不到 / 取不到工具就安静退出，不抛。
+    只灌我们自己这 16 个名字，别人的工具不碰；管理器拿不到 / 取不到工具就安静退出，不抛。
     """
     _log = log if log is not None else _noop
     if key is None or manager is None:
@@ -242,6 +293,7 @@ def inject_enabled(
         except Exception:
             pass
         return []
+    keep |= enabled_wake_tools(resolver, key)  # WAKE-1：定时唤醒 4 个也按开关补
     if not keep:
         return []
     tool_set = getattr(req, "func_tool", None)

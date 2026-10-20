@@ -8,6 +8,9 @@
 5. be5：lingxi 的 ``request_llm`` 不带 conversation，AstrBot 不会灌插件工具，
    所以开着的要自己补进 ``req.func_tool``（``inject_enabled`` / ``sync_tools``），
    而且已存在的不重复加、面板停用的不加。
+6. WAKE-1：4 个 ``wake_up_reply_*`` 也走同一套「开着的补、关着的摘」，开关是分会话的
+   ``wake.enabled``（私聊 + 群聊都适用，默认开 = 旧配置 ``wake_up_reply_enable`` 的默认）；
+   但 ``tool_names()`` / ``all_switch_paths()`` 仍然只说 12 个群动作（两张表分开）。
 
 不 import astrbot / logging；假 ToolSet / 假 resolver / 假管理器全用鸭子类型
 （同 tests/test_adapters_group_actions.py）。
@@ -467,6 +470,270 @@ class SyncToolsTest(unittest.TestCase):
         got = tg.sync_tools(None, self._event(GROUP_KEY), resolver_of(),
                             manager_with_12())
         self.assertEqual(got, {"added": [], "dropped": []})
+
+
+# ------------------------------------------------------------- WAKE-1：定时唤醒 4 个工具
+# 4 个 ``wake_up_reply_*``（query / create / update / delete）以前根本没纳入闸门：
+# 插件工具默认进不了请求（be5 根因见模块头），而闸门只认 12 个群动作，于是这 4 个
+# 既不会被补、也不会被摘 —— 开关关着的会话，模型照样看不到 / 看不到就永远用不了。
+# WAKE-1 把它们按分会话开关 ``wake.enabled``（私聊 + 群聊都适用，默认开）纳入同一套
+# 「开着的补、关着的摘」，但对外 ``tool_names()`` / ``all_switch_paths()`` 仍然只说
+# 12 个群动作（老断言一个都不动）。
+
+WAKE_TOOLS = {
+    "wake_up_reply_query", "wake_up_reply_create",
+    "wake_up_reply_update", "wake_up_reply_delete",
+}
+WAKE_ON = {"wake": {"enabled": True}}
+WAKE_OFF = {"wake": {"enabled": False}}
+
+
+def manager_with_all(active_all: bool = True, inactive=()):
+    """管理器里既有 12 个群动作、又有 4 个唤醒工具（外加一个别人的工具）。"""
+    tools = []
+    for name in tg.tool_names() + tg.wake_tool_names():
+        tools.append(FakeTool(name, active=active_all and name not in set(inactive)))
+    tools.append(FakeTool("web_search"))
+    return FakeManager(tools)
+
+
+class WakeSwitchTableTest(unittest.TestCase):
+    def test_four_wake_tools_share_one_switch(self):
+        self.assertEqual(set(tg.WAKE_TOOL_SWITCH), WAKE_TOOLS)
+        self.assertEqual(set(tg.WAKE_TOOL_SWITCH.values()), {"wake.enabled"})
+        self.assertEqual(set(tg.wake_tool_names()), WAKE_TOOLS)
+
+    def test_wake_switch_exists_in_spec(self):
+        """开关路径必须真在 spec 里（写错名字 = 面板改了没人读）。"""
+        keys = set()
+        for blk in spec.BLOCKS:
+            for f in blk.fields:
+                keys.add("%s.%s" % (blk.key, f.name))
+        self.assertIn("wake.enabled", keys)
+
+    def test_group_action_table_stays_twelve(self):
+        """4 个唤醒工具不许并进「12 个群动作」那张表（否则 tool_names() 变 16）。"""
+        self.assertEqual(len(tg.tool_names()), 12)
+        self.assertEqual(set(tg.tool_names()) & WAKE_TOOLS, set())
+        self.assertEqual(len(tg.all_switch_paths()), 12)
+        self.assertNotIn("wake.enabled", tg.all_switch_paths())
+
+    def test_switch_of_wake_tool(self):
+        for name in WAKE_TOOLS:
+            self.assertEqual(tg.switch_of(name), "wake.enabled", name)
+            self.assertFalse(tg.is_global_tool(name), name)
+        # 12 个群动作那张表里没有 wake.enabled
+        self.assertEqual(tg.tools_in(["wake.enabled"]), ())
+
+
+class WakeEnabledTest(unittest.TestCase):
+    def test_default_on_for_private_and_group(self):
+        """旧配置 wake_up_reply.wake_up_reply_enable 默认 true → 默认开，两种会话都一样。"""
+        r = resolver_of()
+        self.assertEqual(tg.enabled_wake_tools(r, PRIVATE_KEY), WAKE_TOOLS)
+        self.assertEqual(tg.enabled_wake_tools(r, GROUP_KEY), WAKE_TOOLS)
+
+    def test_explicit_on(self):
+        r = resolver_of(WAKE_ON, WAKE_ON)
+        self.assertEqual(tg.enabled_wake_tools(r, PRIVATE_KEY), WAKE_TOOLS)
+        self.assertEqual(tg.enabled_wake_tools(r, GROUP_KEY), WAKE_TOOLS)
+
+    def test_explicit_off(self):
+        r = resolver_of(WAKE_OFF, WAKE_OFF)
+        self.assertEqual(tg.enabled_wake_tools(r, PRIVATE_KEY), set())
+        self.assertEqual(tg.enabled_wake_tools(r, GROUP_KEY), set())
+
+    def test_two_scopes_are_independent(self):
+        r = resolver_of(WAKE_OFF, WAKE_ON)  # 群聊关、私聊开
+        self.assertEqual(tg.enabled_wake_tools(r, PRIVATE_KEY), WAKE_TOOLS)
+        self.assertEqual(tg.enabled_wake_tools(r, GROUP_KEY), set())
+
+    def test_missing_key_treated_as_off(self):
+        """表里压根没有这个键（假 resolver / 手写覆盖表）→ 当关着（摘比乱试安全）。"""
+        self.assertEqual(tg.enabled_wake_tools(StubResolver({}), GROUP_KEY), set())
+
+    def test_group_actions_not_affected_by_wake_switch(self):
+        r = resolver_of({"actions": {"poke_enabled": True}, "wake": {"enabled": False}})
+        self.assertEqual(tg.enabled_tools(r, GROUP_KEY), {"poke_user"})
+
+
+class WakeInjectTest(unittest.TestCase):
+    """开着的唤醒工具要自己补进 req.func_tool，关着的一个都不补。"""
+
+    def test_injected_when_on_private(self):
+        tools = FakeToolSet(["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, PRIVATE_KEY, resolver_of(), manager_with_all())
+        self.assertEqual(sorted(added), sorted(WAKE_TOOLS))
+        self.assertIn("web_search", tools.names(), "别人的工具不许动")
+
+    def test_injected_when_on_group(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, GROUP_KEY, resolver_of(WAKE_ON, WAKE_ON),
+                                  manager_with_all())
+        self.assertEqual(sorted(added), sorted(WAKE_TOOLS))
+
+    def test_not_injected_when_off(self):
+        tools = FakeToolSet(["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, PRIVATE_KEY, resolver_of(WAKE_OFF, WAKE_OFF),
+                                  manager_with_all())
+        self.assertEqual(added, [])
+        self.assertEqual(tools.names(), ["web_search"])
+
+    def test_only_that_session_scope_is_affected(self):
+        """群里关着、私聊开着：私聊照样补（不是「一处关全关」）。"""
+        r = resolver_of(WAKE_OFF, WAKE_ON)
+        req = SimpleNamespace(func_tool=FakeToolSet([]))
+        self.assertEqual(sorted(tg.inject_enabled(req, PRIVATE_KEY, r, manager_with_all())),
+                         sorted(WAKE_TOOLS))
+        req2 = SimpleNamespace(func_tool=FakeToolSet([]))
+        self.assertEqual(tg.inject_enabled(req2, GROUP_KEY, r, manager_with_all()), [])
+
+    def test_injected_together_with_group_actions(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})  # 群动作只开戳一戳，唤醒默认开
+        added = tg.inject_enabled(req, GROUP_KEY, r, manager_with_all())
+        self.assertEqual(sorted(added), sorted({"poke_user"} | WAKE_TOOLS))
+
+    def test_inactive_wake_tool_skipped(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, GROUP_KEY, resolver_of(),
+                                  manager_with_all(inactive={"wake_up_reply_create"}))
+        self.assertEqual(sorted(added), sorted(WAKE_TOOLS - {"wake_up_reply_create"}))
+
+    def test_missing_wake_tool_in_manager_skipped(self):
+        """管理器里没有这个工具（老版本 / 被别人摘了）→ 安静跳过。"""
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, GROUP_KEY, resolver_of(), manager_with_12())
+        self.assertEqual(added, [])
+
+    def test_existing_wake_tool_not_added_twice(self):
+        tools = FakeToolSet(["wake_up_reply_query"])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, GROUP_KEY, resolver_of(), manager_with_all())
+        self.assertEqual(sorted(added), sorted(WAKE_TOOLS - {"wake_up_reply_query"}))
+        self.assertEqual(tools.names().count("wake_up_reply_query"), 1)
+
+
+class WakeStripTest(unittest.TestCase):
+    """关着的唤醒工具要从 req.func_tool 里摘掉（模型根本看不到）。"""
+
+    def test_strips_four_when_off(self):
+        tools = FakeToolSet(sorted(WAKE_TOOLS) + ["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        dropped = tg.strip_disabled(req, GROUP_KEY, resolver_of(WAKE_OFF, WAKE_OFF))
+        self.assertEqual(sorted(dropped), sorted(WAKE_TOOLS))
+        self.assertEqual(tools.names(), ["web_search"])
+
+    def test_keeps_four_when_on(self):
+        tools = FakeToolSet(sorted(WAKE_TOOLS) + ["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        dropped = tg.strip_disabled(req, GROUP_KEY, resolver_of())
+        self.assertEqual(dropped, [])
+        self.assertEqual(len(tools.names()), 5)
+
+    def test_private_off_does_not_touch_group_session(self):
+        r = resolver_of(WAKE_OFF, WAKE_ON)  # 群聊关、私聊开
+        tools = FakeToolSet(sorted(WAKE_TOOLS))
+        self.assertEqual(tg.strip_disabled(SimpleNamespace(func_tool=tools), PRIVATE_KEY, r), [])
+        tools2 = FakeToolSet(sorted(WAKE_TOOLS))
+        self.assertEqual(sorted(tg.strip_disabled(
+            SimpleNamespace(func_tool=tools2), GROUP_KEY, r)), sorted(WAKE_TOOLS))
+
+    def test_wake_tools_stripped_even_when_group_actions_on(self):
+        """两件事互不牵连：群动作开着、唤醒关着 → 只摘 4 个唤醒工具。"""
+        r = resolver_of({"actions": {"poke_enabled": True}, "wake": {"enabled": False}})
+        tools = FakeToolSet(sorted(WAKE_TOOLS) + ["poke_user"])
+        dropped = tg.strip_disabled(SimpleNamespace(func_tool=tools), GROUP_KEY, r)
+        self.assertEqual(sorted(dropped), sorted(WAKE_TOOLS))
+        self.assertEqual(tools.names(), ["poke_user"])
+
+    def test_read_error_treated_as_off(self):
+        """读 wake.enabled 抛异常 → 当关着（摘掉），不能当开着。"""
+
+        class PickyCfg:
+            def __init__(self, table):
+                self.table = dict(table)
+
+            def get(self, path, default=None):
+                if path == "wake.enabled":
+                    raise RuntimeError("synthetic")
+                return self.table.get(path, default)
+
+        class PickyResolver:
+            def __init__(self, table):
+                self.table = dict(table)
+
+            def resolve(self, key):
+                return PickyCfg(self.table)
+
+            def global_value(self, scope, path):
+                return bool(self.table.get(path, False))
+
+        tools = FakeToolSet(sorted(WAKE_TOOLS) + ["poke_user"])
+        dropped = tg.strip_disabled(SimpleNamespace(func_tool=tools), GROUP_KEY,
+                                    PickyResolver({"actions.poke_enabled": True}))
+        self.assertEqual(sorted(dropped), sorted(WAKE_TOOLS))
+        self.assertEqual(tools.names(), ["poke_user"])
+
+    def test_read_error_not_injected(self):
+        class BoomCfg:
+            def get(self, path, default=None):
+                raise RuntimeError("synthetic")
+
+        class BoomResolver:
+            def resolve(self, key):
+                return BoomCfg()
+
+            def global_value(self, scope, path):
+                raise RuntimeError("synthetic")
+
+        tools = FakeToolSet([])
+        self.assertEqual(tg.inject_enabled(SimpleNamespace(func_tool=tools), GROUP_KEY,
+                                           BoomResolver(), manager_with_all()), [])
+
+    def test_broken_resolver_strips_wake_too(self):
+        class Boom:
+            def resolve(self, key):
+                raise RuntimeError("synthetic")
+
+            def global_value(self, scope, path):
+                raise RuntimeError("synthetic")
+
+        tools = FakeToolSet(sorted(WAKE_TOOLS))
+        self.assertEqual(sorted(tg.strip_disabled(SimpleNamespace(func_tool=tools),
+                                                  GROUP_KEY, Boom())),
+                         sorted(WAKE_TOOLS))
+
+
+class WakeSyncTest(unittest.TestCase):
+    def _event(self, key):
+        return SimpleNamespace(unified_msg_origin=to_umo(key),
+                              get_group_id=lambda: (key.id if key.scope == Scope.GROUP else ""),
+                              get_sender_id=lambda: "10001")
+
+    def test_adds_missing_and_keeps_existing(self):
+        tools = FakeToolSet(["wake_up_reply_update", "web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        got = tg.sync_tools(req, self._event(GROUP_KEY), resolver_of(), manager_with_all())
+        self.assertEqual(sorted(got["added"]),
+                         sorted(WAKE_TOOLS - {"wake_up_reply_update"}))
+        self.assertEqual(got["dropped"], [])
+        self.assertIn("web_search", tools.names())
+
+    def test_drops_all_four_when_off(self):
+        tools = FakeToolSet(sorted(WAKE_TOOLS) + ["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        got = tg.sync_tools(req, self._event(GROUP_KEY), resolver_of(WAKE_OFF, WAKE_OFF),
+                            manager_with_all())
+        self.assertEqual(got["added"], [])
+        self.assertEqual(sorted(got["dropped"]), sorted(WAKE_TOOLS))
+        self.assertEqual(tools.names(), ["web_search"])
 
 
 class EntryFromEventTest(unittest.TestCase):
