@@ -125,12 +125,62 @@
    * ——见 savedEntries / backendEntries 这一对转换。
    * 控件复用 form.js 的 LX.formKit（bool / 数字 / 滑块 / 下拉 / 文本），不另写一套。 */
   var xr = {
-    card: null, list: null, empty: null, saveNote: null, addErr: null,
+    card: null, list: null, empty: null, saveNote: null, addErr: null, addNote: null,
     scopeSel: null, sessionInput: null, entries: [], pendingAdd: null, armed: {}
   };
 
   var ADD_ERR_EMPTY = "先填会话号（群号或 QQ 号）。";
   var YAML_HINT = "注：值和出厂默认一样等于跟随全局；要固定成默认值请用下面的 YAML。";
+  var SR_SESSION_HINT = "可以直接粘贴 AstrBot 会话列表里的完整标识（如 napcat:GroupMessage:123456），"
+    + "会自动留号码，并按标识里的类型归到群聊 / 私聊。";
+
+  /* 会话号规整（SR-UI-2）：和 lx/config/session_rules.py 的 canonical_session 同一口径。
+   * 认三种写法——完整标识 "napcat:GroupMessage:1919810"、前缀 "group:1919810" /
+   * "private:1919810"（friend: 也算私聊，与 resolver 同口径）、裸号码——出来的都是纯号码、
+   * 平台名丢掉；群里「纯数字_纯数字」还原成真群号（strip_isolation 口径），私聊不动。
+   * 面板这头：标识说的类型和下拉框选的不一样时，**按标识那一类走**并回一句 note
+   * （"已按标识识别为群聊"），别让人拿私聊卡装群标识——后端那条路会直接丢掉这一行。 */
+  var SR_PREFIX_SCOPE = { group: "group", private: "private", friend: "private" };
+  var SR_MSG_TYPE_SCOPE = {
+    GroupMessage: "group", GuildMessage: "group",
+    FriendMessage: "private", PrivateMessage: "private"
+  };
+
+  function canonicalSession(scope, raw) {
+    var s = String(raw === undefined || raw === null ? "" : raw).replace(/^\s+|\s+$/g, "");
+    if (!s) return { session: "", scope: scope, switched: false, error: ADD_ERR_EMPTY };
+    var ident = s;
+    var found = "";                       // 标识 / 前缀自己带的那个范围
+    var parts = s.split(":");
+    if (parts.length >= 3 && SR_MSG_TYPE_SCOPE[parts[1]]) {
+      // 完整标识：平台名可能带冒号，所以第 1 个冒号之后整段都是号码（后端 split(":", 2) 同口径）
+      found = SR_MSG_TYPE_SCOPE[parts[1]];
+      ident = parts.slice(2).join(":");
+    } else if (parts.length >= 2) {
+      found = SR_PREFIX_SCOPE[parts[0].replace(/^\s+|\s+$/g, "").toLowerCase()] || "";
+      ident = s.slice(parts[0].length + 1);
+      if (!found) {
+        return {
+          session: "",
+          scope: scope,
+          switched: false,
+          error: "看不懂这个会话号（" + s + "）：填群号 / QQ 号，或者粘贴会话列表里的完整标识。"
+        };
+      }
+    }
+    ident = ident.replace(/^\s+|\s+$/g, "");
+    if (!ident) {
+      return { session: "", scope: scope, switched: false, error: "这个会话号里没有号码（" + s + "）。" };
+    }
+    var target = found || scope;
+    if (target === "group") {
+      // 开了 unique_session 的群，号码是「发送者_群号」；运行时按真群号找配置（lx/session/key.py 的
+      // strip_isolation：只有「纯数字_纯数字」才切，别的平台带下划线的 ID 原样留着）
+      var iso = /^\d+_(\d+)$/.exec(ident);
+      if (iso) ident = iso[1];
+    }
+    return { session: ident, scope: target, switched: !!found && found !== scope, error: "" };
+  }
 
   function deepEqual(a, b) {
     if (a === b) return true;
@@ -501,12 +551,21 @@
 
   function addSession() {
     if (!xr.scopeSel || !xr.sessionInput) return;
-    var scope = xr.scopeSel.value;
-    var session = String(xr.sessionInput.value || "").replace(/^\s+|\s+$/g, "");
+    var got = canonicalSession(xr.scopeSel.value, xr.sessionInput.value);
     xr.addErr.textContent = "";
-    if (!session) {
-      xr.addErr.textContent = ADD_ERR_EMPTY;
+    if (xr.addNote) xr.addNote.textContent = "";
+    if (got.error) {
+      xr.addErr.textContent = got.error;
       return;
+    }
+    var scope = got.scope;
+    var session = got.session;
+    if (got.switched) {
+      xr.scopeSel.value = scope;              // 下拉框跟着标识走，下一条也按这个类型
+      if (xr.addNote) {
+        xr.addNote.textContent = "已按标识识别为" + scopeTitle(scope) + "（" + session + "），"
+          + "按" + scopeTitle(scope) + "添加。";
+      }
     }
     var dup = xr.entries.some(function (e) { return e.scope === scope && e.session === session; });
     if (dup) {
@@ -542,7 +601,7 @@
     });
     xr.sessionInput = LX.el("input", {
       id: "sr-session", type: "text",
-      placeholder: "会话号（群号 / QQ 号）", "aria-label": "会话号"
+      placeholder: "会话号，或粘贴完整标识（napcat:GroupMessage:123456）", "aria-label": "会话号"
     });
     var addBtn = iconButton({ class: "small primary", text: "添加会话" }, "plus");
     addBtn.id = "sr-add-session";
@@ -550,6 +609,9 @@
     bar.appendChild(xr.sessionInput);
     bar.appendChild(addBtn);
     card.appendChild(bar);
+    card.appendChild(LX.el("div", { id: "sr-session-hint", class: "sr-hint muted", text: SR_SESSION_HINT }));
+    xr.addNote = LX.el("div", { id: "sr-add-note", class: "sr-hint muted", text: "" });
+    card.appendChild(xr.addNote);
     xr.addErr = LX.el("div", { id: "sr-add-err", class: "sr-err" });
     card.appendChild(xr.addErr);
     card.appendChild(LX.el("div", { id: "sr-hint", class: "sr-hint muted", text: YAML_HINT }));

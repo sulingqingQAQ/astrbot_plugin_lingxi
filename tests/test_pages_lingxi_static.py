@@ -389,6 +389,60 @@ class TestLingxiSrUiStatic(unittest.TestCase):
         self.assertIn("@media (max-width: 700px)", self.css)
 
 
+class TestLingxiSrUi2Static(unittest.TestCase):
+    """SR-UI-2：面板里「添加会话」前先把会话号规整成纯号码（粘贴完整标识也算）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = _read_all()
+        cls.js = cls.texts["tab_overrides.js"]
+
+    def region(self):
+        start = self.js.index("/* ================= 逐项表单（SR-UI） =================")
+        end = self.js.index("/* ================= 分会话覆盖标签 =================")
+        return self.js[start:end]
+
+    def test_add_session_normalizes_before_using_it(self):
+        region = self.region()
+        self.assertIn("function canonicalSession(scope, raw)", region)
+        self.assertIn("canonicalSession(xr.scopeSel.value, xr.sessionInput.value)", region,
+                      "「添加会话」必须先把会话号规整，再拿去判重 / 建卡（裸号码也走一遍）")
+        # 卡片和判重都用规整后的范围 / 号码，不许再用输入框原文
+        self.assertIn("var scope = got.scope;", region)
+        self.assertIn("var session = got.session;", region)
+        self.assertIn("e.scope === scope && e.session === session", region,
+                      "判重要按规整后的范围和号码")
+
+    def test_identifier_wins_and_says_so(self):
+        region = self.region()
+        self.assertIn("已按标识识别为", region, "标识和下拉框不一致时要回一句人话")
+        self.assertIn("switched: !!found && found !== scope", region,
+                      "范围不一致的检查：标识自带的范围优先，下拉框跟着改")
+        self.assertIn('xr.scopeSel.value = scope;', region)
+        self.assertIn('id: "sr-add-note"', region)
+        self.assertIn("sr-session-hint", region)
+
+    def test_js_tables_match_backend(self):
+        """前端这份「标识 / 前缀 -> 范围」表和后端 canonical_session 用的必须是同一套键，
+        否则同一个写法在面板里是群聊、到后端变成看不懂。"""
+        from lx.config import resolver
+        from lx.config import session_rules as sr
+
+        region = self.region()
+        for msg in sr._MSG_TYPE_SCOPE:
+            self.assertIn("%s: " % msg, region, "JS 的完整标识表缺 %s" % msg)
+            self.assertNotIn("OtherMessage", region, "OtherMessage 不该被当成合法会话")
+        for head in resolver._OVERRIDE_PREFIXES:
+            self.assertIn("%s: " % head, region, "JS 的前缀表缺 %s" % head)
+        self.assertIn(r"/^\d+_(\d+)$/", region,
+                      "群聊号码要按 strip_isolation 的口径还原真群号")
+
+    def test_region_keeps_page_rules(self):
+        region = self.region()
+        for bad in BANNED_JS:
+            self.assertNotIn(bad, region, "逐项表单里不许出现 %s" % bad)
+
+
 class TestLingxiDiag3mStatic(unittest.TestCase):
     """DIAG-3m：诊断标签（最小版）的静态锁。行为断言在 tools/ui/scenarios_diag.py（起无头 Edge）和
     tools/rig/e2e_ui_browser.py 的 B9（真宿主）。钩子名来自 DIAG-0 §4.3，不许改名。"""
