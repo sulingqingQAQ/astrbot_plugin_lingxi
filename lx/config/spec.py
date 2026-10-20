@@ -5,8 +5,8 @@
 
 结构：
 - Field：一个配置项（块.键、类型、私聊默认、群聊默认、大白话 hint、是否群聊独有……）。
-- Block：一个配置块（基础、触发、活跃度、空闲触发、追发、定时唤醒、闸门、上下文、沉默、发话、提示词）。
-  `overridable=False` 的块（白名单）只能写在全局层，不能被分会话覆盖。
+- Block：一个配置块（基础、触发、活跃度、空闲触发、追发、定时唤醒、群动作、群动作·全局、闸门、上下文、沉默、发话、提示词）。
+  `overridable=False` 的块（白名单、群动作·全局）只能写在全局层，不能被分会话覆盖。
 - 默认值取旧 `_conf_schema.json` 的现值（私聊、群聊各取各的）；旧 schema 里没有对应概念的项，
   `new_private` / `new_group` 标 True = "新默认，待用户定"。
 - 文字很长的默认值（提示词模板等）直接从 `legacy_schema.json` 读，保证和旧值逐字相同。
@@ -334,6 +334,118 @@ _WAKE = Block(
     ),
 )
 
+_ACTIONS = Block(
+    "actions",
+    "群动作",
+    "让模型能对群 / 好友做一些动作（戳一戳、贴表情、撤回、禁言、改名片、改头衔、踢人、退群、查成员）。"
+    "默认全关：只有打开的那一项，模型才看得到对应的工具；关着的工具模型根本看不到，也不会乱试。"
+    "bot 自己的资料 / 头像 / 加好友申请 / 协议端不在这一页，见『群动作·全局』。",
+    (
+        _both(
+            "actions.poke_enabled", "bool", False, "戳一戳",
+            "允许模型戳一戳某个人：群里走群戳，私聊走好友戳。被戳的人会收到 QQ 的『你戳了戳我』提示，"
+            "算打扰动作，建议只在自己熟悉的群或个人开。关闭后模型看不到这个工具。",
+            new_private=True, new_group=True,
+        ),
+        _both(
+            "actions.emoji_enabled", "bool", False, "贴表情回应",
+            "允许模型给某一条消息贴一个表情回应（小脸）。前置条件：得有那条消息的消息号——"
+            "聊天记录里每条消息带 #消息号 时才拿得到，取不到号会失败。"
+            "NapCat 要多带一个 set 参数、LLOneBot 不用，靠『群动作·全局』里的『协议端类型』区分。关闭后模型看不到这个工具。",
+            new_private=True, new_group=True,
+        ),
+        _both(
+            "actions.recall_enabled", "bool", False, "撤回消息",
+            "允许模型撤回一条消息，需要消息号；撤别人的消息通常要机器人是管理员，否则平台会拒绝。"
+            "撤回不可撤销，群里会留下『某人撤回了一条消息』。关闭后模型看不到这个工具。",
+            new_private=True, new_group=True,
+        ),
+        _g(
+            "actions.ban_enabled", "bool", False, "群禁言",
+            "允许模型在群里禁言某个成员（传 0 秒就是解禁）。前置条件：机器人是管理员或群主，否则平台会拒绝。"
+            "单次最长多久见下面的『单次禁言上限』，能不能对管理员动手见『允许对管理员动手』。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.card_enabled", "bool", False, "改群名片",
+            "允许模型改群成员的群名片（传空字符串就是清掉名片）。前置条件：机器人是管理员或群主，"
+            "普通管理员只动得了普通成员。改的是对方在群里显示的名字，会影响别人认人。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.title_enabled", "bool", False, "改群头衔",
+            "允许模型给群成员设专属头衔（传空字符串就是清除头衔）。前置条件：机器人必须是群主，"
+            "管理员改不了头衔。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.kick_enabled", "bool", False, "踢出群",
+            "允许模型把某个成员踢出群。前置条件：机器人是管理员或群主，且普通管理员踢不了同级和群主。"
+            "踢出去不可撤销，对方要重新申请加群才回得来；危险动作，只给信得过的群开。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.leave_enabled", "bool", False, "退群",
+            "允许模型让机器人退出当前这个群。只能退当前会话所在的群；退了以后 lingxi 在这个群彻底没声，"
+            "得有人手动把机器人重新拉回来。最危险的一项，默认关，别随手打开。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.member_search_enabled", "bool", False, "查群成员",
+            "允许模型按昵称或 QQ 号查群成员，最多回 10 条，用来在『踢谁 / 禁言谁 / @ 谁』之前先找人。"
+            "只读名单、不改任何东西；群成员特别多时平台接口会慢一点。关闭后模型看不到这个工具。",
+            new_group=True,
+        ),
+        _g(
+            "actions.ban_max_seconds", "int", 3600, "单次禁言上限（秒）",
+            "模型想禁言多久就多久，但超过这个秒数会被截到这个上限，并在返回里告诉它『已按上限处理』。"
+            "3600 = 1 小时；60 = 1 分钟，2592000 = 30 天（平台允许的最大值）。调小更安全，调大更容易把人关很久。",
+            new_group=True, lo=60, hi=2592000, slider=(60, 2592000, 60),
+        ),
+        _g(
+            "actions.allow_target_admin", "bool", False, "允许对管理员动手",
+            "关闭时：模型想对群主 / 管理员禁言、踢人、改名片、改头衔，会被直接拦下并收到一句『对方是管理员，不能动』。"
+            "打开后不再拦，但平台通常也会拒绝（普通管理员动不了同级和群主）。默认关闭，建议保持关闭。",
+            new_group=True,
+        ),
+    ),
+)
+
+_ACTIONS_GLOBAL = Block(
+    "actions_global",
+    "群动作·全局",
+    "这几项改的是机器人自己（昵称、头像、加好友 / 加群申请、协议端），对所有群和私聊一起生效，"
+    "所以只能写在全局配置里，不能按会话覆盖。默认全关。",
+    (
+        _both(
+            "actions_global.request_enabled", "bool", False, "处理加好友 / 加群申请",
+            "允许模型同意或拒绝别人加机器人好友、加群的申请。前置条件：得先有『收到过这条申请』的记录"
+            "（申请事件里的 flag），没记下来就做不了。同意就等于把陌生人放进来，默认关。",
+            new_private=True, new_group=True,
+        ),
+        _both(
+            "actions_global.self_profile_enabled", "bool", False, "改机器人资料",
+            "允许模型改机器人自己的昵称、签名这类资料。改的是整个号，所有群和私聊一起变，不只是当前会话。"
+            "LLOneBot 不支持改性别，协议端选 llbot 时这一项不发。默认关。",
+            new_private=True, new_group=True,
+        ),
+        _both(
+            "actions_global.avatar_enabled", "bool", False, "改机器人头像",
+            "允许模型换机器人自己的头像：给一个图片地址，http/https 的会先转成 base64 再发（图太大可能失败）。"
+            "改的也是整个号的头像。默认关。",
+            new_private=True, new_group=True,
+        ),
+        _both(
+            "actions_global.protocol", "string", "napcat", "协议端类型",
+            "机器人跑在哪个协议端。少数动作的参数不一样：贴表情回应 NapCat 要多带 set: true、"
+            "改自己资料时 LLOneBot 不发性别、有的端群号要数字有的要字符串。"
+            "选错只影响个别动作，不影响别的功能。默认 NapCat。",
+            new_private=True, new_group=True, options=("napcat", "llbot"), labels=("NapCat", "LLOneBot"),
+        ),
+    ),
+    overridable=False,
+)
+
 _GATE = Block(
     "gate",
     "闸门",
@@ -598,7 +710,8 @@ _PROMPT = Block(
 )
 
 # 顺序 = WebUI 里的显示顺序
-BLOCKS: tuple[Block, ...] = (_WHITELIST, _BASE, _TRIGGER, _ACTIVITY, _IDLE, _FOLLOWUP, _WAKE, _GATE, _CONTEXT, _SILENCE, _SPEECH, _PROMPT)
+BLOCKS: tuple[Block, ...] = (_WHITELIST, _BASE, _TRIGGER, _ACTIVITY, _IDLE, _FOLLOWUP, _WAKE, _ACTIONS, _ACTIONS_GLOBAL,
+                             _GATE, _CONTEXT, _SILENCE, _SPEECH, _PROMPT)
 
 SCOPE_TITLES = {
     Scope.PRIVATE: ("私聊全局配置", "所有私聊共用的默认设置。某个人想不一样，在『会话覆盖』里只写要改的几项。"),
