@@ -487,5 +487,196 @@ class TestLingxiDiag3mStatic(unittest.TestCase):
         self.assertEqual(self.css.count("@media (max-width: 700px)"), 1)
 
 
+# ---------------------------------------------------------------------------
+# ACT-1：面板新开的一页「群动作」（tab_actions.js / tab_actions.css）。
+# 契约是任务卡 ACT-1 §7 的冻结表；真浏览器的行为断言在 tools/rig/e2e_ui_browser.py 的 B11。
+# 这里锁三件事：①页面上的 12 个工具 / 3 个全局项和契约一字不差；
+# ②控件走 form.js 的 LX.formKit、规则（类型 / 范围 / 默认值）一律来自后端元数据，JS 不许自己写；
+# ③保存 / 放弃 / 改动数 / 标签红点接的是壳现有的暂存（LX.getValue / setValue / state.dirty）。
+# ---------------------------------------------------------------------------
+
+# (工具名, 开关键全路径, 哪些范围有这一项, 是否危险)
+ACT_TOOLS = [
+    ("poke_user", "actions.poke_enabled", ("private", "group"), False),
+    ("set_msg_emoji", "actions.emoji_enabled", ("private", "group"), False),
+    ("delete_msg", "actions.recall_enabled", ("private", "group"), False),
+    ("set_group_ban", "actions.ban_enabled", ("group",), False),
+    ("set_group_card", "actions.card_enabled", ("group",), False),
+    ("set_group_special_title", "actions.title_enabled", ("group",), False),
+    ("set_group_kick", "actions.kick_enabled", ("group",), True),
+    ("set_group_leave", "actions.leave_enabled", ("group",), True),
+    ("search_group_member", "actions.member_search_enabled", ("group",), False),
+    ("handle_request", "actions_global.request_enabled", ("private", "group"), True),
+    ("set_self_profile", "actions_global.self_profile_enabled", ("private", "group"), False),
+    ("set_qq_avatar", "actions_global.avatar_enabled", ("private", "group"), True),
+]
+ACT_GLOBALS = [
+    ("protocol", "actions_global.protocol", ("private", "group")),
+    ("ban_max_seconds", "actions.ban_max_seconds", ("group",)),
+    ("allow_target_admin", "actions.allow_target_admin", ("group",)),
+]
+
+# 表里的每一行都是"一行的 JS 对象字面量"：name / path / … / scopes: [..] / danger: true|false / risk: "…"
+_ENTRY_KEY_RE = re.compile(r'(\w+):\s*(?:"([^"]*)"|\[([^\]]*)\]|(true|false))')
+
+
+class TestLingxiAct1PanelStatic(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = _read_all()
+        cls.js = cls.texts["tab_actions.js"]
+        cls.css = cls.texts["tab_actions.css"]
+        cls.index = cls.texts["index.html"]
+        cls.app = cls.texts["app.js"]
+
+    def entries(self, var):
+        """取 tab_actions.js 里 var TOOLS / var GLOBALS 那张表，逐行拆成 dict（不靠字段顺序）。"""
+        start = self.js.index("var %s = [" % var)
+        end = self.js.index("  ];\n", start)
+        rows = []
+        for line in self.js[start:end].splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            row = {}
+            for m in _ENTRY_KEY_RE.finditer(line):
+                key, val, lst, boolean = m.group(1), m.group(2), m.group(3), m.group(4)
+                if lst is not None:
+                    row[key] = tuple(re.findall(r'"([^"]*)"', lst))
+                elif boolean is not None:
+                    row[key] = boolean == "true"
+                else:
+                    row[key] = val
+            rows.append(row)
+        return rows
+
+    def test_tool_table_matches_frozen_contract(self):
+        rows = self.entries("TOOLS")
+        self.assertEqual([r.get("name") for r in rows], [t[0] for t in ACT_TOOLS],
+                         "工具顺序 / 名称要和 ACT-1 §7 的冻结表一致（顺序就是页面上的顺序）")
+        for row, (name, path, scopes, danger) in zip(rows, ACT_TOOLS):
+            self.assertEqual(row.get("path"), path, "%s 的开关键写错了" % name)
+            self.assertEqual(tuple(row.get("scopes") or ()), scopes, "%s 的生效范围写错了" % name)
+            self.assertIs(row.get("danger"), danger, "%s 的危险标记和契约不一致" % name)
+            self.assertTrue(row.get("title"), "%s 缺中文名" % name)
+            self.assertRegex(row.get("title") or "", r"[\u4e00-\u9fff]", "%s 的中文名得是中文" % name)
+            self.assertGreaterEqual(len(row.get("risk") or ""), 10, "%s 缺一句风险 / 前置条件小字" % name)
+            self.assertEqual(row.get("path", "").count("."), 1,
+                             "开关键只能是 块.项（%s）" % row.get("path"))
+
+    def test_global_items_match_contract(self):
+        rows = self.entries("GLOBALS")
+        self.assertEqual([(r.get("name"), r.get("path")) for r in rows],
+                         [(n, p) for n, p, _ in ACT_GLOBALS])
+        for row, (name, path, scopes) in zip(rows, ACT_GLOBALS):
+            self.assertEqual(tuple(row.get("scopes") or ()), scopes, "%s 的生效范围写错了" % name)
+        self.assertIn("单次禁言上限", [r.get("title") for r in rows])
+
+    def test_ui_hooks_present(self):
+        for hook in ("act-intro", "act-missing", "act-global", "act-grid", "act-path",
+                     "act-card-", "act-toggle-", "act-risk-", "act-danger-", "act-dirty-",
+                     "act-mixed-", "act-default-", "act-pending-", "act-pending-note-"):
+            self.assertIn(hook, self.js, "群动作页缺钩子 %s" % hook)
+        # 一张卡一个工具、一行一个全局项：id 是"前缀 + 工具名"，B11 按它点开关
+        self.assertIn('"act-card-" + def.name', self.js)
+        self.assertIn('"act-toggle-" + def.name', self.js)
+
+    def test_danger_items_carry_warning_badge(self):
+        # 危险项（踢人 / 退群 / 换头像 / 处理申请）用警示色小标；别的卡不许挂
+        self.assertIn("if (def.danger)", self.js)
+        self.assertIn("badge badge-danger", self.js)
+        danger_cards = sorted(t[0] for t in ACT_TOOLS if t[3])
+        self.assertEqual(danger_cards, sorted(["set_group_kick", "set_group_leave",
+                                               "set_qq_avatar", "handle_request"]))
+
+    def test_no_config_rules_written_in_js(self):
+        """类型 / 范围 / 默认值必须来自后端元数据：这里连一个数都不许写死。"""
+        code = _strip_js_comments(self.js)
+        for baked in ("3600", "2592000", "napcat", "llbot"):
+            self.assertNotIn(baked, code, "tab_actions.js 里不许写死配置规则（%s）" % baked)
+        self.assertNotIn('type: "', code, "选项类型要读元数据，不能在 JS 表里声明")
+        self.assertIn("LX.fieldMeta", code, "要从后端元数据取字段（类型 / 范围 / 默认值）")
+        self.assertIn("field.default", code, "默认值要读元数据里的 default")
+
+    def test_controls_reuse_form_kit(self):
+        # 卡 §3：复用 form.js 的字段渲染，不另写一套开关 / 数字框 / 下拉
+        code = _strip_js_comments(self.js)
+        self.assertIn("LX.formKit.makeView", code)
+        self.assertIn("LX.formKit.buildControl", code)
+        for bad in ('createElement("input")', "createElement('input')",
+                    'createElement("select")', "createElement('select')", "<input"):
+            self.assertNotIn(bad, code, "开关 / 输入框要由 LX.formKit 建，别自己拼（%s）" % bad)
+
+    def test_registration_lives_in_shell_only(self):
+        # 文件归属（§7）：app.js 只加标签注册和脏标记接线；版面在 tab_actions.js
+        self.assertNotIn("registerTab", self.js, "tab_actions.js 不许自己注册标签（壳里注册）")
+        self.assertIn("LX.actionsTab", self.js)
+        self.assertIn("registerActionsTab", self.app)
+        self.assertIn('id: "actions"', self.app)
+        self.assertIn("impl.isDirty", self.app)
+        self.assertIn("order: 25", self.app)
+
+    def test_tab_dot_does_not_need_the_tab_to_be_mounted(self):
+        """标签红点要在没进过这一页时也能亮：直接看壳的暂存，不能依赖挂载后的记录。"""
+        m = re.search(r"function isDirtyTab\(\) \{.*?\n  \}\n", self.js, re.S)
+        self.assertIsNotNone(m, "tab_actions.js 找不到 isDirtyTab")
+        body = m.group(0)
+        self.assertIn("state.dirty", body)
+        self.assertIn("PATH_SET", body)
+        self.assertNotIn("records", body, "标签红点不许依赖挂载后的记录列表")
+        self.assertNotIn("rootEl", body)
+        # 两边一起写：一个开关同时写私聊 / 群聊两套设置
+        self.assertIn("scopes.forEach", self.js)
+        self.assertIn("LX.setValue", self.js)
+
+    def test_index_loads_tab_actions_after_form(self):
+        self.assertIn('href="./tab_actions.css"', self.index)
+        for needed in ('src="./app.js"', 'src="./icons.js"', 'src="./form.js"'):
+            self.assertIn(needed, self.index)
+        order = [self.index.index(s) for s in ('src="./app.js"', 'src="./icons.js"',
+                                              'src="./form.js"', 'src="./tab_actions.js"')]
+        self.assertEqual(order, sorted(order),
+                         "加载顺序应是 app.js → icons.js → form.js → tab_actions.js（控件要用 LX.formKit）")
+
+    def test_js_keeps_page_rules(self):
+        for bad in BANNED_JS:
+            self.assertNotIn(bad, self.js, "tab_actions.js 里不许出现 %s" % bad)
+        self.assertNotIn("innerHTML", _strip_js_comments(self.js))
+
+    def test_css_tokens_only_and_mobile_single_column(self):
+        self.assertIsNone(HEX_RE.search(self.css), "tab_actions.css 里不许写死 #十六进制色值，改用令牌")
+        self.assertNotRegex(self.css, r"\b(?:rgb|rgba|hsl|hsla)\(", "tab_actions.css 里不许写死 rgb()/hsl()")
+        self.assertNotIn(".topbar", self.css, "群动作页不许碰 .topbar（会废掉窄屏固定保存栏）")
+        self.assertNotIn("backdrop-filter", self.css)
+        self.assertNotIn("position: fixed", self.css, "页面里别再放固定底栏（窄屏保存栏由壳管）")
+        self.assertEqual(self.css.count("@media (max-width: 700px)"), 1)
+        m = re.search(r"@media \(max-width: 700px\) \{(.*?)\n\}", self.css, re.S)
+        self.assertIsNotNone(m)
+        narrow = m.group(1)
+        self.assertRegex(narrow, r"\.act-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)",
+                         "窄屏下工具卡要单列，不能横向滚动")
+        self.assertRegex(narrow, r"\.act-row\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)")
+        self.assertRegex(self.css, r"\.act-card\s*\{[^}]*min-width:\s*0",
+                         "卡片要 min-width: 0，否则长路径会把网格撑出横向滚动")
+        self.assertRegex(self.css, r"\.act-path\s*\{[^}]*overflow-wrap:\s*anywhere",
+                         "配置项路径这类长串要能换行")
+
+    def test_spec_paths_align_when_backend_lands(self):
+        """be1 落地后这条就是真的对账：页面上的开关键必须和 spec 里的项一一对应（多一个少一个都算错）。
+        be1 之前 spec 里还没有这两个块，这里只能先跳过。"""
+        from lx.config import spec
+        from lx.contracts import Scope
+
+        spec_paths = set()
+        for scope in (Scope.PRIVATE, Scope.GROUP):
+            for block in spec.blocks_for(scope):
+                if block.key in ("actions", "actions_global"):
+                    spec_paths.update(f.path for f in block.fields_for(scope))
+        if not spec_paths:
+            self.skipTest("后端 be1 还没把 actions / actions_global 落进 lx/config/spec.py")
+        ui_paths = {r.get("path") for r in self.entries("TOOLS") + self.entries("GLOBALS")}
+        self.assertEqual(ui_paths, spec_paths, "面板上的开关键和 spec 里的项对不上")
+
+
 if __name__ == "__main__":
     unittest.main()
