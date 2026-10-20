@@ -830,8 +830,11 @@ async def _sc_B10(ctx):
     n_before = await fb.ctx_eval(f, "document.querySelectorAll('#sr-list .sr-entry').length")
     ctx.note("B10 起始：表单条目 %d 个；session_overrides=%r" % (n_before, ov_before))
 
-    # 1) 添加会话：群聊 + 合成群号
-    await fb.frame_fill(f, "#sr-session", SR_GROUP)
+    # 1) 添加会话（SR-UI-2）：下拉框故意选「私聊」、号码框直接粘贴群标识——应当按标识识别成群聊、
+    #    卡片上只留纯号码，并回一句「已按标识识别为群聊」；再拿裸号码加同一个群，要被判重挡住。
+    await _set_select(ctx, "#sr-scope", "private")
+    await fb.ctx_wait_for(f, "document.querySelector('#sr-scope').value==='private'", timeout=8)
+    await fb.frame_fill(f, "#sr-session", "napcat:GroupMessage:%s" % SR_GROUP)
     await fb.frame_click(f, "#sr-add-session")
     await fb.ctx_wait_for(
         f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 1),
@@ -842,11 +845,20 @@ async def _sc_B10(ctx):
         "scope:e.dataset.scope,session:e.dataset.session,"
         "items:e.querySelectorAll('.sr-item').length};})()"))
     assert tup["code"] == SR_GROUP and tup["session"] == SR_GROUP, (
-        "新会话行不对：%r" % (tup,))
-    assert tup["scope"] == "group", "新会话应为群聊，实际 %r" % (tup["scope"],)
+        "粘贴完整标识后卡片上应当只剩纯号码：%r" % (tup,))
+    assert tup["scope"] == "group", "群标识应当按群聊添加，实际 %r" % (tup["scope"],)
     assert tup["items"] == 0, "新会话应当还没有任何项，实际 %r 项" % (tup["items"],)
     err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
     assert err == "", "添加会话不该报错，实际 %r" % (err,)
+    note = await fb.ctx_eval(f, "document.querySelector('#sr-add-note').innerText.trim()")
+    assert "已按标识识别为群聊" in note, "没有回「已按标识识别为群聊」，实际 %r" % (note,)
+    await fb.frame_fill(f, "#sr-session", SR_GROUP)          # 同一个群的裸号码
+    await fb.frame_click(f, "#sr-add-session")
+    dup_err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert "已经在上面" in dup_err, "同一个群再加一次应当被判重挡住，实际 %r" % (dup_err,)
+    n_now = await fb.ctx_eval(f, "document.querySelectorAll('#sr-list .sr-entry').length")
+    assert n_now == n_before + 1, "判重之后不该多出卡片，实际 %r 个" % (n_now,)
+    await fb.frame_fill(f, "#sr-session", "")
 
     # 2) 加一项：块 + 项都从 meta 里查，不写死（卡片举例是上下文·聊天记录条数）
     info = await _field_info(ctx, "group", SR_ITEM_PATH)

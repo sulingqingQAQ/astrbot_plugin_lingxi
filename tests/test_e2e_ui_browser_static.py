@@ -296,6 +296,13 @@ class SrUiB10StaticTest(unittest.TestCase):
         self.assertIn("b10_sr_saved.png", self.body)
         self.assertIn("events_since(mark)", self.body)
 
+    def test_b10_pastes_full_identifier_and_checks_switch(self):
+        # SR-UI-2：下拉框选私聊、粘贴群标识 -> 按群聊加、只留号码、回一句「已按标识识别为群聊」；
+        # 再拿裸号码加同一个群 -> 判重挡住
+        for need in ("napcat:GroupMessage:%s", "#sr-add-note", "已按标识识别为群聊",
+                     '"#sr-scope"', "已经在上面", "#sr-scope').value==='private'"):
+            self.assertIn(need, self.body, "B10 缺少会话号规整那段：%s" % need)
+
     def test_b10_runs_standalone(self):
         self.assertIn("def _open_plugin_page(", self.src)
         self.assertIn("_open_plugin_page(ctx)", self.body)
