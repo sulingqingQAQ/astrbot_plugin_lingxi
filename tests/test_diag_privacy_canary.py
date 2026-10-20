@@ -104,6 +104,8 @@ def make_conf() -> dict:
         "group": {
             "prompt": {"style_text": STYLE_TEXT, "glossary_text": GLOSS_TEXT, "members_text": MEMBERS_TEXT},
             "whitelist": {"ids": [GROUP_ID, OTHER_GROUP]},
+            # ACT-1：群动作工具开着，金丝雀才跑得到"动作诊断事件"（目标号要打码）
+            "actions": {"ban_enabled": True},
         },
         "private": {
             "prompt": {"style_text": STYLE_TEXT, "members_text": MEMBERS_TEXT},
@@ -233,9 +235,49 @@ class World:
         # 带号码的警告日志（日志行里的号码要被打码）
         self.rec.log("[gates] 警告：会话 %s 的配置被跳过" % key.id)
 
+    def drive_action(self) -> None:
+        """ACT-1：群动作工具跑两次（成功 + 平台报错），诊断里要留事件、目标号要打码。
+
+        目标用 MEMBER_ID（别人的 QQ 号）——任何输出面上都不该出现原号（见 OTHERS_CANARIES）。
+        """
+        from lx.adapters.group_actions import group_actions
+        from lx.session.key import to_umo
+
+        class Bot:
+            def __init__(self, fail: bool = False) -> None:
+                self.fail = fail
+                self.api = self  # 走 bot.api.call_action 这条通道
+
+            async def call_action(self, action: str, **params):
+                if action == "get_group_member_info":
+                    return {"status": "ok", "retcode": 0, "data": {"role": "member"}}
+                if self.fail:
+                    return {"status": "failed", "retcode": 100, "data": None}
+                return {"status": "ok", "retcode": 0, "data": None}
+
+        class Ev:
+            def __init__(self, key: SessionKey, bot, sender: str) -> None:
+                self.unified_msg_origin = to_umo(key)
+                self.bot = bot
+                self._group = key.id if key.scope == Scope.GROUP else ""
+                self._sender = sender
+
+            def get_group_id(self):
+                return self._group
+
+            def get_sender_id(self):
+                return self._sender
+
+        acts = group_actions(self.comps, log=self.rec.log, diag=self.rec)
+        asyncio.run(acts.set_group_ban(Ev(GKEY, Bot(), PRIVATE_ID), MEMBER_ID, 60))
+        self.step()
+        asyncio.run(acts.set_group_ban(Ev(GKEY, Bot(fail=True), PRIVATE_ID), MEMBER_ID, 60))
+        self.step()
+
     def drive_all(self) -> "World":
         self.drive_session(GKEY)
         self.drive_session(PKEY)
+        self.drive_action()
         return self
 
     # ---- 取各输出面
@@ -313,6 +355,42 @@ class PreconditionsTest(_WorldCase):
             self.assertIn(PRIVATE_ID, s[name], name)
         self.assertIn(OTHER_GROUP, s["diag.json"])  # 白名单 / 覆盖表里的号码
         self.assertIn(GROUP_ID, s["summary.md"])    # 警告日志行里的号码
+
+
+class GroupActionCanaryTest(_WorldCase):
+    """ACT-1：群动作工具的诊断事件——记哪个工具 / 哪个会话 / 结果，目标号打码，不记正文。"""
+
+    def test_action_events_reached_the_recorder(self):
+        snap = self.w.rec.snapshot(include_text=True, mask_ids=False)
+        acts = [e for e in snap["events"] if e["kind"] == "action"]
+        self.assertEqual(len(acts), 2, acts)
+        self.assertEqual({e["result"] for e in acts}, {"ok", "fail"})
+        self.assertTrue(all(e["session"] == GROUP_ID for e in acts))
+        self.assertTrue(all("tool=set_group_ban" in e["reason"] for e in acts))
+
+    def test_target_id_is_masked_before_it_reaches_the_recorder(self):
+        """工具在**记之前**就打码：连 mask_ids=False 的快照里都没有目标原号。"""
+        snap = self.w.rec.snapshot(include_text=True, mask_ids=False)
+        blob = json.dumps(snap, ensure_ascii=False)
+        self.assertNotIn(MEMBER_ID, blob)
+        acts = [e for e in snap["events"] if e["kind"] == "action"]
+        self.assertTrue(any(mask_digits(MEMBER_ID) in e["reason"] for e in acts), acts)
+
+    def test_target_id_never_leaks_and_masked_form_shows_up(self):
+        for include_text in (False, True):
+            s = self.w.surfaces(include_text, True)
+            self.assertEqual(leaks(s, (MEMBER_ID,)), [], include_text)
+            self.assertIn(mask_digits(MEMBER_ID), s["diag.json"], include_text)
+
+    def test_action_events_carry_no_body_text(self):
+        """动作事件不许带正文（正文金丝雀一个都不该出现）。"""
+        s = self.w.surfaces(True, True)
+        acts = [e for e in json.loads(s["diag.json"])["events"] if e["kind"] == "action"]
+        self.assertTrue(acts)
+        for e in acts:
+            text = json.dumps(e, ensure_ascii=False)
+            for needle in (C_REPLY, C_RAW, C_USER, C_NICK):
+                self.assertNotIn(needle, text)
 
 
 class DefaultOptionsTest(_WorldCase):
