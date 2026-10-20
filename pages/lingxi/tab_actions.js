@@ -30,18 +30,29 @@
     { name: "set_group_kick", path: "actions.kick_enabled", title: "踢出群", icon: "x", scopes: ["group"], danger: true, risk: "直接把对方踢出群，对话当场断掉；对方能自己再加回来。需要机器人是管理员。" },
     { name: "set_group_leave", path: "actions.leave_enabled", title: "退出群", icon: "trash", scopes: ["group"], danger: true, risk: "让机器人退出当前这个群，退出后要人手动再拉回来；退群期间它在这个群的功能全没了。" },
     { name: "search_group_member", path: "actions.member_search_enabled", title: "查群成员", icon: "search", scopes: ["group"], danger: false, risk: "只在当前群查，最多回 10 个；模型看到的是昵称和号码，不查别的群。" },
-    { name: "handle_request", path: "actions_global.request_enabled", title: "处理加好友 / 加群申请", icon: "check-circle", scopes: ["private", "group"], danger: true, risk: "替机器人同意或拒绝申请；点同意对方就直接进来，收不回来（只能事后再踢 / 再删）。" },
-    { name: "set_self_profile", path: "actions_global.self_profile_enabled", title: "改机器人资料", icon: "settings", scopes: ["private", "group"], danger: false, risk: "改的是机器人自己号的昵称 / 签名等资料，所有平台都看得到。" },
-    { name: "set_qq_avatar", path: "actions_global.avatar_enabled", title: "换机器人头像", icon: "eye", scopes: ["private", "group"], danger: true, risk: "换掉机器人自己号的头像，所有平台都看得到，旧头像不保留。" }
+    { name: "handle_request", path: "actions_global.request_enabled", title: "处理加好友 / 加群申请", icon: "check-circle", scopes: ["group"], danger: true, risk: "替机器人同意或拒绝申请；点同意对方就直接进来，收不回来（只能事后再踢 / 再删）。全局设置，对所有会话生效。" },
+    { name: "set_self_profile", path: "actions_global.self_profile_enabled", title: "改机器人资料", icon: "settings", scopes: ["group"], danger: false, risk: "改的是机器人自己号的昵称 / 签名等资料，所有平台都看得到。全局设置，对所有会话生效。" },
+    { name: "set_qq_avatar", path: "actions_global.avatar_enabled", title: "换机器人头像", icon: "eye", scopes: ["group"], danger: true, risk: "换掉机器人自己号的头像，所有平台都看得到，旧头像不保留。全局设置，对所有会话生效。" }
   ];
 
-  /* 全局项：协议 / 单次禁言上限 / 是否允许对管理员动手。
-   * 标题只是元数据缺失时的兜底；有元数据时用后端的 title / hint。 */
-  var GLOBALS = [
-    { name: "protocol", path: "actions_global.protocol", title: "协议", scopes: ["private", "group"] },
+  /* 非工具项：限制（禁言上限 / 是否允许对管理员动手，属 actions，跟着会话走）与
+   * 协议（属 actions_global，只有群聊全局一份、对整台机器生效）。
+   * 标题只是元数据缺失时的兜底；有元数据时用后端的 title / hint。
+   * actions_global 的四项按 §7.4 只在群聊全局存在：读写都只碰 group，私聊那边不放第二份。 */
+  /* 非工具项分两段：限制跟着会话走（actions），全局只有一份、对整台机器生效（actions_global）。 */
+  var LIMITS = [
     { name: "ban_max_seconds", path: "actions.ban_max_seconds", title: "单次禁言上限", scopes: ["group"] },
     { name: "allow_target_admin", path: "actions.allow_target_admin", title: "允许对管理员动手", scopes: ["group"] }
   ];
+  var GLOBAL_SETTINGS = [
+    { name: "protocol", path: "actions_global.protocol", title: "协议", scopes: ["group"] }
+  ];
+  var GLOBALS = LIMITS.concat(GLOBAL_SETTINGS);
+
+  /* actions_global 里的项对整个机器人生效，且全局只有一份（§7.4）：只读只写群聊全局。 */
+  function isGlobalPath(path) {
+    return path.indexOf("actions_global.") === 0;
+  }
 
   /* 本标签管的暂存键（范围:路径）：标签红点不依赖是否已经挂载过，直接看壳的 dirty。 */
   var PATH_SET = {};
@@ -235,6 +246,12 @@
       danger.appendChild(document.createTextNode("危险动作"));
       meta.appendChild(danger);
     }
+    if (isGlobalPath(def.path)) {
+      meta.appendChild(LX.el("span", {
+        id: "act-globalmark-" + def.name, class: "badge badge-info act-globalmark",
+        text: "全局生效"
+      }));
+    }
     meta.appendChild(rec.bits.dirty);
     if (has) meta.appendChild(rec.bits.fallback);
     var titles = LX.el("div", { class: "act-card-titles" }, [
@@ -319,6 +336,7 @@
       infoIconBox,
       LX.el("div", { class: "alert-body" }, [
         LX.el("div", { text: "开关会同时写进私聊 / 群聊两套设置（只在群聊生效的动作只写群聊），所以一个开关在改动清单里可能算两项。" }),
+        LX.el("div", { text: "标了「全局生效」的动作和「全局（对整个机器人生效）」那一区，只有一份设置，对整台机器上的所有会话生效。" }),
         LX.el("div", { text: "这些动作由机器人的号去执行：机器人得是群管理员（有的还得是群主），OneBot 那边也要给机器人对应的权限。" })
       ])
     ]));
@@ -332,13 +350,20 @@
     while (root.firstChild) root.removeChild(root.firstChild);
     root.appendChild(buildIntro());
 
-    var globalHead = LX.el("div", { class: "group-title" }, [
-      "全局项 ",
-      LX.el("span", { class: "count", text: String(GLOBALS.length) })
-    ]);
-    root.appendChild(globalHead);
+    root.appendChild(LX.el("div", { class: "group-title" }, [
+      "限制 ",
+      LX.el("span", { class: "count", text: String(LIMITS.length) })
+    ]));
+    var limitCard = LX.el("div", { id: "act-limits", class: "card act-global" });
+    LIMITS.forEach(function (def) { limitCard.appendChild(buildGlobalRow(def)); });
+    root.appendChild(limitCard);
+
+    root.appendChild(LX.el("div", { class: "group-title" }, [
+      "全局（对整个机器人生效） ",
+      LX.el("span", { class: "count", text: String(GLOBAL_SETTINGS.length) })
+    ]));
     var globalCard = LX.el("div", { id: "act-global", class: "card act-global" });
-    GLOBALS.forEach(function (def) { globalCard.appendChild(buildGlobalRow(def)); });
+    GLOBAL_SETTINGS.forEach(function (def) { globalCard.appendChild(buildGlobalRow(def)); });
     root.appendChild(globalCard);
 
     root.appendChild(LX.el("div", { class: "group-title" }, [

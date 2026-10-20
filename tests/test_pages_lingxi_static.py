@@ -506,15 +506,19 @@ ACT_TOOLS = [
     ("set_group_kick", "actions.kick_enabled", ("group",), True),
     ("set_group_leave", "actions.leave_enabled", ("group",), True),
     ("search_group_member", "actions.member_search_enabled", ("group",), False),
-    ("handle_request", "actions_global.request_enabled", ("private", "group"), True),
-    ("set_self_profile", "actions_global.self_profile_enabled", ("private", "group"), False),
-    ("set_qq_avatar", "actions_global.avatar_enabled", ("private", "group"), True),
+    ("handle_request", "actions_global.request_enabled", ("group",), True),
+    ("set_self_profile", "actions_global.self_profile_enabled", ("group",), False),
+    ("set_qq_avatar", "actions_global.avatar_enabled", ("group",), True),
 ]
-ACT_GLOBALS = [
-    ("protocol", "actions_global.protocol", ("private", "group")),
+# §7.4：actions_global 的项只在群聊全局里有一份、对整台机器生效（私聊那边没有第二份）
+ACT_LIMITS = [
     ("ban_max_seconds", "actions.ban_max_seconds", ("group",)),
     ("allow_target_admin", "actions.allow_target_admin", ("group",)),
 ]
+ACT_GLOBAL_SETTINGS = [
+    ("protocol", "actions_global.protocol", ("group",)),
+]
+ACT_GLOBALS = ACT_LIMITS + ACT_GLOBAL_SETTINGS
 
 # 表里的每一行都是"一行的 JS 对象字面量"：name / path / … / scopes: [..] / danger: true|false / risk: "…"
 _ENTRY_KEY_RE = re.compile(r'(\w+):\s*(?:"([^"]*)"|\[([^\]]*)\]|(true|false))')
@@ -565,15 +569,40 @@ class TestLingxiAct1PanelStatic(unittest.TestCase):
                              "开关键只能是 块.项（%s）" % row.get("path"))
 
     def test_global_items_match_contract(self):
-        rows = self.entries("GLOBALS")
-        self.assertEqual([(r.get("name"), r.get("path")) for r in rows],
-                         [(n, p) for n, p, _ in ACT_GLOBALS])
-        for row, (name, path, scopes) in zip(rows, ACT_GLOBALS):
-            self.assertEqual(tuple(row.get("scopes") or ()), scopes, "%s 的生效范围写错了" % name)
-        self.assertIn("单次禁言上限", [r.get("title") for r in rows])
+        # 非工具区分两段：限制（跟着会话走）与全局（整台机器一份），表也要分两张
+        for var, table in (("LIMITS", ACT_LIMITS), ("GLOBAL_SETTINGS", ACT_GLOBAL_SETTINGS)):
+            rows = self.entries(var)
+            self.assertEqual([(r.get("name"), r.get("path")) for r in rows],
+                             [(n, p) for n, p, _ in table], "%s 表的项 / 顺序不对" % var)
+            for row, (name, path, scopes) in zip(rows, table):
+                self.assertEqual(tuple(row.get("scopes") or ()), scopes, "%s 的生效范围写错了" % name)
+        self.assertIn("单次禁言上限", [r.get("title") for r in self.entries("LIMITS")])
+
+    def test_actions_global_has_one_copy_in_group_scope(self):
+        """§7.4：actions_global 四项只在群聊全局里有一份，面板别在私聊那边再放一份。"""
+        rows = self.entries("TOOLS") + self.entries("LIMITS") + self.entries("GLOBAL_SETTINGS")
+        global_rows = [r for r in rows if (r.get("path") or "").startswith("actions_global.")]
+        expected = [p for _, p, _ in ACT_GLOBAL_SETTINGS] + [p for _, p, _, _ in ACT_TOOLS
+                                                             if p.startswith("actions_global.")]
+        self.assertEqual(sorted(r.get("path") for r in global_rows), sorted(expected))
+        for row in global_rows:
+            self.assertEqual(tuple(row.get("scopes") or ()), ("group",),
+                             "%s 应只在群聊全局生效" % row.get("path"))
+        # 分组标题与卡片小标：这一区要标成"对整个机器人生效"
+        self.assertIn("全局（对整个机器人生效）", self.js)
+        self.assertIn("isGlobalPath", self.js)
+        self.assertIn("act-globalmark-", self.js)
+        self.assertIn("全局生效", self.js)
+        # 别把 actions_global 也塞进私聊：表里这几行不许同时挂 private
+        code = _strip_js_comments(self.js)
+        for line in code.splitlines():
+            if 'path: "actions_global.' in line and "scopes:" in line:
+                after = line.split("scopes:", 1)[1]
+                self.assertNotIn("private", after, "actions_global 的项不能有私聊这份：%s" % line.strip())
 
     def test_ui_hooks_present(self):
-        for hook in ("act-intro", "act-missing", "act-global", "act-grid", "act-path",
+        for hook in ("act-intro", "act-missing", "act-limits", "act-global", "act-globalmark-",
+                     "act-grid", "act-path",
                      "act-card-", "act-toggle-", "act-risk-", "act-danger-", "act-dirty-",
                      "act-mixed-", "act-default-", "act-pending-", "act-pending-note-"):
             self.assertIn(hook, self.js, "群动作页缺钩子 %s" % hook)
