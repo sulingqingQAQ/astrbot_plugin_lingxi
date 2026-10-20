@@ -423,6 +423,66 @@ class SessionRulesEntriesTest(unittest.TestCase):
         r = svc._temp_resolver()
         self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "900100200", "")).get("context.max_messages"), 44)
 
+    # ---------------------------------------------------------------- SR-UI-2 会话号规整
+    def test_get_config_returns_the_bare_number(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        h = _Harness({"session_rules": [
+            self._row("group", "context", "napcat:GroupMessage:1919810", max_messages=d + 1)]})
+        got = h.svc().get_config()
+        self.assertEqual(got["session_rules"],
+                         [self._entry("group", "1919810", "context", {"max_messages": d + 1})])
+        self.assertEqual(got["warnings"], [])
+
+    def test_three_writings_of_one_session_save_as_one_row(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        c = spec.field("context.inject_chars").default(Scope.GROUP)
+        h = _Harness({"session_rules": [
+            self._row("group", "context", "1919810", max_messages=d + 1)]})
+        _svc, data = self._save(h, session_rules=[
+            self._entry("group", "1919810", "context", {"max_messages": d + 1}),
+            self._entry("group", "group:1919810", "context", {"inject_chars": c + 2}),
+            self._entry("group", "napcat:GroupMessage:1919810", "context", {"max_messages": d + 1})])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_rules"],
+                         [{"__template_key": "group.context", "session": "1919810",
+                           "max_messages": d + 1, "inject_chars": c + 2}])
+        self.assertEqual(len(h.conf["session_rules"]), 1)
+        self.assertEqual(data["config"]["session_rules"][0]["session"], "1919810")
+
+    def test_scope_mismatch_is_rejected_and_conf_is_untouched(self):
+        text = 'private:10001:\n  base:\n    take_over: true\n'
+        h = _Harness({"session_rules": [], "session_overrides": text})
+        before = json.dumps(h.conf, sort_keys=True, ensure_ascii=False)
+        _svc, data = self._save(h, session_rules=[
+            self._entry("private", "napcat:GroupMessage:1919810", "context", {"max_messages": 80})])
+        self.assertFalse(data["saved"])
+        self.assertEqual([e["path"] for e in data["errors"]], ["session_rules"])
+        self.assertIn("第 1 条", data["errors"][0]["message"])
+        self.assertIn("群聊", data["errors"][0]["message"])
+        self.assertIn("不能放在私聊里", data["errors"][0]["message"])
+        self.assertEqual(json.dumps(h.conf, sort_keys=True, ensure_ascii=False), before)
+        self.assertEqual(h.save_calls, 0)
+        self.assertEqual(h.reload_calls, [])
+
+    def test_revision_ignores_the_writing_style_of_the_number(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        a = _Harness({"session_rules": [self._row("group", "context", "1919810", max_messages=d + 1)]})
+        b = _Harness({"session_rules": [
+            self._row("group", "context", "napcat:GroupMessage:1919810", max_messages=d + 1)]})
+        self.assertEqual(a.svc().get_config()["revision"], b.svc().get_config()["revision"])
+
+    def test_form_beats_yaml_when_the_session_is_written_differently(self):
+        text = 'napcat:GroupMessage:1919810:\n  context:\n    max_messages: 33\n'
+        h = _Harness({"session_overrides": text})
+        svc, data = self._save(h, session_rules=[
+            self._entry("group", "1919810", "context", {"max_messages": 44})])
+        self.assertTrue(data["saved"], data)
+        self.assertEqual(h.conf["session_rules"][0]["session"], "1919810")
+        r = svc._temp_resolver()
+        # 表单行是 group:1919810，YAML 那张表是完整标识：两张表键不同，resolver 会多一句提示（允许）
+        self.assertTrue(any("写了不止一次" in w for w in r.warnings), r.warnings)
+        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, "1919810", "")).get("context.max_messages"), 44)
+
 
 
     def test_good_text(self):

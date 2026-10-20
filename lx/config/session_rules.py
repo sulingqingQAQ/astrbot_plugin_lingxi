@@ -12,6 +12,10 @@
 代价：想让某个会话固定回出厂默认、而全局改过它的，这种写法表达不了，要用文本（YAML）覆盖。
 
 纯函数，不依赖 AstrBot；永远不抛异常。
+
+会话号（SR-UI-2 起）：一律规整成**纯号码**再存、再显、再合并——用户可以直接粘贴 AstrBot 会话列表里的
+完整标识（`napcat:GroupMessage:123456`），也可以写 `group:123456` / `private:123456` 前缀或裸号码；
+标识里的范围和卡片范围对不上就报错、把行丢掉，不许悄悄生效。见 `canonical_session`。
 """
 from __future__ import annotations
 
@@ -19,14 +23,28 @@ import re
 from typing import Any, Mapping, Optional
 
 from ..contracts import Scope
+from ..session.key import split_umo, strip_isolation
 from . import overrides as _overrides
 from . import spec
+from .resolver import _OVERRIDE_PREFIXES
 
 RULES_KEY = "session_rules"
 SESSION_ITEM = "session"  # 行里"会话号"那一项的键；不能和任何配置项重名（测试锁着）
 TEMPLATE_SEP = "."
 
 _SCOPE_CN = {Scope.PRIVATE: "私聊", Scope.GROUP: "群聊"}
+
+# 前缀写法：与 resolver 同一个来源（`group:123` / `private:123` / `friend:123`，大小写不敏感）
+_SESSION_PREFIXES = _OVERRIDE_PREFIXES
+
+# 完整标识里的消息类型 → 范围。**口径只能有一份**：tests 锁住它和 lx/session/key.py 的类型集合一致
+# （OtherMessage 故意不在里面：它既不是私聊也不是群聊，lingxi 不处理）。
+_MSG_TYPE_SCOPE = {
+    "FriendMessage": Scope.PRIVATE,
+    "PrivateMessage": Scope.PRIVATE,
+    "GroupMessage": Scope.GROUP,
+    "GuildMessage": Scope.GROUP,
+}
 
 
 def template_key(scope: Scope, block_key: str) -> str:
@@ -59,16 +77,50 @@ def _parse_template_key(raw: Any) -> Optional[tuple[Scope, spec.Block]]:
     return scope, blk
 
 
-def _session_ref(scope: Scope, raw: Any) -> Optional[str]:
-    """会话号 → 覆盖表的键。纯数字补上 group: / private: 前缀；已带前缀或完整会话标识的原样交给 resolver 解析。"""
+def canonical_session(scope: Any, raw: Any) -> tuple[Optional[str], Optional[str]]:
+    """用户填的会话号 → （**纯号码**, 错误说明）。两个都是 None 的情况不存在；永不抛。
+
+    三种写法都认，出来的都是纯号码（平台名丢掉）：
+    - AstrBot 完整标识 `平台:类型:号码`：类型定范围，群聊的 `发送者_群号` 还原成真群号；OtherMessage 报错。
+    - 前缀写法 `group:号码` / `private:号码`（大小写、首尾空白不敏感，与 resolver 同口径）。
+    - 裸号码：去首尾空白；整数转文字；群聊同样还原真群号。不强制纯数字（别的平台的 ID 可能不是）。
+    标识 / 前缀给出的范围与 `scope` 不一致 → 报错，**不许悄悄生效**（SR-UI-2）。
+    """
+    try:
+        scope_obj = scope if isinstance(scope, Scope) else Scope(scope)
+    except (ValueError, TypeError):
+        return None, f"看不懂这个范围：{scope!r}"
     if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-        return None
+        return None, "没填会话号"
     text = str(raw).strip()
     if not text:
-        return None
-    if ":" in text:
-        return text
-    return f"{scope.value}:{text}"
+        return None, "没填会话号"
+    found: Optional[Scope] = None      # 标识 / 前缀自己带的那个范围
+    ident = text
+    parts = split_umo(text)
+    if parts is not None:
+        _platform, mtype, sid = parts
+        found = _MSG_TYPE_SCOPE.get(mtype)
+        if found is None:
+            return None, (f"这个标识是 {mtype}（既不是私聊也不是群聊），lingxi 不处理这种会话：{text}")
+        ident = sid
+    else:
+        head, sep, rest = text.partition(":")
+        if sep:
+            found = _SESSION_PREFIXES.get(head.strip().lower())
+            rest = rest.strip()
+            if found is None or not rest:
+                return None, (f"看不懂这个会话号：{text}。请填号码（群号 / QQ 号），"
+                              f"或者直接粘贴会话列表里的完整标识（如 napcat:GroupMessage:123456）")
+            ident = rest
+    if found is not None and found != scope_obj:
+        return None, f"这是{_SCOPE_CN[found]}的会话标识，不能放在{_SCOPE_CN[scope_obj]}里：{text}"
+    ident = ident.strip()
+    if not ident:
+        return None, "没填会话号"
+    if (found or scope_obj) == Scope.GROUP:
+        ident = strip_isolation(ident)
+    return ident, None
 
 
 def _read_rows(rows: Any) -> tuple[list, list]:
@@ -95,11 +147,12 @@ def _read_rows(rows: Any) -> tuple[list, list]:
             errors.append(f"{where}：不认识的类型 {row.get('__template_key')!r}，已忽略")
             continue
         scope, blk = parsed
-        ref = _session_ref(scope, row.get(SESSION_ITEM))
-        if ref is None:
-            errors.append(f"{where}（{_SCOPE_CN[scope]}·{blk.description}）：没填会话号，已忽略")
+        ident, bad = canonical_session(scope, row.get(SESSION_ITEM))
+        if ident is None:
+            errors.append(f"{where}（{_SCOPE_CN[scope]}·{blk.description}）：{bad}，已忽略")
             continue
-        session_text = str(row.get(SESSION_ITEM)).strip()
+        ref = f"{scope.value}:{ident}"
+        session_text = ident
         changed: dict[str, Any] = {}
         for f in blk.fields_for(scope):
             if f.name not in row:
@@ -131,7 +184,7 @@ def rows_to_overrides(rows: Any) -> tuple[dict[str, dict], list[str]]:
 #   [{"scope": "private"|"group", "session": "123456", "block": "context",
 #     "items": {"max_messages": 80, ...}}, ...]
 # 一个 (scope, session, block) 一条；读的时候把原始行合并（后面盖前面，与 rows_to_overrides 一致），
-# 和出厂默认相同的项不出现，一项都没有的条目不出现；session 原样保留原始行里写的文本（去首尾空白）。
+# 和出厂默认相同的项不出现，一项都没有的条目不出现；session 是规整后的**纯号码**（见 canonical_session）。
 
 _SCOPE_ORDER = {Scope.PRIVATE: 0, Scope.GROUP: 1}
 _BLOCK_ORDER = {b.key: i for i, b in enumerate(spec.BLOCKS)}
@@ -204,9 +257,9 @@ def _collect_entry(raw: Any) -> tuple[Optional[dict], list]:
     session = raw.get("session")
     if isinstance(session, bool) or not isinstance(session, (str, int)):
         return None, [f"会话号应该是文字或数字，拿到 {session!r}"]
-    session_text = str(session).strip()
-    if not session_text:
-        return None, ["没填会话号"]
+    session_text, bad = canonical_session(scope_text, session)
+    if session_text is None:
+        return None, [f"会话号 {session!r}：{bad}"]
     block_text = _text_of(raw.get("block"))
     if block_text is None:
         return None, [f"没填配置块（拿到 {raw.get('block')!r}）"]
@@ -219,7 +272,7 @@ def _collect_entry(raw: Any) -> tuple[Optional[dict], list]:
 
 def rows_to_entries(rows: Any) -> tuple[list, list]:
     """原始表单行 → （条目列表, 提示列表）。口径见模块头：同会话同块多行合并（后面盖前面）、
-    和出厂默认一样的项不出现、一项都没有的条目不出现、session 原样（去首尾空白）。永不抛。"""
+    和出厂默认一样的项不出现、一项都没有的条目不出现、session 是规整后的纯号码。永不抛。"""
     picked, errors = _read_rows(rows)
     merged: dict[tuple[str, str, str], dict] = {}
     for _idx, scope, blk, _ref, session, changed in picked:
@@ -309,8 +362,9 @@ def entries_to_rows(entries: Any) -> tuple[list, list, list]:
 def normalize_entries(entries: Any) -> list:
     """条目列表的**稳定写法**：只留 4 个字段、项按键名排好、条目整条排序。
 
-    给 revision（"配置有没有变"的指纹）用：口径一样、写法不一样的条目算同一个。
-    认不出的条目原样换成能 json.dumps 的形式，不抛。"""
+    给 revision（"配置有没有变"的指纹）用：口径一样、写法不一样的条目算同一个——
+    会话号也走 `canonical_session`（`1919810` / `group:1919810` / `napcat:GroupMessage:1919810`
+    是同一份）。规整不了的原样保留，不抛。"""
     if not isinstance(entries, (list, tuple)):
         return []
     out: list = []
@@ -321,7 +375,16 @@ def normalize_entries(entries: Any) -> list:
         items = raw.get("items")
         clean_items = ({name: items[name] for name in sorted(items, key=lambda n: _item_order(str(n)))}
                        if isinstance(items, Mapping) else items)
-        out.append({"scope": raw.get("scope"), "session": raw.get("session"),
+        session = raw.get("session")
+        try:
+            scope_obj: Optional[Scope] = Scope(raw.get("scope"))
+        except (ValueError, TypeError):
+            scope_obj = None
+        if scope_obj is not None:
+            ident, _bad = canonical_session(scope_obj, session)
+            if ident is not None:
+                session = ident
+        out.append({"scope": raw.get("scope"), "session": session,
                     "block": raw.get("block"), "items": clean_items})
     try:
         out.sort(key=_entry_order)

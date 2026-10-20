@@ -3,7 +3,8 @@
 
 锁住任务卡 SR-UI §1 的数据口径：
 - 读：一个 (scope, session, block) 一条；同会话同块多行合并（后面盖前面，与 rows_to_overrides 一致）；
-  和出厂默认相同的项不出现；一项都没有的条目不出现；session 原样（去首尾空白）、纯数字或带冒号都行。
+  和出厂默认相同的项不出现；一项都没有的条目不出现；session 一律规整成**纯号码**
+  （SR-UI-2 起；三种写法指同一个会话就并成一条）。
 - 写：整体重写成稀疏行 `{"__template_key": "scope.block", "session": ..., 只写 items 里的项}`；
   校验（scope 合法 / 块存在且可覆盖且适用该 scope / 项属于该块该 scope / 值过 spec.validate_value /
   session 非空）有错就交调用方整体拒绝；值等于出厂默认的项不写并进 dropped。
@@ -49,14 +50,34 @@ class RowsToEntriesTest(unittest.TestCase):
         entries, errors = sr.rows_to_entries([_row(Scope.GROUP, "context", "900100200")])
         self.assertEqual((entries, errors), ([], []))
 
-    def test_session_text_kept_verbatim_and_stripped(self):
+    def test_session_text_is_canonicalized_to_a_bare_number(self):
+        """SR-UI-2 口径变更：会话号一律**规整成纯号码**（上一张卡 §1 的"原样保留"作废）。"""
         d = _d("context.max_messages", Scope.PRIVATE)
-        for raw, want in (("  10001 ", "10001"), (10001, "10001"), ("private:10001", "private:10001"),
-                          ("platform:GroupMessage:12345", "platform:GroupMessage:12345")):
+        for raw, want in (("  10001 ", "10001"), (10001, "10001"), ("private:10001", "10001"),
+                          ("friend:10001", "10001"), ("platform:FriendMessage:10001", "10001"),
+                          ("platform:PrivateMessage:10001", "10001")):
             entries, errors = sr.rows_to_entries(
                 [_row(Scope.PRIVATE, "context", raw, max_messages=d + 1)])
             self.assertEqual(errors, [], raw)
             self.assertEqual([e["session"] for e in entries], [want], raw)
+
+    def test_group_identifier_is_canonicalized_and_isolation_stripped(self):
+        d = _d("context.max_messages")
+        for raw, want in (("900100200", "900100200"), ("group:900100200", "900100200"),
+                          ("napcat:GroupMessage:900100200", "900100200"),
+                          ("napcat:GroupMessage:10001_900100200", "900100200")):
+            entries, errors = sr.rows_to_entries(
+                [_row(Scope.GROUP, "context", raw, max_messages=d + 1)])
+            self.assertEqual(errors, [], raw)
+            self.assertEqual([e["session"] for e in entries], [want], raw)
+
+    def test_identifier_of_the_other_scope_drops_the_row(self):
+        d = _d("context.max_messages", Scope.PRIVATE)
+        entries, errors = sr.rows_to_entries(
+            [_row(Scope.PRIVATE, "context", "napcat:GroupMessage:900100200", max_messages=d + 1)])
+        self.assertEqual(entries, [])
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("不能放在私聊里", errors[0])
 
     def test_same_session_same_block_rows_merge_later_wins(self):
         d = _d("context.max_messages")

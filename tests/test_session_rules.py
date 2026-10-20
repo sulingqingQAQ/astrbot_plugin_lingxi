@@ -204,5 +204,181 @@ class ResolverEndToEndTest(unittest.TestCase):
             self.assertEqual(r.warnings, [], key)
 
 
+class CanonicalSessionTest(unittest.TestCase):
+    """SR-UI-2：会话号一律规整成**纯号码**。三种写法（裸号码 / `group:` 前缀 / AstrBot 完整标识）
+    指向同一个号码；标识里的范围和卡的范围对不上要挡住，不能悄悄生效。"""
+
+    def test_bare_number(self):
+        for raw in ("1919810", " 1919810 ", 1919810):
+            self.assertEqual(sr.canonical_session(Scope.GROUP, raw), ("1919810", None), repr(raw))
+
+    def test_group_forms_are_the_same_number(self):
+        for raw in ("1919810", "group:1919810", "napcat:GroupMessage:1919810",
+                    "  group : 1919810  "):
+            self.assertEqual(sr.canonical_session(Scope.GROUP, raw), ("1919810", None), repr(raw))
+
+    def test_private_forms_are_the_same_number(self):
+        for raw in ("114514", "private:114514", "friend:114514",
+                    "napcat:FriendMessage:114514", "napcat:PrivateMessage:114514"):
+            self.assertEqual(sr.canonical_session(Scope.PRIVATE, raw), ("114514", None), repr(raw))
+
+    def test_guild_message_counts_as_group_chat(self):
+        self.assertEqual(sr.canonical_session(Scope.GROUP, "lark:GuildMessage:777"), ("777", None))
+
+    def test_group_isolation_is_stripped_private_is_not(self):
+        for raw in ("123_456", "group:123_456", "napcat:GroupMessage:123_456"):
+            self.assertEqual(sr.canonical_session(Scope.GROUP, raw), ("456", None), repr(raw))
+        self.assertEqual(sr.canonical_session(Scope.PRIVATE, "123_456"), ("123_456", None))
+
+    def test_scope_mismatch_is_blocked(self):
+        cases = ((Scope.PRIVATE, "napcat:GroupMessage:1919810", "群聊"),
+                 (Scope.PRIVATE, "group:1919810", "群聊"),
+                 (Scope.GROUP, "napcat:FriendMessage:114514", "私聊"),
+                 (Scope.GROUP, "private:114514", "私聊"),
+                 (Scope.GROUP, "friend:114514", "私聊"))
+        for scope, raw, other in cases:
+            ident, err = sr.canonical_session(scope, raw)
+            self.assertIsNone(ident, raw)
+            self.assertIn(other, err, raw)
+            self.assertIn("不能放在", err, raw)
+
+    def test_other_message_is_not_a_session(self):
+        for scope in (Scope.GROUP, Scope.PRIVATE):
+            ident, err = sr.canonical_session(scope, "napcat:OtherMessage:123")
+            self.assertIsNone(ident)
+            self.assertIn("不是私聊也不是群聊", err)
+
+    def test_unknown_colon_text_is_an_error(self):
+        for raw in ("abc:123", "1919810:8", "看不 懂:随便"):
+            ident, err = sr.canonical_session(Scope.GROUP, raw)
+            self.assertIsNone(ident, raw)
+            self.assertIn("看不懂", err, raw)
+
+    def test_blank_and_wrong_types_complain_about_missing_number(self):
+        for raw in ("", "   ", None, True, False, [], {}, 3.5):
+            ident, err = sr.canonical_session(Scope.GROUP, raw)
+            self.assertIsNone(ident, repr(raw))
+            self.assertIn("没填会话号", err, repr(raw))
+
+    def test_never_raises(self):
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("坏了")
+
+        self.assertIsNone(sr.canonical_session(Scope.GROUP, Boom())[0])
+        self.assertIsNone(sr.canonical_session("nope", "123")[0])
+        self.assertIsNone(sr.canonical_session(None, "123")[0])
+
+    def test_message_type_table_matches_the_session_layer(self):
+        # 口径只能有一份：这里认的类型集合必须和 lx/session/key.py 一模一样
+        from lx.session import key as key_mod
+
+        self.assertEqual(set(sr._MSG_TYPE_SCOPE), key_mod._PRIVATE_TYPES | key_mod._GROUP_TYPES)
+        for name, scope in sr._MSG_TYPE_SCOPE.items():
+            self.assertEqual(scope, Scope.PRIVATE if name in key_mod._PRIVATE_TYPES else Scope.GROUP, name)
+
+    def test_prefixes_come_from_the_resolver(self):
+        from lx.config import resolver
+
+        self.assertIs(sr._SESSION_PREFIXES, resolver._OVERRIDE_PREFIXES)
+
+
+class SessionIdWiringTest(unittest.TestCase):
+    """同一会话的三种写法，在表单行 / 条目列表 / 运行时覆盖表三处必须落到同一个号码。"""
+
+    FORMS = ("1919810", "group:1919810", "napcat:GroupMessage:1919810")
+
+    def test_rows_to_entries_merge_the_three_forms(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        c = spec.field("context.inject_chars").default(Scope.GROUP)
+        rows = [_row(Scope.GROUP, "context", self.FORMS[0], max_messages=d + 1),
+                _row(Scope.GROUP, "context", self.FORMS[1], inject_chars=c + 2),
+                _row(Scope.GROUP, "context", self.FORMS[2], max_messages=d + 3)]
+        entries, errors = sr.rows_to_entries(rows)
+        self.assertEqual(entries, [{"scope": "group", "session": "1919810", "block": "context",
+                                    "items": {"max_messages": d + 3, "inject_chars": c + 2}}])
+        # 同一个会话同一个块写了三遍：照旧提示"合并、后面盖前面"，但提示里用规整后的号码
+        self.assertEqual(len(errors), 2, errors)
+        for e in errors:
+            self.assertIn("1919810", e)
+            self.assertNotIn("napcat", e)
+
+    def test_private_card_with_a_group_identifier_is_dropped(self):
+        d = spec.field("context.max_messages").default(Scope.PRIVATE)
+        rows = [_row(Scope.PRIVATE, "context", "napcat:GroupMessage:1919810", max_messages=d + 1)]
+        entries, errors = sr.rows_to_entries(rows)
+        self.assertEqual(entries, [])
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("群聊", errors[0])
+        self.assertIn("不能放在", errors[0])
+
+    def test_runtime_table_has_one_canonical_key(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        rows = [_row(Scope.GROUP, "context", raw, max_messages=d + i)
+                for i, raw in enumerate(self.FORMS, start=1)]
+        table, errors = sr.rows_to_overrides(rows)
+        self.assertEqual(list(table), ["group:1919810"], errors)
+        self.assertEqual(table["group:1919810"]["context"]["max_messages"], d + 3)
+
+    def test_group_identifier_on_a_private_card_never_applies(self):
+        # 关键回归：以前行被原样收下，运行时对那个群悄悄生效，用户看不到任何提示
+        dp = spec.field("context.max_messages").default(Scope.PRIVATE)
+        rows = [_row(Scope.PRIVATE, "context", "napcat:GroupMessage:1919810", max_messages=dp + 1)]
+        table, errors = sr.rows_to_overrides(rows)
+        self.assertEqual(table, {})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("不能放在", errors[0])
+
+    def test_entries_to_rows_rejects_a_scope_mismatch(self):
+        rows, errors, dropped = sr.entries_to_rows([
+            {"scope": "private", "session": "napcat:GroupMessage:1919810", "block": "context",
+             "items": {"max_messages": 80}}])
+        self.assertEqual(rows, [])
+        self.assertEqual(dropped, [])
+        self.assertTrue(errors)
+        self.assertIn("群聊", errors[0])
+        self.assertIn("1919810", errors[0])
+
+    def test_entries_to_rows_merges_the_three_forms_into_one_row(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        c = spec.field("context.inject_chars").default(Scope.GROUP)
+        rows, errors, _dropped = sr.entries_to_rows([
+            {"scope": "group", "session": self.FORMS[0], "block": "context",
+             "items": {"max_messages": d + 1}},
+            {"scope": "group", "session": self.FORMS[1], "block": "context",
+             "items": {"inject_chars": c + 2}},
+            {"scope": "group", "session": self.FORMS[2], "block": "context",
+             "items": {"max_messages": d + 1}}])
+        self.assertEqual(errors, [])
+        self.assertEqual(rows, [{"__template_key": "group.context", "session": "1919810",
+                                 "max_messages": d + 1, "inject_chars": c + 2}])
+
+    def test_entries_to_rows_same_item_two_values_is_an_error(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        rows, errors, _dropped = sr.entries_to_rows([
+            {"scope": "group", "session": self.FORMS[0], "block": "context",
+             "items": {"max_messages": d + 1}},
+            {"scope": "group", "session": self.FORMS[2], "block": "context",
+             "items": {"max_messages": d + 2}}])
+        self.assertTrue(errors, errors)
+        self.assertIn("两个不一样的值", errors[0])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["session"], "1919810")
+
+    def test_normalize_entries_ignores_the_writing_style(self):
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        a = [{"scope": "group", "session": self.FORMS[0], "block": "context",
+              "items": {"max_messages": d + 1}}]
+        b = [{"scope": "group", "session": self.FORMS[2], "block": "context",
+              "items": {"max_messages": d + 1}}]
+        self.assertEqual(sr.normalize_entries(a), sr.normalize_entries(b))
+        self.assertEqual(sr.normalize_entries(b)[0]["session"], "1919810")
+
+    def test_normalize_entries_keeps_unparseable_sessions_as_is(self):
+        got = sr.normalize_entries([{"scope": "group", "session": "abc:123", "block": "context",
+                                     "items": {}}])
+        self.assertEqual(got[0]["session"], "abc:123")
+
+
 if __name__ == "__main__":
     unittest.main()
