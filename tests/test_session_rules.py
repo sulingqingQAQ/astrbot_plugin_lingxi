@@ -182,6 +182,24 @@ class BuildTableTest(unittest.TestCase):
 
 
 class ResolverEndToEndTest(unittest.TestCase):
+    def test_form_row_beats_yaml_text_when_spelled_differently(self):
+        """SR-UI-2：YAML 写完整标识、表单写裸号码，指的是同一个群、同一项不同值 —— 表单的盖过 YAML。
+        （两张表在 build_override_table 里按文本键各占一份，靠 merge_tables「先文本后表单」的顺序，
+        所以 resolver 会把同一个会话当"写了不止一次"多提醒一句，这是允许的。）"""
+        d = spec.field("context.max_messages").default(Scope.GROUP)
+        gid = "1919810"
+        conf = {
+            "session_overrides": "napcat:GroupMessage:%s:\n  context:\n    max_messages: %d\n"
+                                 % (gid, d + 3),
+            "session_rules": [_row(Scope.GROUP, "context", gid, max_messages=d + 9)],
+        }
+        table, errors = sr.build_override_table(conf)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(table), 2, "写法不同的两个键在表里各占一份：%r" % (table,))
+        r = ConfigResolver(private=None, group={}, overrides=table)
+        self.assertEqual(r.resolve(SessionKey(Scope.GROUP, gid, "")).get("context.max_messages"),
+                         d + 9)
+
     def test_row_applies_and_global_changes_are_not_frozen_back(self):
         d = spec.field("context.max_messages").default(Scope.GROUP)
         # 全局把同一个块里的另一项改过：行里那一项还是出厂默认，不能把它冻回去
