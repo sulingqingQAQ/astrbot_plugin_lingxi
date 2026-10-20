@@ -24,7 +24,10 @@ class FakeBot:
 
     def __init__(self, responses=None) -> None:
         self.calls: list[tuple[str, dict]] = []
-        self.responses = dict(responses or {})
+        # 默认当普通成员：allow_target_admin 关着时"查不到角色 → 失败即拒"，
+        # 所以绝大多数用例得先让 get_group_member_info 说得清他是谁。
+        self.responses = {"get_group_member_info": {"status": "ok", "retcode": 0, "data": {"role": "member"}}}
+        self.responses.update(dict(responses or {}))
         self.api = SimpleNamespace(call_action=self.call_action)
 
     async def call_action(self, action: str, **params):
@@ -254,6 +257,63 @@ class BanTest(unittest.TestCase):
         out = run(tools.set_group_ban(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, duration_seconds=60))
         self.assertIn("已禁言", out)
         self.assertIn("set_group_ban", [a for a, _ in bot.calls])
+
+    def test_card_on_admin_blocked_even_when_setting_text(self):
+        # 之前只有"清空名片"才拦管理员，设成非空名片会漏拦（lead 复核发现的 bug）
+        tools, bot, _ = make(
+            cfg_group=ALL_GROUP_ON,
+            responses={"get_group_member_info": {"status": "ok", "retcode": 0, "data": {"role": "admin"}}},
+        )
+        out = run(tools.set_group_card(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, card="小明"))
+        self.assertIn("管理员", out)
+        self.assertNotIn("set_group_card", [a for a, _ in bot.calls])
+
+    def test_title_on_owner_blocked_even_when_setting_text(self):
+        tools, bot, _ = make(
+            cfg_group=ALL_GROUP_ON,
+            responses={"get_group_member_info": {"status": "ok", "retcode": 0, "data": {"role": "owner"}}},
+        )
+        out = run(tools.set_group_special_title(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, title="大佬"))
+        self.assertIn("群主", out)
+        self.assertNotIn("set_group_special_title", [a for a, _ in bot.calls])
+
+    def test_admin_allowed_when_switch_on(self):
+        cfg = {"actions": dict(ALL_GROUP_ON["actions"], allow_target_admin=True),
+               "actions_global": dict(ALL_GROUP_ON["actions_global"])}
+        tools, bot, _ = make(
+            cfg_group=cfg,
+            responses={"get_group_member_info": {"status": "ok", "retcode": 0, "data": {"role": "admin"}}},
+        )
+        out1 = run(tools.set_group_card(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, card="小明"))
+        out2 = run(tools.set_group_special_title(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, title="大佬"))
+        self.assertIn("已把", out1)
+        self.assertIn("已把", out2)
+        self.assertIn("set_group_card", [a for a, _ in bot.calls])
+        self.assertIn("set_group_special_title", [a for a, _ in bot.calls])
+
+    def test_unknown_role_is_refused_for_all_four(self):
+        # 失败即拒：allow_target_admin 关着 + 查不到角色 → 不动作
+        bad = {"get_group_member_info": {"status": "failed", "retcode": 100, "message": "查无此人"}}
+        tools, bot, _ = make(cfg_group=ALL_GROUP_ON, responses=bad)
+        ev = FakeEvent(GROUP_KEY, bot)
+        cases = [
+            ("set_group_ban", {"user_id": MEMBER, "duration_seconds": 60}),
+            ("set_group_card", {"user_id": MEMBER, "card": "小明"}),
+            ("set_group_special_title", {"user_id": MEMBER, "title": "大佬"}),
+            ("set_group_kick", {"user_id": MEMBER}),
+        ]
+        for name, kwargs in cases:
+            out = run(getattr(tools, name)(ev, **kwargs))
+            self.assertIn("查不到他是不是管理员", out, name)
+        for action in ("set_group_ban", "set_group_card", "set_group_special_title", "set_group_kick"):
+            self.assertNotIn(action, [a for a, _ in bot.calls], action)
+
+    def test_unknown_role_does_not_block_unban(self):
+        bad = {"get_group_member_info": {"status": "failed", "retcode": 100}}
+        tools, bot, _ = make(cfg_group=ALL_GROUP_ON, responses=bad)
+        out = run(tools.set_group_ban(FakeEvent(GROUP_KEY, bot), user_id=MEMBER, duration_seconds=0))
+        self.assertIn("解禁", out)
+        self.assertNotIn("get_group_member_info", [a for a, _ in bot.calls], "解禁不该去查角色")
 
     def test_member_role_not_blocked(self):
         tools, bot, _ = make(

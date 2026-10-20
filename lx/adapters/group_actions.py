@@ -359,7 +359,7 @@ class GroupActions:
         return ok, why, resp
 
     async def _role_of(self, event: Any, key: SessionKey, user_id: str) -> str:
-        """群成员的 role：owner / admin / member；查不到 → ""。"""
+        """群成员的 role：owner / admin / member；查不到（接口失败 / 没 data）→ ""。"""
         ok, _why_text, resp = await self._call(
             event, "get_group_member_info", group_id=_num(key.id), user_id=_num(user_id), no_cache=True,
         )
@@ -371,16 +371,27 @@ class GroupActions:
         return ""
 
     async def _admin_guard(self, event: Any, key: SessionKey, user_id: str, tool: str) -> Optional[str]:
-        """目标是不是群主 / 管理员、且没允许对他们动手 → 拒绝文本；否则 None。"""
+        """能不能对这个人动手：拒绝文本 / None（放行）。
+
+        - `actions.allow_target_admin` 开着 → 一律放行；
+        - 他是群主 / 管理员 → 拒绝；
+        - **查不到他的角色**（协议端失败、没给 data、role 是没见过的值）→ 也拒绝（失败即拒）：
+          宁可不动，也不要在"没允许对管理员动手"的前提下瞎动一个可能是管理员的人。
+        """
         if bool(self._on(key, "actions.allow_target_admin")):
             return None
         role = await self._role_of(event, key, user_id)
-        if role not in _ADMIN_ROLES:
-            return None
-        return (
-            f"他是{_ROLE_CN.get(role, role)}，现在没允许对群主 / 管理员动手"
-            f"（『群动作』里的『允许对群主 / 管理员动手』没开），这次没动他。"
-        )
+        if role in _ADMIN_ROLES:
+            return (
+                f"他是{_ROLE_CN.get(role, role)}，现在没允许对群主 / 管理员动手"
+                f"（『群动作』里的『允许对群主 / 管理员动手』没开），这次没动他。"
+            )
+        if role != "member":
+            return (
+                "查不到他是不是管理员，为安全起见这次没动"
+                "（可能是协议端没给出角色，或者他不在本群）。"
+            )
+        return None
 
     # ============================================================ 12 个工具
 
@@ -504,7 +515,7 @@ class GroupActions:
         if not target:
             return "要改谁的名片？给个 QQ 号。"
         text = _pure_id(card)
-        if not text and (bad := await self._admin_guard(event, key, target, "set_group_card")) is not None:
+        if (bad := await self._admin_guard(event, key, target, "set_group_card")) is not None:
             return bad
         ok, why, _ = await self._call(
             event, "set_group_card", group_id=_num(key.id), user_id=_num(target), card=text,
@@ -527,7 +538,7 @@ class GroupActions:
         if not target:
             return "要给谁设头衔？给个 QQ 号。"
         text = _pure_id(title)
-        if not text and (bad := await self._admin_guard(event, key, target, "set_group_special_title")) is not None:
+        if (bad := await self._admin_guard(event, key, target, "set_group_special_title")) is not None:
             return bad
         ok, why, _ = await self._call(
             event, "set_group_special_title", group_id=_num(key.id), user_id=_num(target), special_title=text,
