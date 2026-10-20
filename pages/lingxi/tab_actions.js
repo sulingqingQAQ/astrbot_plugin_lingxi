@@ -21,7 +21,7 @@
    * scopes 是"这条配置项应该存在于哪些范围"的兜底（后端元数据拿到后以元数据为准）；
    * danger = true 的卡片上挂警示色小标（踢人 / 退群 / 换头像 / 处理申请）。 */
   var TOOLS = [
-    { name: "poke_user", path: "actions.poke_enabled", title: "戳一戳", icon: "wave", scopes: ["private", "group"], danger: false, risk: "私聊里是拍一拍，群里会 @ 对方一下，对方的 QQ 会抖一下。别拿它烦人。" },
+    { name: "poke_user", path: "actions.poke_enabled", title: "戳一戳", icon: "wave", scopes: ["private", "group"], danger: false, risk: "私聊里是拍一拍；群里会出现『X 戳了戳 Y』的提示，对方手机会抖一下。别拿它烦人。" },
     { name: "set_msg_emoji", path: "actions.emoji_enabled", title: "给消息加表情", icon: "check", scopes: ["private", "group"], danger: false, risk: "要先有一条消息的消息号（聊天记录里每条后面带 #号），取不到号就会失败；再对那条消息贴一个表情回应。" },
     { name: "delete_msg", path: "actions.recall_enabled", title: "撤回消息", icon: "undo", scopes: ["private", "group"], danger: false, risk: "撤了没法恢复，群里会留一条『某人撤回了一条消息』。机器人拿不到自己发出去的消息号，所以只能撤别人的：得是群管理员、消息还没超时；私聊里只能撤自己发的。" },
     { name: "set_group_ban", path: "actions.ban_enabled", title: "禁言", icon: "clock", scopes: ["group"], danger: false, risk: "让对方一段时间不能在群里说话，时长超过上限会被截到上限。需要机器人是管理员，对方不是群主。" },
