@@ -48,6 +48,19 @@ class FakeToolSet:
         return True
 
 
+class StubResolver:
+    """假 resolver：不看会话范围，一律返回同一棵树（用来单独验闸门自己的范围判断）。"""
+
+    def __init__(self, table) -> None:
+        self.table = dict(table)
+
+    def resolve(self, key):
+        return dict(self.table)
+
+    def global_value(self, scope, path):
+        return bool(self.table.get(path, False))
+
+
 ALL_GROUP_ON = {
     "actions": {
         "poke_enabled": True, "emoji_enabled": True, "recall_enabled": True,
@@ -123,6 +136,21 @@ class EnabledToolsTest(unittest.TestCase):
                                             "avatar_enabled": True}})
         # 私聊自己的 actions 一个都没开，但全局三项照样开
         self.assertEqual(tg.enabled_tools(r, PRIVATE_KEY), GLOBAL_ON)
+
+    def test_group_only_tools_dropped_in_private_even_if_config_says_on(self):
+        """开关表来源不可靠时（手写覆盖表 / 将来 spec 放宽范围），群专属工具在私聊仍要摘。
+
+        这里用一个不看范围的假 resolver：它把 12 个开关全说成开着，闸门自己必须把
+        6 个群专属工具在私聊会话里摘掉（ACT-1 变异检查发现过这条漏网）。
+        """
+        table = {path: True for path in tg.all_switch_paths()}
+        r = StubResolver(table)
+        got = tg.enabled_tools(r, PRIVATE_KEY)
+        self.assertEqual(got & GROUP_ONLY, set(), got)
+        self.assertEqual(got, PER_SESSION_ON | GLOBAL_ON)
+        # 群里则一个都不许少
+        self.assertEqual(tg.enabled_tools(r, GROUP_KEY),
+                         PER_SESSION_ON | GROUP_ONLY | GLOBAL_ON)
 
     def test_group_only_switch_does_not_leak_into_private(self):
         # 群聊开了禁言 + 戳一戳；私聊只开戳一戳 → 私聊里绝不能出现禁言
