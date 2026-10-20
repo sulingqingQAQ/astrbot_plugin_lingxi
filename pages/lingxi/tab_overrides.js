@@ -549,10 +549,16 @@
     xr.saveNote.classList.toggle("hidden", !show);
   }
 
+  // 「添加会话」那行的红字只说当次这一次的事：输入一改、添加成功、保存或重新加载之后都该自己
+  // 消失，不然上一次的报错会一直挂在那儿，看着像这一条也错了。
+  function clearAddErr() {
+    if (xr.addErr) xr.addErr.textContent = "";
+  }
+
   function addSession() {
     if (!xr.scopeSel || !xr.sessionInput) return;
     var got = canonicalSession(xr.scopeSel.value, xr.sessionInput.value);
-    xr.addErr.textContent = "";
+    clearAddErr();
     if (xr.addNote) xr.addNote.textContent = "";
     if (got.error) {
       xr.addErr.textContent = got.error;
@@ -617,6 +623,7 @@
     card.appendChild(LX.el("div", { id: "sr-hint", class: "sr-hint muted", text: YAML_HINT }));
     card.appendChild(xr.saveNote);
     addBtn.addEventListener("click", addSession);
+    xr.sessionInput.addEventListener("input", clearAddErr);
     xr.sessionInput.addEventListener("keydown", function (ev) {
       if (ev.key === "Enter") { ev.preventDefault(); addSession(); }
     });
@@ -625,6 +632,7 @@
 
   function reloadRules() {
     if (!xr.list) return;
+    clearAddErr();
     if (!LX.state.rulesDirty) {
       xr.entries = savedEntries();
       xr.pendingAdd = null;

@@ -19,6 +19,9 @@ B9 自己会打开插件页，所以可以单跑：--only B1 B9。
 B10（SR-UI）：面板里的「逐项表单」——加一个群会话、加一项（上下文·聊天记录条数）改值、保存，
 核对磁盘 session_rules 的稀疏行、且 session_overrides 没被动，刷新后条目还在、值还在。
 B10 自己会打开插件页，所以可以单跑：--only B1 B10。
+SR-UI-3 在 B10 后面又钉了 5 件前端行为（改回原样不算脏 / 删除会话要二次确认 / 群聊还原隔离群号 /
+friend: 前缀算私聊 / 私聊不剥下划线）和「判重红字在下一次输入、保存成功后要收掉」；这些都只用在
+页面里的暂存，不写磁盘。
 
 运行（wt-UI6b 根目录）：
 F:\\Gemini\\AstrBot\\AstrBot\\backend\\python\\python.exe -I tools/rig/e2e_ui_browser.py [--only B1 B2 ...] [--out 截图目录]
@@ -71,6 +74,12 @@ OV_YAML = "group:%s:\n  idle:\n    base_minutes: 12\n" % OV_GROUP
 # B10 逐项表单：合成群号，和 OV_GROUP（覆盖表那个）分开，两条路径互不干扰
 SR_GROUP = "900100300"
 SR_ITEM_PATH = "context.max_messages"   # 上下文 · 聊天记录条数（整数，带滑块）
+# SR-UI-3：B10 另外钉住的几件前端行为，号码全是合成的一次性值（都不保存，刷新就没了）
+SR_ISO_RAW = "10001_900100400"     # 开了 unique_session 的群会写成「发送者_群号」
+SR_ISO_ID = "900100400"            # 卡片上只该留这个真群号
+SR_FRIEND_RAW = "friend:900100500"  # 前缀写法：friend: 也算私聊（和 resolver 同口径）
+SR_FRIEND_ID = "900100500"
+SR_PRIVATE_RAW = "123_456"         # 私聊不剥下划线：号码原样留着
 STYLE_LINE = "合成风格：UI6b 浏览器端到端写入的一行"
 
 
@@ -811,6 +820,19 @@ def _pick_sr_value(cur, dflt, lo, slider):
         % (dflt, cur, lo, hi))
 
 
+async def _sr_last_card(ctx):
+    """逐项表单里最后一张会话卡的样子：{count, scope, session, code}（code = 卡片头上的号码）。"""
+    f = await _fctx(ctx)
+    got = await ctx.fb.ctx_eval(f, (
+        "(function(){var l=document.querySelectorAll('#sr-list .sr-entry');"
+        "if(!l.length)return null;var e=l[l.length-1];"
+        "var c=e.querySelector('.sr-session-code');"
+        "return {count:l.length,scope:e.dataset.scope,session:e.dataset.session,"
+        "code:c?c.innerText.trim():null};})()"))
+    assert got, "逐项表单里一张会话卡都没有"
+    return got
+
+
 async def _sc_B10(ctx):
     """B10 逐项表单：分会话覆盖标签 -> 加一个群会话 -> 加一项（上下文·聊天记录条数）改值 ->
     保存 -> 磁盘 session_rules 有对应稀疏行且 session_overrides 没被动 -> 刷新后条目还在。"""
@@ -859,6 +881,9 @@ async def _sc_B10(ctx):
     n_now = await fb.ctx_eval(f, "document.querySelectorAll('#sr-list .sr-entry').length")
     assert n_now == n_before + 1, "判重之后不该多出卡片，实际 %r 个" % (n_now,)
     await fb.frame_fill(f, "#sr-session", "")
+    #    （SR-UI-3 钉的观感修复：一改输入，上一次的判重红字就要自己消失）
+    err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert err == "", "改了输入之后上一次的判重红字应当清掉，实际 %r" % (err,)
 
     # 2) 加一项：块 + 项都从 meta 里查，不写死（卡片举例是上下文·聊天记录条数）
     info = await _field_info(ctx, "group", SR_ITEM_PATH)
@@ -907,16 +932,57 @@ async def _sc_B10(ctx):
     await _shot(ctx, "b10_sr_form.png")
 
     # 4) 保存：改动清单里要有“逐项表单”那条
+    #    保存之前先让添加会话那行的红字亮着（再判一次重），保存成功走 fireReload -> reloadRules
+    #    之后它得自己清掉（SR-UI-3 的观感修复）
+    await fb.frame_fill(f, "#sr-session", SR_GROUP)
+    await fb.frame_click(f, "#sr-add-session")
+    err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert "已经在上面" in err, "保存前应当先挂着一行判重红字，实际 %r" % (err,)
     await _save_via_ui(ctx, "分会话逐项表单已修改", shot_name="b10_sr_diff.png")
     want_row = {"__template_key": "group.%s" % block_key, "session": SR_GROUP, name: new}
     await _poll_disk(lambda c: c.get("session_rules"), [want_row], "session_rules 稀疏行")
+    err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert err == "", "保存成功之后上一次的判重红字应当清掉，实际 %r" % (err,)
     rows = _read_plug_cfg().get("session_rules")
     assert len(rows[0]) == 3, "稀疏行应当只有 __template_key / session / 改过的那一项：%r" % (rows[0],)
     assert _read_plug_cfg().get("session_overrides") == ov_before, (
         "表单保存动了 YAML 覆盖表：%r -> %r"
         % (ov_before, _read_plug_cfg().get("session_overrides")))
 
-    # 5) 重新打开插件页（真刷新：宿主页重进 -> 插件 iframe 重新加载）：条目还在，值还是刚保存的
+    # 5) 顺手钉住两件只有真浏览器能验的前端行为（SR-UI-3），都不写磁盘：
+    #    改回原样、重新加载时重算脏标记，跑完面板状态跟磁盘一致（下一步还要用）。
+    # 5a) 值改了又改回保存时的样子：'N 项未保存'和标签红点都要自己消失
+    alt = _pick_sr_value(new, fld["default"], fld.get("lo"), fld.get("slider"))
+    ctx.note("B10：改回原样那条用 %r -> 再改回已保存的 %r" % (alt, new))
+    await fb.frame_fill(f, sel, str(alt))
+    await fb.ctx_wait_for(
+        f, "document.querySelector('#dirty-count').innerText.indexOf('1 项未保存')>=0",
+        timeout=8)
+    dot = await fb.ctx_eval(
+        f, "!!document.querySelector('#tabs button[data-tab=\"overrides\"] .dot')")
+    assert dot is True, "改过值之后「分会话覆盖」标签上应当有未保存的红点"
+    await fb.frame_fill(f, sel, str(new))
+    await fb.ctx_wait_for(f, "LX._dirtyCount()===0", timeout=8)
+    dc = await fb.ctx_eval(f, "document.querySelector('#dirty-count').innerText.trim()")
+    assert dc == "", "改回保存时的值之后不该还挂着未保存项，实际 %r" % (dc,)
+    dot = await fb.ctx_eval(
+        f, "!!document.querySelector('#tabs button[data-tab=\"overrides\"] .dot')")
+    assert dot is False, "改回保存时的值之后标签红点应当消失"
+
+    # 5b) 重新加载时重算脏标记：别处（另一个窗口）存了和这里暂存一模一样的内容，回来重新加载
+    #     之后不该还算脏。面板这里只有一个窗口，凑不出两个窗口同时写，所以暂存只能就地摆：
+    #     先对齐一次配置，再把「暂存 = 已保存」+ 脏标记摆出来，然后走真的 LX.reload()。
+    await fb.ctx_eval(f, "LX.reload().then(function(){return true;})")
+    seeded = await fb.ctx_eval(f, (
+        "(function(){var c=(LX.state.config&&LX.state.config.session_rules)||[];"
+        "LX.state.rules=JSON.parse(JSON.stringify(c));LX.state.rulesDirty=true;"
+        "return LX._dirtyCount();})()"))
+    assert seeded == 1, "没摆出脏标记（期望 1 项未保存，实际 %r）" % (seeded,)
+    await fb.ctx_eval(f, "LX.reload().then(function(){return true;})")
+    left = await fb.ctx_eval(f, "LX._dirtyCount()")
+    assert left == 0, "重新加载后「暂存和已保存的一样」不该还算脏，实际 %r 项未保存" % (left,)
+
+    # 6) 重新打开插件页：条目还在，值还是刚保存的
     #    （顶栏右上那个"刷新"只在冲突 / 出错的 banner 里才可见，不能当常规刷新用）
     await _open_plugin_page(ctx)
     f = await _fctx(ctx)
@@ -930,6 +996,82 @@ async def _sc_B10(ctx):
     left = await fb.ctx_eval(f, "LX._dirtyCount()")
     assert left == 0, "重新打开插件页后期望 0 项未保存，实际 %r" % (left,)
     await _shot(ctx, "b10_sr_saved.png")
+
+    # 7) 剩下三件前端行为（SR-UI-3）都靠「加一张临时卡」来做，所以放在刷新之后：卡片里一个项
+    #    都没有，backendEntries() 不会把它们发出去，磁盘上的 session_rules 一动不动。
+    #    注：宿主是 hash 路由，上面第 6 步实际是同文档跳转、iframe 不重建（页面状态不会丢），
+    #    所以这里留下的临时卡片不会被"刷新"冲掉——B10 也就到此为止，不再依赖它们的状态。
+    # 7a) 群聊里粘贴「发送者_群号」：卡片上只留真群号（开了 unique_session 的群会这么写）
+    await _set_select(ctx, "#sr-scope", "group")
+    await fb.frame_fill(f, "#sr-session", SR_ISO_RAW)
+    await fb.frame_click(f, "#sr-add-session")
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 2),
+        timeout=8)
+    card = await _sr_last_card(ctx)
+    assert (card["scope"], card["session"], card["code"]) == ("group", SR_ISO_ID, SR_ISO_ID), (
+        "群聊里「发送者_群号」应当只留真群号 %r，实际 %r" % (SR_ISO_ID, card))
+    err = await fb.ctx_eval(f, "document.querySelector('#sr-add-err').innerText.trim()")
+    assert err == "", "粘贴「发送者_群号」不该报错，实际 %r" % (err,)
+    note = await fb.ctx_eval(f, "document.querySelector('#sr-add-note').innerText.trim()")
+    assert "已按标识识别" not in note, "裸写法不该回「已按标识识别」，实际 %r" % (note,)
+
+    # 7b) 群聊里粘贴 friend: 前缀 -> 按私聊添加、下拉框跟着切成私聊
+    await fb.frame_fill(f, "#sr-session", SR_FRIEND_RAW)
+    await fb.frame_click(f, "#sr-add-session")
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 3),
+        timeout=8)
+    card = await _sr_last_card(ctx)
+    assert (card["scope"], card["session"], card["code"]) == (
+        "private", SR_FRIEND_ID, SR_FRIEND_ID), (
+        "friend: 前缀应当按私聊、号码 %r 添加，实际 %r" % (SR_FRIEND_ID, card))
+    note = await fb.ctx_eval(f, "document.querySelector('#sr-add-note').innerText.trim()")
+    assert "已按标识识别为私聊" in note, "没有回「已按标识识别为私聊」，实际 %r" % (note,)
+    scope_now = await fb.ctx_eval(f, "document.querySelector('#sr-scope').value")
+    assert scope_now == "private", "标识是私聊时下拉框应当跟着切成私聊，实际 %r" % (scope_now,)
+
+    # 7c) 私聊里粘贴裸的「123_456」：私聊不剥下划线，号码原样留着
+    await _set_select(ctx, "#sr-scope", "private")
+    await fb.frame_fill(f, "#sr-session", SR_PRIVATE_RAW)
+    await fb.frame_click(f, "#sr-add-session")
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_before + 4),
+        timeout=8)
+    card = await _sr_last_card(ctx)
+    assert (card["scope"], card["session"]) == ("private", SR_PRIVATE_RAW), (
+        "私聊号码不该被当成「发送者_群号」剥掉，期望 %r，实际 %r" % (SR_PRIVATE_RAW, card))
+    note = await fb.ctx_eval(f, "document.querySelector('#sr-add-note').innerText.trim()")
+    assert "已按标识识别" not in note, "裸号码不该回「已按标识识别」，实际 %r" % (note,)
+    await _shot(ctx, "b10_sr_behaviors.png")
+
+    # 7d) 删除会话要点两下：第一下只是「再点一次确认」，卡片还在；第二下才真删
+    #     （页面里有 3 秒复位，所以两次点击连着做，中间不夹慢操作）
+    n_del = n_before + 4
+    await fb.frame_click(f, "#sr-list .sr-entry:last-child #sr-del-session")
+    st = await fb.ctx_wait_for(f, (
+        "(function(){var b=document.querySelector('#sr-list .sr-entry:last-child #sr-del-session');"
+        "if(!b||!b.classList.contains('armed'))return null;"
+        "var l=document.querySelectorAll('#sr-list .sr-entry');"
+        "return {text:b.innerText.trim(),count:l.length,"
+        "session:l.length?l[l.length-1].dataset.session:''};})()"), timeout=5)
+    assert st["count"] == n_del, (
+        "第一下「删除会话」不该真删：卡片数 %r -> %r" % (n_del, st["count"]))
+    assert "再点一次确认" in st["text"], (
+        "第一下应当进入「再点一次确认」状态，按钮文字实际 %r" % (st["text"],))
+    assert st["session"] == SR_PRIVATE_RAW, (
+        "第一下之后那张卡还得在，末张卡会话实际 %r" % (st["session"],))
+    await fb.frame_click(f, "#sr-list .sr-entry:last-child #sr-del-session")
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#sr-list .sr-entry').length===%d" % (n_del - 1),
+        timeout=8)
+    gone = await fb.ctx_eval(
+        f, "document.querySelectorAll('#sr-list .sr-entry[data-session=\"%s\"]').length"
+        % SR_PRIVATE_RAW)
+    assert gone == 0, "第二下应当真删掉这张卡"
+    assert await fb.ctx_eval(f, "LX._dirtyCount()") == 0, (
+        "临时卡片（一个项都没有）不该被算成未保存的改动")
+
     evs = fb.events_since(mark)
     assert not evs, "B10 期间有 %d 条异常 / console.error / 网络失败：%r" % (
         len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
