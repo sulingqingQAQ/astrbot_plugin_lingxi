@@ -22,7 +22,7 @@ from .lx.adapters.group_actions import group_actions
 from .lx.adapters.handlers import EHandlers
 from .lx.adapters.platform_io import make_history_puller, make_send_text
 from .lx.adapters.timers import TimerRunner, make_generate_t, wake_tools
-from .lx.adapters.tool_gate import strip_disabled_tools
+from .lx.adapters.tool_gate import sync_tools
 
 _PLUGIN_DATA_DIR_NAME = "astrbot_plugin_lingxi"
 _TZ_FALLBACK = timezone(timedelta(hours=8))
@@ -544,6 +544,13 @@ class LingxiPlugin(star.Star):
         except Exception as e:
             _warn("[lingxi] on_message 异常：%r" % (e,))
 
+    def _tool_manager(self):
+        """AstrBot 的 LLM 工具管理器（``core/star/context.py:388``）；拿不到返回 None。"""
+        try:
+            return self._context.get_llm_tool_manager()
+        except Exception:
+            return None
+
     def _note_request(self, event: AstrMessageEvent) -> None:
         """加好友 / 加群申请事件：把 flag 记下来，模型才办得了 handle_request（ACT-1）。
 
@@ -564,11 +571,12 @@ class LingxiPlugin(star.Star):
             await self._h.on_llm_request(event, req)
         except Exception as e:
             _warn("[lingxi] on_llm_request 异常：%r" % (e,))
-        # 群动作：该会话关着的工具从这次请求里摘掉，模型根本看不到，省得它乱试
+        # 群动作：把该会话开着的工具塞进这次请求、把关着的摘掉，模型只看得到开着的
         try:
-            strip_disabled_tools(req, event, self._c.resolver, log=self._log_fn)
+            sync_tools(
+                req, event, self._c.resolver, self._tool_manager(), log=self._log_fn)
         except Exception as e:
-            _warn("[lingxi] 摘关着的群动作工具失败：%r" % (e,))
+            _warn("[lingxi] 同步群动作工具失败：%r" % (e,))
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent) -> None:

@@ -1,12 +1,16 @@
-"""ACT-1 be3：工具闸门（lx/adapters/tool_gate.py）——把关着的群动作工具从 LLM 请求里摘掉。
+"""ACT-1 be3：工具闸门（lx/adapters/tool_gate.py）——让模型只看得到开着的群动作工具。
 
-锁住四件事：
+锁住五件事：
 1. 工具名 ↔ 开关路径对得上 spec（12 个，分会话 9 个 + 全局 3 个）；
 2. 关着的摘、开着的留、别人的工具一个都不碰；
 3. 全局三项一律读群聊全局那份（私聊会话也读它）；
-4. 任何畸形输入（没 func_tool、没 remove_tool、认不出会话、读数抛异常）都不抛。
+4. 任何畸形输入（没 func_tool、没 remove_tool、认不出会话、读数抛异常）都不抛；
+5. be5：lingxi 的 ``request_llm`` 不带 conversation，AstrBot 不会灌插件工具，
+   所以开着的要自己补进 ``req.func_tool``（``inject_enabled`` / ``sync_tools``），
+   而且已存在的不重复加、面板停用的不加。
 
-不 import astrbot / logging；假 ToolSet / 假 resolver 用鸭子类型（同 tests/test_adapters_group_actions.py）。
+不 import astrbot / logging；假 ToolSet / 假 resolver / 假管理器全用鸭子类型
+（同 tests/test_adapters_group_actions.py）。
 """
 from __future__ import annotations
 
@@ -31,11 +35,12 @@ GLOBAL_ON = {"handle_request", "set_self_profile", "set_qq_avatar"}
 
 
 class FakeToolSet:
-    """假 ToolSet：只实现 astrbot.core.agent.tool.ToolSet 里用到的 names / remove_tool。"""
+    """假 ToolSet：只实现 astrbot.core.agent.tool.ToolSet 里用到的 names / remove_tool / add_tool。"""
 
-    def __init__(self, names) -> None:
+    def __init__(self, names=()) -> None:
         self._names = list(names)
         self.removed: list[str] = []
+        self.added: list[str] = []
 
     def names(self):
         return list(self._names)
@@ -45,6 +50,16 @@ class FakeToolSet:
             raise ValueError("没有这个工具：%s" % name)
         self._names.remove(name)
         self.removed.append(name)
+        return True
+
+    def add_tool(self, tool):
+        """同 ToolSet.add_tool：同名覆盖（这里只需保证不会出现两份）。"""
+        name = getattr(tool, "name", "")
+        if not name:
+            raise ValueError("工具没有名字")
+        if name not in self._names:
+            self._names.append(name)
+        self.added.append(name)
         return True
 
 
@@ -253,6 +268,205 @@ class StripTest(unittest.TestCase):
                           resolver_of(), log=lines.append)
         self.assertEqual(len(lines), 1)
         self.assertIn("poke_user", lines[0])
+
+
+class FakeTool:
+    """假工具对象：只要 name / active 两个属性（tool_gate 靠鸭子类型）。"""
+
+    def __init__(self, name: str, active: bool = True) -> None:
+        self.name = name
+        self.active = active
+
+    def __repr__(self) -> str:  # 测试失败时看得清
+        return "FakeTool(%s, active=%r)" % (self.name, self.active)
+
+
+class FakeFullSet:
+    """假 ToolSet：``.tools`` + ``names()`` + ``add_tool()``（够 ``inject_enabled`` 用）。
+
+    真实现里 ``type(manager.get_full_tool_set())()`` 造出来的是空的 astrbot ``ToolSet``，
+    这里同理造一个能用的空集合。
+    """
+
+    def __init__(self, tools=()) -> None:
+        self.tools = list(tools)
+
+    def names(self):
+        return [getattr(t, "name", "") for t in self.tools]
+
+    def add_tool(self, tool):
+        for i, old in enumerate(self.tools):
+            if getattr(old, "name", "") == getattr(tool, "name", ""):
+                self.tools[i] = tool
+                return None
+        self.tools.append(tool)
+        return None
+
+
+class FakeManager:
+    """假 FunctionToolManager：只要 ``get_full_tool_set()``。"""
+
+    def __init__(self, tools=(), boom: bool = False) -> None:
+        self._tools = list(tools)
+        self._boom = boom
+
+    def get_full_tool_set(self):
+        if self._boom:
+            raise RuntimeError("synthetic")
+        return FakeFullSet(self._tools)
+
+
+def manager_with_12(active_all: bool = True, inactive=()):
+    tools = []
+    for name in tg.tool_names():
+        tools.append(FakeTool(name, active=active_all and name not in set(inactive)))
+    tools.append(FakeTool("web_search"))
+    return FakeManager(tools)
+
+
+class InjectTest(unittest.TestCase):
+    """ACT-1 be5：lingxi 的 request_llm 不带 conversation，AstrBot 不会灌插件工具，
+    所以闸门得自己按开关把开着的工具塞进 req.func_tool。"""
+
+    def test_injects_enabled_tool_and_keeps_others(self):
+        tools = FakeToolSet(["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        added = tg.inject_enabled(req, GROUP_KEY, r, manager_with_12())
+        self.assertEqual(added, ["poke_user"])
+        self.assertIn("poke_user", tools.names())
+        self.assertIn("web_search", tools.names(), "别人的工具不许动")
+
+    def test_nothing_injected_when_all_off(self):
+        tools = FakeToolSet(["web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, resolver_of(),
+                                           manager_with_12()), [])
+        self.assertEqual(tools.names(), ["web_search"])
+
+    def test_group_only_not_injected_in_private(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of(ALL_GROUP_ON, {"actions": {"poke_enabled": True}})
+        added = tg.inject_enabled(req, PRIVATE_KEY, r, manager_with_12())
+        # 私聊那份只开了戳一戳；全局三项（申请 / 资料 / 头像）对私聊也适用
+        self.assertEqual(sorted(added), sorted({"poke_user"} | GLOBAL_ON))
+        self.assertEqual(set(tools.names()) & GROUP_ONLY, set())
+
+    def test_all_on_injects_exactly_twelve(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        added = tg.inject_enabled(req, GROUP_KEY, resolver_of(ALL_GROUP_ON),
+                                  manager_with_12())
+        self.assertEqual(sorted(added), sorted(tg.tool_names()))
+        self.assertEqual(sorted(tools.names()), sorted(tg.tool_names()))
+
+    def test_existing_tool_not_added_twice(self):
+        """有 conversation 的那条路 AstrBot 已经灌过 → 不重复加。"""
+        tools = FakeToolSet(["poke_user", "web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, r, manager_with_12()), [])
+        self.assertEqual(tools.names().count("poke_user"), 1)
+
+    def test_inactive_tool_skipped(self):
+        """面板里停用了这个工具（active=False）就别硬塞。"""
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        mgr = manager_with_12(inactive={"poke_user"})
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, r, mgr), [])
+        self.assertEqual(tools.names(), [])
+
+    def test_missing_tool_in_manager_skipped(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        mgr = FakeManager([FakeTool("something_else")])
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, r, mgr), [])
+
+    def test_func_tool_none_gets_a_fresh_set(self):
+        req = SimpleNamespace(func_tool=None)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        added = tg.inject_enabled(req, GROUP_KEY, r, manager_with_12())
+        self.assertEqual(added, ["poke_user"])
+        self.assertEqual(req.func_tool.names(), ["poke_user"])
+
+    def test_manager_falls_back_to_func_list(self):
+        class OldManager:
+            def __init__(self):
+                self.func_list = [FakeTool("poke_user")]
+
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, r, OldManager()),
+                         ["poke_user"])
+
+    def test_broken_manager_does_not_raise(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, r,
+                                           FakeManager([], boom=True)), [])
+
+    def test_no_manager_or_key_is_noop(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        self.assertEqual(tg.inject_enabled(req, GROUP_KEY, resolver_of(), None), [])
+        self.assertEqual(tg.inject_enabled(req, None, resolver_of(),
+                                           manager_with_12()), [])
+
+    def test_add_that_raises_does_not_break_the_rest(self):
+        class Picky(FakeToolSet):
+            def add_tool(self, tool):
+                if tool.name == "poke_user":
+                    raise RuntimeError("synthetic")
+                return FakeToolSet.add_tool(self, tool)
+
+        tools = Picky([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of(ALL_GROUP_ON)
+        added = tg.inject_enabled(req, GROUP_KEY, r, manager_with_12())
+        self.assertNotIn("poke_user", added)
+        self.assertEqual(len(added), 11)
+
+
+class SyncToolsTest(unittest.TestCase):
+    def _event(self, key):
+        return SimpleNamespace(unified_msg_origin=to_umo(key),
+                              get_group_id=lambda: (key.id if key.scope == Scope.GROUP else ""),
+                              get_sender_id=lambda: "10001")
+
+    def test_adds_enabled_and_drops_disabled_in_one_pass(self):
+        """一次请求里：开着的补上、关着的摘掉。"""
+        tools = FakeToolSet(["poke_user", "set_group_ban", "web_search"])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True}})
+        got = tg.sync_tools(req, self._event(GROUP_KEY), r, manager_with_12())
+        self.assertEqual(got["added"], [])
+        self.assertEqual(got["dropped"], ["set_group_ban"])
+        self.assertEqual(sorted(tools.names()), ["poke_user", "web_search"])
+
+    def test_from_empty_set_injects_switched_on_only(self):
+        tools = FakeToolSet([])
+        req = SimpleNamespace(func_tool=tools)
+        r = resolver_of({"actions": {"poke_enabled": True, "ban_enabled": True}})
+        got = tg.sync_tools(req, self._event(GROUP_KEY), r, manager_with_12())
+        self.assertEqual(sorted(got["added"]), ["poke_user", "set_group_ban"])
+        self.assertEqual(got["dropped"], [])
+
+    def test_unreadable_event_is_noop(self):
+        tools = FakeToolSet(list(tg.tool_names()))
+        req = SimpleNamespace(func_tool=tools)
+        got = tg.sync_tools(req, SimpleNamespace(), resolver_of(), manager_with_12())
+        self.assertEqual(got, {"added": [], "dropped": []})
+        self.assertEqual(len(tools.names()), 12)
+
+    def test_missing_req_is_noop(self):
+        got = tg.sync_tools(None, self._event(GROUP_KEY), resolver_of(),
+                            manager_with_12())
+        self.assertEqual(got, {"added": [], "dropped": []})
 
 
 class EntryFromEventTest(unittest.TestCase):
