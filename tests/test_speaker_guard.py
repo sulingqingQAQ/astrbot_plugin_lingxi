@@ -26,8 +26,73 @@ class GuardTest(unittest.TestCase):
 
     def test_strip_unclosed_think(self):
         r = guard_output("合成正文<think>没写完", GuardRules())
-        self.assertEqual(r.parts, ["合成正文没写完"])
+        self.assertEqual(r.parts, ["合成正文"])
         self.assertIn("strip_tag:think", r.actions)
+
+    def test_unclosed_block_tags_strip_remainder(self):
+        cases = (
+            ("你好<chat_status>心情：烦", "你好", "strip_tag:chat_status"),
+            ('你好<chat_status mood="x">心情：烦', "你好", "strip_tag:chat_status"),
+            ("你好<think>想一下 没闭合 然后继续说话", "你好", "strip_tag:think"),
+            ("你好<thinking>内部推理", "你好", "strip_tag:think"),
+            ("你好<THINKING>内部推理", "你好", "strip_tag:think"),
+            ("你好<reasoning>内部推理", "你好", "strip_tag:think"),
+            ("你好<REASONING>内部推理", "你好", "strip_tag:think"),
+            ("你好<|thinking|>内部推理", "你好", "strip_tag:think"),
+            ("你好<|THINKING|>内部推理", "你好", "strip_tag:think"),
+            ("你好<THINK>内部推理", "你好", "strip_tag:think"),
+            ("你好<CHAT_STATUS>心情：烦", "你好", "strip_tag:chat_status"),
+        )
+        for text, expected, action in cases:
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, [expected])
+                self.assertIn(action, result.actions)
+
+    def test_think_and_thinking_do_not_pair_with_each_other(self):
+        for text in (
+            "你好<think>内部</thinking>后续",
+            "你好<thinking>内部</think>后续",
+        ):
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, ["你好"])
+                self.assertIn("strip_tag:think", result.actions)
+
+    def test_paired_blocks_are_removed_before_unclosed_tail(self):
+        result = guard_output("前<think>已闭合</think>中<think>未闭合", GuardRules())
+        self.assertEqual(result.parts, ["前中"])
+        self.assertIn("strip_tag:think", result.actions)
+
+    def test_unclosed_mark_tags_keep_their_body(self):
+        cases = (
+            ('<mention id="synthetic">内容', "strip_tag:mention"),
+            ('<quote id="synthetic">内容', "strip_tag:quote"),
+            ('<next_reply reason="synthetic">内容', "strip_tag:next_reply"),
+            ("<refuse>内容", "strip_tag:refuse"),
+        )
+        for text, action in cases:
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, ["内容"])
+                self.assertIn(action, result.actions)
+
+    def test_self_closing_and_orphan_block_tags_only_strip_markers(self):
+        for text in ("前<chat_status/>后", "前</chat_status>后", "前<think/>后", "前</think>后"):
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, ["前后"])
+
+    def test_non_tags_with_block_name_prefix_or_angle_brackets_are_preserved(self):
+        text = "a <thinkpad> b <b> c < d > e"
+        result = guard_output(text, GuardRules())
+        self.assertEqual(result.parts, [text])
+        self.assertEqual(result.actions, [])
+
+    def test_empty_after_unclosed_block_is_silent(self):
+        result = guard_output("<think>只有内部内容", GuardRules())
+        self.assertEqual(result.parts, [])
+        self.assertIn("strip_tag:think", result.actions)
 
     def test_strip_mention_quote(self):
         r = guard_output(

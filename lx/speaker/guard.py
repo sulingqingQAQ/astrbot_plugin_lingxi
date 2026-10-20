@@ -34,21 +34,44 @@ from typing import Any
 
 # —— 整块删除（含标签内文字）：思考块 ——
 # 出处：core/message_sender.py:41-45（_THINK_PATTERNS）。
+# 配对正则只认同名闭合标签（think 不会吞掉 thinking），并且跳过自闭合写法
+# <think/>——那种只有标记没有正文，交给下面的裸标记兜底剥掉。
 _THINK_BLOCK_RES = (
-    re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I),
+    re.compile(r"<think\b(?![^>]*?/\s*>)[^>]*>.*?</think\s*>", re.S | re.I),
+    re.compile(r"<thinking\b(?![^>]*?/\s*>)[^>]*>.*?</thinking\s*>", re.S | re.I),
     re.compile(r"<\|thinking\|>.*?<\|/thinking\|>", re.S | re.I),
-    re.compile(r"<reasoning>.*?</reasoning>", re.S | re.I),
+    re.compile(r"<reasoning\b(?![^>]*?/\s*>)[^>]*>.*?</reasoning\s*>", re.S | re.I),
 )
-# 未闭合时的裸标记兜底（只剥标记，留文字）。
-_THINK_BARE_RE = re.compile(r"</?think(?:ing)?\b[^>]*>", re.I)
+# 落单的裸标记兜底（只剥标记）：没闭合的开标签不归这里，由下面的
+# _UNCLOSED_BLOCK_OPEN_RES 截到文末；这里只管把标记本身拆掉。
+_THINK_BARE_RE = re.compile(r"</?(?:think|thinking)\b[^>]*>", re.I)
 _REASONING_BARE_RE = re.compile(r"</?reasoning\b[^>]*>", re.I)
+# 竖线形态的落单 / 自闭合标记（出处 core/message_sender.py:43）：旧代码只认配对块，
+# 没闭合的 <|thinking|> 连标记都不会剥，会原样发进群。
+_VERTICAL_THINK_BARE_RE = re.compile(r"<\|/?thinking\|>", re.I)
 
 # —— 整块删除：状态便签 ——
 # 出处：core/chat_status.py:15-16（_TAG + _BARE_TAG）。
+# 配对正则同样跳过自闭合 <chat_status/>：那种没有正文，只剥标记。
 _CHAT_STATUS_BLOCK_RE = re.compile(
-    r"<chat_status\b[^>]*>.*?</chat_status\s*>", re.S | re.I
+    r"<chat_status\b(?![^>]*?/\s*>)[^>]*>.*?</chat_status\s*>", re.S | re.I
 )
 _CHAT_STATUS_BARE_RE = re.compile(r"</?chat_status\b[^>]*>", re.I)
+
+# —— 没闭合的 block 开标签：从它起到文末全删 ——
+# 为什么：模型回复被截断、或忘了写闭合标签时，状态便签 / 思考内容会原样漏给
+# 用户；block 类（思考块、状态便签）内部都是不该外泄的东西，所以宁可整段砍掉。
+# 顺序上必须先删配对整块、再跑这里（否则「已闭合块 + 后面没闭合的开标签」会
+# 提前截断，把本该保留的正文也砍了）。列表顺序无关，取最靠左的那一处。
+_UNCLOSED_BLOCK_OPEN_RES = (
+    ("think", re.compile(r"<think\b[^>]*>", re.I)),
+    ("think", re.compile(r"<thinking\b[^>]*>", re.I)),
+    ("think", re.compile(r"<reasoning\b[^>]*>", re.I)),
+    ("think", re.compile(r"<\|thinking\|>", re.I)),
+    ("chat_status", re.compile(r"<chat_status\b[^>]*>", re.I)),
+)
+# 自闭合写法（<chat_status/> 这类）没有正文，不算「没闭合」。
+_SELF_CLOSING_OPEN_RE = re.compile(r"/\s*>$")
 
 # —— 只剥标记：mention / quote ——
 # 出处：core/enhance_tag_utils.py:15-24（MENTION_RE / QUOTE_RE / MENTION_CLOSE_RE /
@@ -95,8 +118,27 @@ class GuardResult:
     actions: list[str] = field(default_factory=list)
 
 
+def _truncate_unclosed_block(text: str) -> tuple[str, str | None]:
+    # 先删完配对整块再调这里。找最靠左的一个「没闭合的 block 开标签」，
+    # 从它起到文末全删：里面是状态便签 / 思考内容，不能漏给用户。
+    # 自闭合写法跳过（没有正文）；返回命中的动作名给上层记 actions。
+    first_start: int | None = None
+    first_name: str | None = None
+    for name, pattern in _UNCLOSED_BLOCK_OPEN_RES:
+        for match in pattern.finditer(text):
+            if _SELF_CLOSING_OPEN_RE.search(match.group()):
+                continue
+            if first_start is None or match.start() < first_start:
+                first_start = match.start()
+                first_name = name
+            break
+    if first_start is None:
+        return text, None
+    return text[:first_start], first_name
+
+
 def _strip_control_tags(text: str) -> tuple[str, list[str]]:
-    """剥控制标签；返回 (新文本, 命中的 tag 名列表)。嵌套时循环到稳定（≤5 轮）。"""
+    """剥控制标签；先移除配对块，再截断未闭合 block 的尾部。"""
     actions: list[str] = []
     out = text
     for _ in range(5):
@@ -114,13 +156,25 @@ def _strip_control_tags(text: str) -> tuple[str, list[str]]:
         for pat in _THINK_BLOCK_RES:
             out = _sub(pat, "strip_tag:think", out)
         out = _sub(_CHAT_STATUS_BLOCK_RE, "strip_tag:chat_status", out)
+
+        out, unclosed_name = _truncate_unclosed_block(out)
+        if unclosed_name is not None:
+            changed = True
+            action = (
+                "strip_tag:chat_status"
+                if unclosed_name == "chat_status"
+                else "strip_tag:think"
+            )
+            if action not in actions:
+                actions.append(action)
+
         out = _sub(_MENTION_RE, "strip_tag:mention", out)
         out = _sub(_QUOTE_RE, "strip_tag:quote", out)
         out = _sub(_NEXT_REPLY_SELF_RE, "strip_tag:next_reply", out)
         out = _sub(_REFUSE_RE, "strip_tag:refuse", out)
-        # 裸标记兜底（含未闭合的 opening，如 <next_reply reason="x" >）
         out = _sub(_THINK_BARE_RE, "strip_tag:think", out)
         out = _sub(_REASONING_BARE_RE, "strip_tag:think", out)
+        out = _sub(_VERTICAL_THINK_BARE_RE, "strip_tag:think", out)
         out = _sub(_CHAT_STATUS_BARE_RE, "strip_tag:chat_status", out)
         out = _sub(_MENTION_BARE_RE, "strip_tag:mention", out)
         out = _sub(_QUOTE_BARE_RE, "strip_tag:quote", out)

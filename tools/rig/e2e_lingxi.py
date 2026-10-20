@@ -456,6 +456,19 @@ async def _sc_F1(ctx):
         "期望请求里有 [需要回应的消息]，实际=%r" % (users,))
 
 
+async def _sc_TAG1(ctx):
+    """TAG-1：未闭合 chat_status 的正文不能到达假 NapCat。"""
+    ctx.llm.script(["你好<chat_status>心情：烦"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗", at_self=True)
+    sent = await ctx.napcat.wait_sent(1, 30)
+    texts = [s["text"] for s in sent]
+    assert texts and "你好" in texts[0], "期望收到可见正文，实际=%r" % (texts,)
+    assert all("心情" not in text for text in texts), (
+        "未闭合 chat_status 内容泄漏到 NapCat：%r" % (texts,))
+    reqs = ctx.llm.requests()
+    assert len(reqs) == 1, "期望假 LLM 恰收到 1 条请求，实际 %d" % len(reqs)
+
+
 async def _sc_F2(ctx):
     """F2 不 @ 不回。"""
     await ctx.napcat.send_group(GROUP_ID, USER_IN, "随便聊聊", at_self=False)
@@ -754,7 +767,7 @@ GROUPS = [
       ("P2", _sc_P2)]),
     ("组2私聊不接管", _group2_config, [("E", _sc_E)]),
     ("组3群聊", _group3_config,
-     [("F1", _sc_F1), ("F2", _sc_F2), ("TG", _sc_TG), ("P3", _sc_P3)]),
+     [("F1", _sc_F1), ("TAG1", _sc_TAG1), ("F2", _sc_F2), ("TG", _sc_TG), ("P3", _sc_P3)]),
     ("组4群聊唤醒词", _group4_config, [("F3", _sc_F3)]),
     ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
     ("组6定时唤醒（私聊开 / 群里关）", _wake_config,
