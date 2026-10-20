@@ -65,7 +65,7 @@ PAGE_ROUTES_OK = ("#" + PAGE_ROUTE, "#/plugin-view/%s/lingxi" % PLUGIN_NAME)
 WEBUI_PORT = 16185
 WS_PORT = 16199
 SANDBOX = "allow-scripts allow-forms allow-downloads"
-EXPECT_TABS = ["私聊", "群聊", "分会话覆盖", "诊断", "关于"]
+EXPECT_TABS = ["私聊", "群聊", "群动作", "分会话覆盖", "诊断", "关于"]
 B9_REPLY = "B9合成回复ZQ"          # 假 LLM 的回复：默认诊断包里绝不能出现
 DL_DIR = os.path.join(ROOT, "downloads")   # B9 用 CDP 把下载指到隔离根下这个目录
 EXPECT_VERSION = "v3.0.0-dev.1"
@@ -81,6 +81,11 @@ SR_FRIEND_RAW = "friend:900100500"  # 前缀写法：friend: 也算私聊（和 
 SR_FRIEND_ID = "900100500"
 SR_PRIVATE_RAW = "123_456"         # 私聊不剥下划线：号码原样留着
 STYLE_LINE = "合成风格：UI6b 浏览器端到端写入的一行"
+# ACT-1 B11：群动作页。私聊 + 群聊都有的开关取「戳一戳」；只用它动，别的项一律要求一动不动。
+ACT_POKE = "actions.poke_enabled"
+ACT_KICK = "actions.kick_enabled"           # 仅群聊的开关：没点它就不许变
+ACT_BAN_MAX = "actions.ban_max_seconds"     # 限制项：没点它就不许变
+ACT_PROTOCOL = "actions_global.protocol"    # 全局项：没点它就不许变（且只能写在群聊全局）
 
 
 def _scrub(text) -> str:
@@ -1089,6 +1094,176 @@ async def _sc_B10(ctx):
         len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
 
 
+# B11 用的页面探针：一次把「群动作」页该有的东西全取回来（不写死工具个数以外的东西）。
+_ACT_STATE_JS = r"""
+(function () {
+  function q(s) { return document.querySelector(s); }
+  var t = q('#act-toggle-poke_user input');
+  var txt = q('#act-toggle-poke_user .toggle-text');
+  return {
+    cards: document.querySelectorAll('#act-grid > .act-card').length,
+    toggles: document.querySelectorAll('#tab-actions .toggle input').length,
+    pending: document.querySelectorAll('#tab-actions .act-pending').length,
+    missingHidden: (q('#act-missing') || {className: ''}).className.indexOf('hidden') >= 0,
+    limits: document.querySelectorAll('#act-limits .act-row').length,
+    globalRows: document.querySelectorAll('#act-global .act-row').length,
+    globalMarks: document.querySelectorAll('#act-grid .act-globalmark').length,
+    dangers: document.querySelectorAll('#act-grid .act-danger').length,
+    pokeChecked: t ? t.checked : null,
+    pokeText: txt ? txt.textContent : null,
+    slider: document.querySelectorAll('#act-limits input[type="range"]').length,
+    protocol: (function () { var s = q('#act-global select'); return s ? s.value : null; })()
+  };
+})()
+"""
+
+
+async def _sc_B11(ctx):
+    """B11 群动作：进「群动作」页（真后端元数据）-> 打开「戳一戳」-> 保存 -> 磁盘上私聊 / 群聊两个
+    范围的 actions.poke_enabled 都是 true、别的项没动 -> 重新打开插件页（真整页重载记号）-> 开关还是
+    开的 -> 关掉再保存 -> 磁盘回到 false。最后在深色与手机宽度下各截一张，确认版面。"""
+    fb = ctx.fb
+    await fb.set_viewport(1440, 900)  # B7 把窗口改成了手机宽度
+    if ctx.fctx is None:
+        await _open_plugin_page(ctx)
+    f = await _fctx(ctx)
+    await _need_loaded(ctx)
+    mark = fb.mark()
+
+    # 0) 起始：磁盘上这个开关不是开的（rig 初装配置里没写 actions 块 = 规格默认 false）
+    cfg0 = _read_plug_cfg()
+    for scope in ("private", "group"):
+        assert not _dig(cfg0, scope, "actions", "poke_enabled"), (
+            "B11 起始 %s.actions.poke_enabled 应当是关的，实际 %r"
+            % (scope, _dig(cfg0, scope, "actions", "poke_enabled")))
+    ctx.note("B11 起始：磁盘上 %s 两个范围都还没有 true；初装配置里 actions 块=%r"
+             % (ACT_POKE, _dig(cfg0, "group", "actions")))
+
+    # 1) 进页：12 张卡、13 个真开关（12 工具 + 允许对管理员动手）、没有占位（元数据已落地）
+    await _show_tab(ctx, "actions")
+    await fb.ctx_wait_for(f, "!!document.querySelector('#act-grid')", timeout=10)
+    await fb.ctx_wait_for(
+        f, "document.querySelectorAll('#tab-actions .toggle input').length===13", timeout=10)
+    st = await fb.ctx_eval(f, _ACT_STATE_JS)
+    ctx.note("B11 页面：%s" % json.dumps(st, ensure_ascii=False))
+    assert st["pending"] == 0, (
+        "后端元数据已经落地，页面上不该还有 %d 个灰占位开关" % st["pending"])
+    assert st["missingHidden"] is True, "元数据齐了，「后端还没提供」那句提示应当收起来"
+    assert st["cards"] == 12, "工具卡应是 12 张，实际 %d" % st["cards"]
+    assert st["toggles"] == 13, "开关应是 13 个（12 工具 + 允许对管理员动手），实际 %d" % st["toggles"]
+    assert (st["limits"], st["globalRows"]) == (2, 1), (
+        "限制 / 全局行数应是 2 / 1，实际 %r / %r" % (st["limits"], st["globalRows"]))
+    assert st["globalMarks"] == 3, "「全局生效」小标应是 3 个（actions_global 的三个工具），实际 %d" % (
+        st["globalMarks"],)
+    assert st["dangers"] == 4, "危险标应是 4 个（踢人 / 退群 / 换头像 / 处理申请），实际 %d" % (
+        st["dangers"],)
+    assert st["pokeChecked"] is False and st["pokeText"] == "关", (
+        "「戳一戳」起始应当是关的，实际 checked=%r 文字=%r"
+        % (st["pokeChecked"], st["pokeText"]))
+    assert st["slider"] >= 1, "禁言上限应当带滑块（元数据里有 slider）"
+    assert st["protocol"] == "napcat", "协议下拉应当选中出新默认 napcat，实际 %r" % (st["protocol"],)
+    await _shot(ctx, "b11_actions_page.png")
+
+    # 2) 打开开关：一个开关 = 私聊 + 群聊两项改动，标签上要亮红点
+    await fb.frame_click(f, '#act-toggle-poke_user label.toggle')
+    await fb.ctx_wait_for(f, "window.LX._dirtyCount()===2", timeout=8)
+    dot = await fb.ctx_eval(
+        f, "!!document.querySelector('#tabs button[data-tab=\"actions\"] .dot')")
+    assert dot is True, "改过之后「群动作」标签上应当有未保存的红点"
+    keys = await fb.ctx_eval(f, "Array.from(window.LX.state.dirty.keys()).sort()")
+    assert keys == ["group:" + ACT_POKE, "private:" + ACT_POKE], (
+        "一个「戳一戳」开关应当写私聊 + 群聊两套，实际暂存键 %r" % (keys,))
+    await _shot(ctx, "b11_actions_on.png")
+
+    # 3) 保存：改动清单里要有这一项；磁盘上两个范围都变 true，别的项一动不动
+    await _save_via_ui(ctx, ACT_POKE, shot_name="b11_actions_diff.png")
+    await _poll_disk(lambda c: _dig(c, "private", "actions", "poke_enabled"), True,
+                     "private.actions.poke_enabled")
+    await _poll_disk(lambda c: _dig(c, "group", "actions", "poke_enabled"), True,
+                     "group.actions.poke_enabled")
+    cfg1 = _read_plug_cfg()
+    assert not _dig(cfg1, "group", "actions", "kick_enabled"), (
+        "没点过「踢出群」，磁盘上 group.actions.kick_enabled 却是 %r"
+        % (_dig(cfg1, "group", "actions", "kick_enabled"),))
+    assert _dig(cfg1, "group", "actions", "ban_max_seconds") in (None, 3600), (
+        "没动过禁言上限，磁盘上却是 %r"
+        % (_dig(cfg1, "group", "actions", "ban_max_seconds"),))
+    assert _dig(cfg1, "group", "actions_global", "protocol") in (None, "napcat"), (
+        "没动过协议，磁盘上却是 %r"
+        % (_dig(cfg1, "group", "actions_global", "protocol"),))
+    assert _dig(cfg1, "private", "actions_global") is None, (
+        "actions_global 只能写在群聊全局，私聊侧却被写成了 %r"
+        % (_dig(cfg1, "private", "actions_global"),))
+    ctx.note("B11 保存后：private.actions=%r group.actions.poke_enabled=%r"
+             % (_dig(cfg1, "private", "actions"),
+                _dig(cfg1, "group", "actions", "poke_enabled")))
+
+    # 4) 重新打开插件页（真整页重载：宿主页上的记号必须消失）-> 开关还是开的
+    await fb.eval("window.__b11_reload_marker = 1; true")
+    assert await fb.eval("window.__b11_reload_marker") == 1, "没能在宿主页上留下重新加载记号"
+    await _open_plugin_page(ctx)
+    gone = await fb.eval("typeof window.__b11_reload_marker")
+    assert gone == "undefined", (
+        "重新打开插件页应当是一次真的整页重新加载（记号应当消失），实际 typeof=%r——"
+        "说明只是同文档跳转，下面的「开关还是开的」不能证明它是从后端读回来的" % (gone,))
+    f = await _fctx(ctx)
+    await _need_loaded(ctx)
+    await _show_tab(ctx, "actions")
+    await fb.ctx_wait_for(
+        f, "(document.querySelector('#act-toggle-poke_user input')||{}).checked===true", timeout=10)
+    left = await fb.ctx_eval(f, "LX._dirtyCount()")
+    assert left == 0, "重新打开插件页后期望 0 项未保存，实际 %r" % (left,)
+    await _shot(ctx, "b11_actions_reopen.png")
+
+    # 5) 关掉再保存：磁盘回到 false
+    await fb.frame_click(f, '#act-toggle-poke_user label.toggle')
+    await fb.ctx_wait_for(f, "window.LX._dirtyCount()===2", timeout=8)
+    await _save_via_ui(ctx, ACT_POKE, shot_name="b11_actions_off_diff.png")
+    await _poll_disk(lambda c: _dig(c, "private", "actions", "poke_enabled"), False,
+                     "private.actions.poke_enabled")
+    await _poll_disk(lambda c: _dig(c, "group", "actions", "poke_enabled"), False,
+                     "group.actions.poke_enabled")
+    text = await fb.ctx_eval(f, "document.querySelector('#act-toggle-poke_user .toggle-text').textContent")
+    assert text == "关", "关掉并保存之后开关文字应当是「关」，实际 %r" % (text,)
+
+    # 6) 版面：深色一张、手机宽度一张（都要是这一页自己的样子，不是宿主首页）
+    await fb.cmd("Emulation.setEmulatedMedia",
+                 features=[{"name": "prefers-color-scheme", "value": "dark"}])
+    await asyncio.sleep(0.8)
+    dark = await fb.ctx_eval(f, "document.documentElement.getAttribute('data-theme')")
+    ctx.note("B11 深色：iframe data-theme=%r" % (dark,))
+    assert dark == "dark", "模拟系统深色后 iframe 没切到深色，实际 %r" % (dark,)
+    await _shot(ctx, "b11_actions_dark.png")
+    await fb.cmd("Emulation.setEmulatedMedia",
+                 features=[{"name": "prefers-color-scheme", "value": "light"}])
+    await asyncio.sleep(0.5)
+
+    await fb.set_viewport(390, 844)
+    await asyncio.sleep(0.9)
+    f = await _fctx(ctx)
+    m = await fb.ctx_eval(f, (
+        "(function(){var d=document.documentElement;"
+        "var c=Array.prototype.slice.call(document.querySelectorAll('#act-grid > .act-card'),0,2)"
+        ".map(function(e){var r=e.getBoundingClientRect();"
+        "return [Math.round(r.left),Math.round(r.top)];});"
+        "return {iw:window.innerWidth,sw:d.scrollWidth,cards:c};})()"))
+    ctx.note("B11 手机宽度：%s" % json.dumps(m))
+    assert m["sw"] <= m["iw"] + 1, (
+        "手机宽度下「群动作」页出现横向滚动：scrollWidth=%d innerWidth=%d"
+        % (m["sw"], m["iw"]))
+    assert len(m["cards"]) == 2 and m["cards"][0][0] == m["cards"][1][0] \
+        and m["cards"][1][1] > m["cards"][0][1], (
+        "手机宽度下工具卡应当排成一列，实际前两张卡坐标 %r" % (m["cards"],))
+    await _shot(ctx, "b11_actions_mobile.png")
+    await fb.set_viewport(1440, 900)
+    await asyncio.sleep(0.4)
+
+    evs = fb.events_since(mark)
+    assert not evs, "B11 期间有 %d 条异常 / console.error / 网络失败：%r" % (
+        len(evs), [(e["where"], e["kind"], e["text"]) for e in evs])
+
+
+
 # 宿主 WebUI 一打开就会联网做“检查更新”，没外网时它自己的日志里会带 Traceback。
 # 这类记录和灵犀无关，且随本机网络状态时有时无（UI-6a 没开浏览器所以没触发过）。
 # 只按“记录头里的模块名 + 文本里是外网域名且不提灵犀”窄匹配，其余一律算数。
@@ -1151,7 +1326,7 @@ def _post_B8(ctx, webui_port, ws_port):
 
 SCENARIOS = [("B1", _sc_B1), ("B2", _sc_B2), ("B3", _sc_B3), ("B4", _sc_B4),
              ("B5", _sc_B5), ("B6", _sc_B6), ("B7", _sc_B7), ("B9", _sc_B9),
-             ("B10", _sc_B10)]
+             ("B10", _sc_B10), ("B11", _sc_B11)]
 
 
 async def amain(only, shim=False):

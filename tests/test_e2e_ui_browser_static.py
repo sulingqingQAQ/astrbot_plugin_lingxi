@@ -239,7 +239,9 @@ class DiagB9StaticTest(unittest.TestCase):
     def test_b9_registered_and_tabs_expectation_updated(self):
         self.assertIn("def _sc_B9(", self.src)
         self.assertIn('("B9", _sc_B9)', self.src)
-        self.assertIn('EXPECT_TABS = ["私聊", "群聊", "分会话覆盖", "诊断", "关于"]', self.src)
+        # ACT-1 在「群聊」之后插了「群动作」一页
+        self.assertIn('EXPECT_TABS = ["私聊", "群聊", "群动作", "分会话覆盖", "诊断", "关于"]',
+                      self.src)
 
     def test_b9_downloads_into_isolated_root_via_cdp(self):
         self.assertRegex(self.src, r'(?m)^DL_DIR\s*=\s*os\.path\.join\(ROOT,')
