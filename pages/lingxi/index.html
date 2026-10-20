@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="./form.css" />
   <link rel="stylesheet" href="./tab_overrides.css" />
   <link rel="stylesheet" href="./tab_diag.css" />
+  <link rel="stylesheet" href="./tab_actions.css" />
 </head>
 <body>
   <header class="topbar">
@@ -56,12 +57,14 @@
     </div>
   </div>
 
-  <!-- 加载顺序：app.js 建 LX → icons.js 加 LX.icon → form.js（私聊 / 群聊表单）→ tab_overrides.js（覆盖表 / 关于）。
+  <!-- 加载顺序：app.js 建 LX → icons.js 加 LX.icon → form.js（私聊 / 群聊表单 + LX.formKit）→ tab_overrides.js（覆盖表 / 关于）
+       → tab_diag.js（诊断）→ tab_actions.js（群动作，要用 form.js 的控件渲染）。
        后面的文件缺失时只是少标签，页面不报错（app.js 里对 LX.registerTab 已做容错，404 的 script 本身不抛 JS 异常）。 -->
   <script src="./app.js"></script>
   <script src="./icons.js"></script>
   <script src="./form.js"></script>
   <script src="./tab_overrides.js"></script>
   <script src="./tab_diag.js"></script>
+  <script src="./tab_actions.js"></script>
 </body>
 </html>

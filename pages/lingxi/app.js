@@ -809,7 +809,21 @@
     if (s) s.remove();
   }
 
+  /* ACT-1「群动作」：版面 / 读写都在 tab_actions.js（它暴露 LX.actionsTab），这里只做注册和红点接线。
+   * 那个文件缺失时只是少一个标签，页面照常。注册放在 boot 里：此时它已经加载完。 */
+  function registerActionsTab() {
+    var impl = window.LX.actionsTab;
+    if (!impl || typeof impl.mount !== "function") return;
+    LX.registerTab({
+      id: "actions", title: impl.title || "群动作", order: 25, icon: impl.icon || "bolt",
+      mount: impl.mount,
+      onShow: impl.onShow || null,
+      isDirty: function () { return typeof impl.isDirty === "function" ? !!impl.isDirty() : false; }
+    });
+  }
+
   async function boot() {
+    registerActionsTab();
     showBootSkeleton();
     try {
       if (bridge && bridge.ready) await bridge.ready();
