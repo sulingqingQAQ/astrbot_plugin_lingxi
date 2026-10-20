@@ -22,15 +22,15 @@
    * danger = true 的卡片上挂警示色小标（踢人 / 退群 / 换头像 / 处理申请）。 */
   var TOOLS = [
     { name: "poke_user", path: "actions.poke_enabled", title: "戳一戳", icon: "wave", scopes: ["private", "group"], danger: false, risk: "私聊里是拍一拍，群里会 @ 对方一下，对方的 QQ 会抖一下。别拿它烦人。" },
-    { name: "set_msg_emoji", path: "actions.emoji_enabled", title: "给消息加表情", icon: "check", scopes: ["private", "group"], danger: false, risk: "要先有一条消息的消息号（聊天记录里每条后面带 #号），再对那条消息贴一个表情回应。" },
-    { name: "delete_msg", path: "actions.recall_enabled", title: "撤回消息", icon: "undo", scopes: ["private", "group"], danger: false, risk: "撤了没法恢复。机器人默认只能撤自己发的；要撤别人的，机器人得是群管理员。" },
+    { name: "set_msg_emoji", path: "actions.emoji_enabled", title: "给消息加表情", icon: "check", scopes: ["private", "group"], danger: false, risk: "要先有一条消息的消息号（聊天记录里每条后面带 #号），取不到号就会失败；再对那条消息贴一个表情回应。" },
+    { name: "delete_msg", path: "actions.recall_enabled", title: "撤回消息", icon: "undo", scopes: ["private", "group"], danger: false, risk: "撤了没法恢复，群里会留一条『某人撤回了一条消息』。机器人拿不到自己发出去的消息号，所以只能撤别人的：得是群管理员、消息还没超时；私聊里只能撤自己发的。" },
     { name: "set_group_ban", path: "actions.ban_enabled", title: "禁言", icon: "clock", scopes: ["group"], danger: false, risk: "让对方一段时间不能在群里说话，时长超过上限会被截到上限。需要机器人是管理员，对方不是群主。" },
     { name: "set_group_card", path: "actions.card_enabled", title: "改群名片", icon: "file", scopes: ["group"], danger: false, risk: "改的是对方在这个群里的名片，全群都看得到。需要机器人是管理员。" },
     { name: "set_group_special_title", path: "actions.title_enabled", title: "改专属头衔", icon: "shield", scopes: ["group"], danger: false, risk: "头衔很显眼，写错了全群都看得见。需要机器人是群主。" },
     { name: "set_group_kick", path: "actions.kick_enabled", title: "踢出群", icon: "x", scopes: ["group"], danger: true, risk: "直接把对方踢出群，对话当场断掉；对方能自己再加回来。需要机器人是管理员。" },
     { name: "set_group_leave", path: "actions.leave_enabled", title: "退出群", icon: "trash", scopes: ["group"], danger: true, risk: "让机器人退出当前这个群，退出后要人手动再拉回来；退群期间它在这个群的功能全没了。" },
     { name: "search_group_member", path: "actions.member_search_enabled", title: "查群成员", icon: "search", scopes: ["group"], danger: false, risk: "只在当前群查，最多回 10 个；模型看到的是昵称和号码，不查别的群。" },
-    { name: "handle_request", path: "actions_global.request_enabled", title: "处理加好友 / 加群申请", icon: "check-circle", scopes: ["group"], danger: true, risk: "替机器人同意或拒绝申请；点同意对方就直接进来，收不回来（只能事后再踢 / 再删）。全局设置，对所有会话生效。" },
+    { name: "handle_request", path: "actions_global.request_enabled", title: "处理加好友 / 加群申请", icon: "check-circle", scopes: ["group"], danger: true, risk: "替机器人同意或拒绝加好友 / 入群申请；得先收到过那条申请（插件会记下 flag），没记下来就做不了。同意等于把陌生人放进来，收不回来（只能事后再踢 / 再删）。全局设置，对所有会话生效。" },
     { name: "set_self_profile", path: "actions_global.self_profile_enabled", title: "改机器人资料", icon: "settings", scopes: ["group"], danger: false, risk: "改的是机器人自己号的昵称 / 签名等资料，所有平台都看得到。全局设置，对所有会话生效。" },
     { name: "set_qq_avatar", path: "actions_global.avatar_enabled", title: "换机器人头像", icon: "eye", scopes: ["group"], danger: true, risk: "换掉机器人自己号的头像，所有平台都看得到，旧头像不保留。全局设置，对所有会话生效。" }
   ];
@@ -83,6 +83,8 @@
   /* 这条配置项实际存在于哪些范围：有元数据就按元数据（后端 _g / _both 决定），
    * 没有元数据（be1 之前）用清单里的 scopes 兜底，好把开关位置摆出来。 */
   function scopesFor(def) {
+    // §7.4：actions_global 只有「群聊全局」一份、对整台机器生效 —— 元数据怎么给都只读写 group
+    if (isGlobalPath(def.path)) return ["group"];
     var found = [];
     ALL_SCOPES.forEach(function (scope) { if (fieldOf(scope, def.path)) found.push(scope); });
     return found.length ? found : def.scopes.slice();

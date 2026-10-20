@@ -658,6 +658,25 @@ class TestLingxiAct1PanelStatic(unittest.TestCase):
         self.assertIn("scopes.forEach", self.js)
         self.assertIn("LX.setValue", self.js)
 
+    def test_risk_texts_follow_backend_capabilities(self):
+        """卡片小字要和后端的实际结论一致，不能留不实的话。
+
+        后端 be2 查明两件事：① 机器人拿不到自己发出去的消息号，所以撤回只能撤**别人的**；
+        ② 加好友 / 加群申请要靠插件记下来的 flag，没记下来就做不了。
+        """
+        rows = {r.get("name"): r for r in self.entries("TOOLS")}
+        risk = rows["delete_msg"].get("risk") or ""
+        self.assertIn("别人的", risk, "撤回的小字要照实写「只能撤别人的消息」")
+        self.assertIn("管理员", risk, "撤回别人的消息要写清「得是群管理员」这个前提")
+        self.assertIn("拿不到自己发出去的消息号", risk,
+                      "撤回的小字要把「拿不到自己的消息号」这个原因写出来")
+        # 「只能撤自己发的消息」是写反了的旧说法；「私聊里只能撤自己发的」是照实写的，不算错，
+        # 所以这里只挡整句写反，不去挡那个短语。
+        self.assertNotIn("只能撤自己发的消息", risk, "后端查下来拿不到自己的消息号，别写反")
+        req = rows["handle_request"].get("risk") or ""
+        self.assertIn("申请", req)
+        self.assertIn("flag", req, "处理申请的小字要写清「得先收到过那条申请（flag）」这个前提")
+
     def test_index_loads_tab_actions_after_form(self):
         self.assertIn('href="./tab_actions.css"', self.index)
         for needed in ('src="./app.js"', 'src="./icons.js"', 'src="./form.js"'):
@@ -691,8 +710,8 @@ class TestLingxiAct1PanelStatic(unittest.TestCase):
                          "配置项路径这类长串要能换行")
 
     def test_spec_paths_align_when_backend_lands(self):
-        """be1 落地后这条就是真的对账：页面上的开关键必须和 spec 里的项一一对应（多一个少一个都算错）。
-        be1 之前 spec 里还没有这两个块，这里只能先跳过。"""
+        """后端落地后这条就是真的对账：页面上的开关键必须和 spec 里的项一一对应（多一个少一个都算错）。
+        be1/be2 之前 spec 里还没有这两个块，那时只能跳过。"""
         from lx.config import spec
         from lx.contracts import Scope
 
@@ -703,8 +722,17 @@ class TestLingxiAct1PanelStatic(unittest.TestCase):
                     spec_paths.update(f.path for f in block.fields_for(scope))
         if not spec_paths:
             self.skipTest("后端 be1 还没把 actions / actions_global 落进 lx/config/spec.py")
-        ui_paths = {r.get("path") for r in self.entries("TOOLS") + self.entries("GLOBALS")}
+        ui_paths = set()
+        for var in ("TOOLS", "LIMITS", "GLOBAL_SETTINGS"):
+            ui_paths.update(r.get("path") for r in self.entries(var))
         self.assertEqual(ui_paths, spec_paths, "面板上的开关键和 spec 里的项对不上")
+        # §7.4：这三块里只有 actions_global 是「只在群聊全局一份」，spec 与页面得一致
+        private_global = [p for p in spec_paths
+                          if p.startswith("actions_global.")
+                          and any(f.path == p
+                                  for b in spec.blocks_for(Scope.PRIVATE)
+                                  for f in b.fields_for(Scope.PRIVATE))]
+        self.assertEqual(private_global, [], "actions_global 不该出现在私聊侧")
 
 
 if __name__ == "__main__":
