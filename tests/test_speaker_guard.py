@@ -103,6 +103,60 @@ class GuardTest(unittest.TestCase):
         self.assertIn("strip_tag:mention", r.actions)
         self.assertIn("strip_tag:quote", r.actions)
 
+    def test_core_memory_block_and_unclosed_tail(self):
+        cases = (
+            ("你好<core_memory>某人对花生过敏</core_memory>正文", "你好正文"),
+            ('你好<core_memory scope="x">内部</core_memory>正文', "你好正文"),
+            ("你好<CORE_MEMORY>配对内部</CORE_MEMORY>正文", "你好正文"),
+            ("你好<CORE_MEMORY>未闭合花生", "你好"),
+            ('你好<CORE_MEMORY scope="x">未闭合花生', "你好"),
+            (
+                "你好<core_memory>已闭合</core_memory>好<core_memory>未闭合",
+                "你好好",
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, [expected])
+                self.assertIn("strip_tag:core_memory", result.actions)
+
+    def test_core_memory_orphan_and_self_closing_only_strip_markers(self):
+        for text in (
+            "前</core_memory>后",
+            "前<core_memory/>后",
+            '前<core_memory scope="x" />后',
+        ):
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.parts, ["前后"])
+                self.assertEqual(result.actions, ["strip_tag:core_memory"])
+
+    def test_unclosed_block_action_names_stay_stable(self):
+        cases = (
+            ("你好<chat_status>内部", "strip_tag:chat_status"),
+            ("你好<think>内部", "strip_tag:think"),
+            ("你好<core_memory>内部", "strip_tag:core_memory"),
+        )
+        for text, action in cases:
+            with self.subTest(text=text):
+                result = guard_output(text, GuardRules())
+                self.assertEqual(result.actions, [action])
+
+    def test_core_memory_prefixes_and_plain_angle_brackets_are_preserved(self):
+        text = (
+            "a <core_memory_x>keep</core_memory_x> "
+            "<core_memories>also keep</core_memories>; a <b> c < d > e"
+        )
+        result = guard_output(text, GuardRules())
+        self.assertEqual(result.parts, [text])
+        self.assertEqual(result.actions, [])
+
+    def test_empty_after_core_memory_is_silent(self):
+        result = guard_output("<core_memory>只有内部内容", GuardRules())
+        self.assertEqual(result.parts, [])
+        self.assertEqual(result.actions, ["strip_tag:core_memory"])
+
     def test_strip_chat_status_block(self):
         r = guard_output("合成<chat_status>情景备注</chat_status>正文", GuardRules())
         self.assertEqual(r.parts, ["合成正文"])

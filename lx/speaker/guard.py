@@ -58,6 +58,13 @@ _CHAT_STATUS_BLOCK_RE = re.compile(
 )
 _CHAT_STATUS_BARE_RE = re.compile(r"</?chat_status\b[^>]*>", re.I)
 
+# —— 整块删除：记忆事实块 ——
+# 与 chat_status 一样，配对内容应整体留在对用户可见文本之外。
+_CORE_MEMORY_BLOCK_RE = re.compile(
+    r"<core_memory\b(?![^>]*?/\s*>)[^>]*>.*?</core_memory\s*>", re.S | re.I
+)
+_CORE_MEMORY_BARE_RE = re.compile(r"</?core_memory\b[^>]*>", re.I)
+
 # —— 没闭合的 block 开标签：从它起到文末全删 ——
 # 为什么：模型回复被截断、或忘了写闭合标签时，状态便签 / 思考内容会原样漏给
 # 用户；block 类（思考块、状态便签）内部都是不该外泄的东西，所以宁可整段砍掉。
@@ -69,6 +76,7 @@ _UNCLOSED_BLOCK_OPEN_RES = (
     ("think", re.compile(r"<reasoning\b[^>]*>", re.I)),
     ("think", re.compile(r"<\|thinking\|>", re.I)),
     ("chat_status", re.compile(r"<chat_status\b[^>]*>", re.I)),
+    ("core_memory", re.compile(r"<core_memory\b[^>]*>", re.I)),
 )
 # 自闭合写法（<chat_status/> 这类）没有正文，不算「没闭合」。
 _SELF_CLOSING_OPEN_RE = re.compile(r"/\s*>$")
@@ -156,15 +164,12 @@ def _strip_control_tags(text: str) -> tuple[str, list[str]]:
         for pat in _THINK_BLOCK_RES:
             out = _sub(pat, "strip_tag:think", out)
         out = _sub(_CHAT_STATUS_BLOCK_RE, "strip_tag:chat_status", out)
+        out = _sub(_CORE_MEMORY_BLOCK_RE, "strip_tag:core_memory", out)
 
         out, unclosed_name = _truncate_unclosed_block(out)
         if unclosed_name is not None:
             changed = True
-            action = (
-                "strip_tag:chat_status"
-                if unclosed_name == "chat_status"
-                else "strip_tag:think"
-            )
+            action = f"strip_tag:{unclosed_name}"
             if action not in actions:
                 actions.append(action)
 
@@ -176,6 +181,7 @@ def _strip_control_tags(text: str) -> tuple[str, list[str]]:
         out = _sub(_REASONING_BARE_RE, "strip_tag:think", out)
         out = _sub(_VERTICAL_THINK_BARE_RE, "strip_tag:think", out)
         out = _sub(_CHAT_STATUS_BARE_RE, "strip_tag:chat_status", out)
+        out = _sub(_CORE_MEMORY_BARE_RE, "strip_tag:core_memory", out)
         out = _sub(_MENTION_BARE_RE, "strip_tag:mention", out)
         out = _sub(_QUOTE_BARE_RE, "strip_tag:quote", out)
         out = _sub(_NEXT_REPLY_BARE_RE, "strip_tag:next_reply", out)
