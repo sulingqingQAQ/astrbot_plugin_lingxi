@@ -344,10 +344,15 @@ class SystemTailHintsTest(unittest.TestCase):
         return asm.build(_key(), _trig(reason="事由{{current_time}}。"),
                          _hist(), {}, cfg).system_tail
 
-    def test_interaction_instructions_always_present(self):
-        out = self._tail({})
-        self.assertIn("Quote", out)
-        self.assertIn("Refuse", out)
+    def test_interaction_instructions_gating(self):
+        """QUOTE-1：## Quote 只在 context.enable_message_id 真时注入；Refuse 恒在。"""
+        off = self._tail({})
+        self.assertNotIn("## Quote", off)
+        self.assertIn("Refuse", off)
+        on = self._tail({"context.enable_message_id": True})
+        self.assertIn("## Quote", on)
+        self.assertIn('#4321', on)          # 示例 id 与真实渲染一致
+        self.assertNotIn("msg12345", on)
 
     def test_mention_part_needs_at_and_sender_id(self):
         out = self._tail({"speech.is_at": True,
@@ -418,7 +423,8 @@ class Txt1GuardsWiringTest(unittest.TestCase):
     def test_old_block_order_unchanged(self):
         out = self._tail({"prompt.style_text": "合成风格",
                           "prompt.glossary_text": "合成词 = 合成解释",
-                          "prompt.members_text": "合成成员"})
+                          "prompt.members_text": "合成成员",
+                          "context.enable_message_id": True})
         blocks = out.split("\n\n")
         idx = lambda frag: next(i for i, b in enumerate(blocks) if frag in b)
         order = ["合成风格", "[名词表]", "[成员档案]", "Quote",

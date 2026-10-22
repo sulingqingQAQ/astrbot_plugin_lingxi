@@ -234,6 +234,8 @@ class DefaultAssembler:
         tags = build_interaction_instructions(
             mention_parse=bool(cfg.get("speech.is_at", False)),
             include_sender_id=bool(cfg.get("context.include_sender_id", True)),
+            # QUOTE-1：历史里没有 #msg_id 时别教模型引用（否则它只能编 id）。
+            quote_parse=bool(cfg.get("context.enable_message_id", False)),
         ).strip()
         if tags:
             blocks.append(tags)

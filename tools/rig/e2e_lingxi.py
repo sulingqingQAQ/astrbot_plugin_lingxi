@@ -1152,7 +1152,7 @@ async def _probe_tags_round(ctx, label, text, reply, *, mid=None):
 
 
 async def _sc_probe_tags_on(ctx):
-    """PROBE_TAGS_ON：speech.is_at 开 + context.enable_message_id 开。"""
+    """PROBE_TAGS_ON（QUOTE-1 回归）：is_at 开 + enable_message_id 开 → 真转 Reply/At。"""
     sent1, reqs1, sys1, hist1 = await _probe_tags_round(
         ctx, "TAGS_ON.quote", "在吗", '<quote id="4321"/>好的', mid=4321)
     assert "## Quote" in sys1, "期望提示词有 ## Quote，实际没有"
@@ -1162,39 +1162,65 @@ async def _sc_probe_tags_on(ctx):
     assert sent1, "期望第一轮发出 1 条，实际 0 条"
     assert sent1[0]["text"] == "好的", (
         "期望 <quote> 只被剥标记、正文发出，实际=%r" % (sent1[0]["text"],))
-    assert sent1[0]["reply"] is None and sent1[0]["at"] == [], (
-        "实测：出站消息段里 reply/at=%r，期望（推断）没有 reply/at 段"
+    assert sent1[0]["reply"] == 4321, (
+        "QUOTE-1：期望 <quote id=\"4321\"/> 变成 reply 段 id=4321，实际=%r"
         % ({"reply": sent1[0]["reply"], "at": sent1[0]["at"]},))
+    segs1 = (sent1[0].get("params") or {}).get("message") or []
+    assert segs1 and segs1[0].get("type") == "reply", (
+        "QUOTE-1：期望引用段排在消息最前面，实际段=%r" % (segs1,))
+    assert str((segs1[0].get("data") or {}).get("id")) == "4321", (
+        "QUOTE-1：期望 reply 段 id=4321，实际=%r" % (segs1[0],))
     assert hist1 and "#4321" in hist1[0], (
         "期望 enable_message_id 打开时聊天记录带 #4321（render.py:25 prefix），实际=%r"
         % (hist1[0] if hist1 else "",))
 
     sent2, reqs2, sys2, hist2 = await _probe_tags_round(
         ctx, "TAGS_ON.mention", "叫我一下", '<mention id="10001"/>你好')
-    _save_evidence(ctx, "PROBE_TAGS_ON")
     assert "## Mention" in sys2, "期望第二轮提示词仍有 ## Mention"
     assert sent2, "期望第二轮发出 1 条，实际 0 条"
-    assert sent2[0]["text"] == "你好", (
+    # 实测：@ 段前面会留一个空格（guard 把标签换成空格，避免两段字粘一起），
+    # 与「只剥标记、不丢字」一致，所以这里只比正文、不比前导空白。
+    assert sent2[0]["text"].strip() == "你好", (
         "期望 <mention> 只被剥标记、正文发出，实际=%r" % (sent2[0]["text"],))
-    assert sent2[0]["at"] == [] and sent2[0]["reply"] is None, (
-        "实测：出站消息段里 at/reply=%r，期望（推断）没有 at/reply 段"
+    assert sent2[0]["at"] == [USER_IN], (
+        "QUOTE-1：期望 <mention id=\"10001\"/> 变成 at 段 qq=10001，实际=%r"
         % ({"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
+    segs2 = (sent2[0].get("params") or {}).get("message") or []
+    assert any(s.get("type") == "at" for s in segs2), (
+        "QUOTE-1：期望出站段里有 at 段，实际=%r" % (segs2,))
+
+    # bot 自己那条的合成 id（bot-<毫秒>）平台上不存在 → 只剥标记，不转 Reply
+    sent3, reqs3, sys3, hist3 = await _probe_tags_round(
+        ctx, "TAGS_ON.bot_id", "再说一句", '<quote id="bot-1792630967"/>好的')
+    _save_evidence(ctx, "PROBE_TAGS_ON")
+    assert sent3, "期望第三轮发出 1 条，实际 0 条"
+    assert sent3[0]["text"] == "好的", (
+        "期望 bot 合成 id 只被剥标记、正文完整，实际=%r" % (sent3[0]["text"],))
+    assert sent3[0]["reply"] is None, (
+        "QUOTE-1：bot 合成 id 不该转成 reply 段，实际=%r" % (sent3[0]["reply"],))
+    segs3 = (sent3[0].get("params") or {}).get("message") or []
+    assert all(s.get("type") != "reply" for s in segs3), (
+        "QUOTE-1：出站段里不该有 reply，实际=%r" % (sent3[0].get("message"),))
 
 
 async def _sc_probe_tags_off(ctx):
-    """PROBE_TAGS_OFF：默认配置（speech.is_at 关 + enable_message_id 关）。"""
+    """PROBE_TAGS_OFF（QUOTE-1 回归）：默认关 → 提示词不教 Quote，也不转 @/引用。"""
     sent1, reqs1, sys1, hist1 = await _probe_tags_round(
         ctx, "TAGS_OFF.quote", "在吗", '<quote id="4321"/>好的', mid=4321)
-    assert "## Quote" in sys1, (
-        "期望 ## Quote 说明段无条件出现（tags.py:65-74），实际没有")
+    assert "## Quote" not in sys1, (
+        "QUOTE-1：enable_message_id 关着时不该注入 ## Quote（历史里没有 #id，"
+        "教了只能编），实际出现了")
     assert "## Mention" not in sys1, (
         "期望 speech.is_at 关着时提示词没有 ## Mention，实际出现了")
     assert sent1 and sent1[0]["text"] == "好的", (
         "期望 <quote> 只被剥标记、正文发出，实际=%r"
         % ([s["text"] for s in sent1],))
-    assert sent1[0]["reply"] is None and sent1[0]["at"] == [], (
-        "实测：出站消息段里 reply/at=%r" % (
-            {"reply": sent1[0]["reply"], "at": sent1[0]["at"]},))
+    # 卡里写的是「转换只看 id 合法性，不依赖 enable_message_id 开关」：
+    # 关着时模型本不该写，但真写了且 id 合法，仍应转成 Reply（这里钉住这条约定）。
+    assert sent1[0]["reply"] == 4321, (
+        "QUOTE-1：引用转换只看 id 合法性、不依赖 enable_message_id，"
+        "期望仍转 reply=4321，实际=%r"
+        % ({"reply": sent1[0]["reply"], "at": sent1[0]["at"]},))
     assert hist1 and "#4321" not in hist1[0], (
         "期望 enable_message_id 关着时聊天记录不带 #id，实际=%r"
         % (hist1[0] if hist1 else ""))
@@ -1206,7 +1232,7 @@ async def _sc_probe_tags_off(ctx):
         "期望 <mention> 只被剥标记、正文发出，实际=%r"
         % ([s["text"] for s in sent2],))
     assert sent2[0]["at"] == [] and sent2[0]["reply"] is None, (
-        "实测：出站消息段里 at/reply=%r" % (
+        "QUOTE-1：speech.is_at 关着时不该转 @，实际=%r" % (
             {"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
 
 

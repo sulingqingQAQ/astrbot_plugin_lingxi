@@ -22,7 +22,11 @@ def format_line(
     stamp = datetime.fromtimestamp(msg.ts, tz).strftime("%m-%d %H:%M")
     name = msg.speaker_name or msg.speaker_id
     who = f"{name}({msg.speaker_id})" if include_sender_id else name
-    prefix = f"#{msg.id} " if show_msg_id else ""
+    # QUOTE-1：bot 自己的消息 id 是本地合成号（``bot-<毫秒>``，brain.py:328），
+    # 平台上不存在；渲染出来只会诱导模型去引一个发不出去的 id，故不给编号。
+    # 转换层另外还会按 ``bot-`` 前缀拒绝一次（双保险）。
+    show_this_id = show_msg_id and not getattr(msg, "is_bot", False)
+    prefix = f"#{msg.id} " if show_this_id else ""
     folded = " ".join(msg.text.split())
     parts: list[str] = []
     if msg.quote_id:

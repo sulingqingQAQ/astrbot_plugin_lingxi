@@ -37,6 +37,13 @@ class Image:
         self.path = path
 
 
+class Reply:
+    """QUOTE-1：引用段的鸭子实现（真实现是 astrbot Reply(id=...)）。"""
+
+    def __init__(self, id="") -> None:
+        self.id = id
+
+
 # -- 假事件 ------------------------------------------------------------------
 
 class FakeEvent:
@@ -1100,3 +1107,164 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -- QUOTE-1：<quote>/<mention> 转成 Reply/At ---------------------------------
+
+class TestInlineRefsToChain(unittest.IsolatedAsyncioTestCase):
+    """适配层：中立结果（quote_id + mentions）→ 平台组件（Reply / At）。"""
+
+    def _handler(self, brain, cfg=None, logs=None, **kw):
+        c = _components(brain=brain,
+                        resolver=FakeResolver(FakeCfg(cfg or {})))
+        params = dict(plain_factory=Plain,
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      reply_factory=Reply,
+                      at_factory=At,
+                      log=(logs.append if logs is not None else None))
+        params.update(kw)
+        return c, EHandlers(c, **params)
+
+    def _finish_with(self, brain, parsed):
+        def _finish(key, trigger, raw):
+            brain.finished.append((key, trigger, raw))
+            return parsed
+        brain.finish = _finish  # type: ignore[method-assign]
+
+    def _event(self, chain=None):
+        ev = _group_event(result=FakeResult(chain=chain or [Plain("模型说了啥")]))
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        return ev
+
+    async def test_quote_becomes_reply_first(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+        c, h = self._handler(brain)
+        ev = self._event([Plain('<quote id="4321"/>好的')])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertIsInstance(chain[0], Reply)
+        self.assertEqual(chain[0].id, "4321")
+        self.assertEqual(chain[1].text, "好的")
+
+    async def test_quote_hash_msg_prefix_normalized(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+        c, h = self._handler(brain)
+        ev = self._event([Plain('<quote id="#msg4321"/>好的')])
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev.get_result().chain[0].id, "4321")
+
+    async def test_mention_becomes_at_when_is_at_on(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="你好", parts=["你好"]))
+        c, h = self._handler(brain, {"speech.is_at": True})
+        ev = self._event([Plain('<mention id="10002"/>你好')])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertIsInstance(chain[0], At)
+        self.assertEqual(chain[0].qq, "10002")
+        self.assertEqual(chain[1].text, "你好")
+
+    async def test_mention_not_converted_when_is_at_off(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="你好", parts=["你好"]))
+        c, h = self._handler(brain, {"speech.is_at": False})
+        ev = self._event([Plain('<mention id="10002"/>你好')])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain], ["Plain"])
+        self.assertEqual(chain[0].text, "你好")
+
+    async def test_multiple_mentions_kept_in_order(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="大家好", parts=["大家好"]))
+        c, h = self._handler(brain, {"speech.is_at": True})
+        ev = self._event([Plain('<mention id="10002"/>和<mention id="10003"/>大家好')])
+        await h.on_decorating_result(ev)
+        qqs = [c0.qq for c0 in ev.get_result().chain if isinstance(c0, At)]
+        self.assertEqual(qqs, ["10002", "10003"])
+
+    async def test_quote_then_mention_then_text_order(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="嗯", parts=["嗯"]))
+        c, h = self._handler(brain, {"speech.is_at": True})
+        ev = self._event([Plain('<quote id="4321"/><mention id="10002"/>嗯')])
+        await h.on_decorating_result(ev)
+        names = [type(c0).__name__ for c0 in ev.get_result().chain]
+        self.assertEqual(names, ["Reply", "At", "Plain"])
+
+    async def test_bot_synthetic_quote_id_not_converted(self):
+        """bot 自己消息的合成 id（bot-<毫秒>）平台上不存在 → 只剥标记、不转 Reply。"""
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+        c, h = self._handler(brain)
+        ev = self._event([Plain('<quote id="bot-1792630967"/>好的')])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain], ["Plain"])
+        self.assertEqual(chain[0].text, "好的")
+
+    async def test_non_numeric_ids_not_converted(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+        c, h = self._handler(brain, {"speech.is_at": True})
+        ev = self._event([Plain('<quote id="abc"/><mention id="x9"/>好的')])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain], ["Plain"])
+
+    async def test_other_components_kept_after_text(self):
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+        c, h = self._handler(brain)
+        img = Image(url="http://x/y.png")
+        ev = self._event([Plain('<quote id="4321"/>好的'), img])
+        await h.on_decorating_result(ev)
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain],
+                         ["Reply", "Plain", "Image"])
+        self.assertIs(chain[2], img)
+
+    async def test_reply_factory_boom_degrades_keeps_text(self):
+        logs: list = []
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="好的", parts=["好的"]))
+
+        def boom(_mid):
+            raise RuntimeError("合成 Reply 构造失败")
+        c, h = self._handler(brain, logs=logs, reply_factory=boom)
+        ev = self._event([Plain('<quote id="4321"/>好的')])
+        await h.on_decorating_result(ev)          # 不抛
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain], ["Plain"])
+        self.assertEqual(chain[0].text, "好的")
+        self.assertTrue(any("Reply" in s for s in logs), logs)
+
+    async def test_at_factory_boom_degrades_keeps_text(self):
+        logs: list = []
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="你好", parts=["你好"]))
+
+        def boom(_uid):
+            raise RuntimeError("合成 At 构造失败")
+        c, h = self._handler(brain, {"speech.is_at": True}, logs=logs,
+                             at_factory=boom)
+        ev = self._event([Plain('<mention id="10002"/>你好')])
+        await h.on_decorating_result(ev)          # 不抛
+        chain = ev.get_result().chain
+        self.assertEqual([type(c0).__name__ for c0 in chain], ["Plain"])
+        self.assertEqual(chain[0].text, "你好")
+        self.assertTrue(any("At" in s for s in logs), logs)
+
+    async def test_only_quote_tag_no_text_stays_silent(self):
+        """只有 <quote> 没有正文 → 沿用现有「空文本」处理：清链 + 停事件，不多发。"""
+        brain = FakeBrain()
+        self._finish_with(brain, _parsed(text="", parts=[]))
+        c, h = self._handler(brain)
+        ev = self._event([Plain('<quote id="4321"/>')])
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev.get_result().chain, [])
+        self.assertEqual(ev.stop_calls, 1)
+        self.assertFalse(brain.reported[-1][3])

@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from ..contracts import Scope
 from ..history.rounds import trim_rounds
+from ..pure.tags import extract_inline_refs
 from .events import is_command, msg_of, session_key_of
 
 
@@ -31,6 +32,20 @@ def _default_text_part_factory(text: str) -> Any:
     from astrbot.core.agent.message import TextPart
 
     return TextPart(text=text).mark_as_temp()
+
+
+def _default_reply_factory(msg_id: str) -> Any:
+    """QUOTE-1：引用段（平台上的「回复某条消息」）。"""
+    from astrbot.core.message.components import Reply
+
+    return Reply(id=msg_id)
+
+
+def _default_at_factory(user_id: str) -> Any:
+    """QUOTE-1：@ 段。"""
+    from astrbot.core.message.components import At
+
+    return At(qq=user_id)
 
 
 def _safe_log(log: Callable[[str], None], msg: str) -> None:
@@ -52,6 +67,8 @@ class EHandlers:
 
     def __init__(self, c: Any, *, plain_factory: Any = None,
                  text_part_factory: Any = None,
+                 reply_factory: Any = None,
+                 at_factory: Any = None,
                  sleep: Any = asyncio.sleep,
                  clock: Callable[[], float] = time.time,
                  busy_ttl: float = 180.0,
@@ -59,6 +76,8 @@ class EHandlers:
         self._c = c
         self._plain_factory = plain_factory or _default_plain_factory
         self._text_part_factory = text_part_factory or _default_text_part_factory
+        self._reply_factory = reply_factory or _default_reply_factory
+        self._at_factory = at_factory or _default_at_factory
         self._sleep = sleep
         self._clock = clock
         self._busy_ttl = busy_ttl
@@ -356,6 +375,19 @@ class EHandlers:
                         raw += getattr(comp, "text", "") or ""
                 except Exception:
                     continue
+            # QUOTE-1：引用/提及的 id 只在标签被剥掉之前拿得到（guard.py:148 会删标签）。
+            parse_mention = False
+            try:
+                parse_mention = bool(
+                    self._c.resolver.resolve(key).get("speech.is_at", False))
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 取 speech.is_at 失败：%r" % (e,))
+            quote_id = None
+            mentions: list = []
+            try:
+                quote_id, mentions = extract_inline_refs(raw, parse_mention)
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 解析引用/提及失败：%r" % (e,))
             parsed = self._c.brain.finish(key, trigger, raw)
             if getattr(parsed, "needs_retry", False):
                 _safe_log(self._log, "[handlers] 需要重试但 E 路径无法重试，已跳过")
@@ -395,8 +427,22 @@ class EHandlers:
                         rest.append(comp)
                 except Exception:
                     continue
+            # QUOTE-1：把中立结果变成平台组件。顺序：引用 → @ → 正文 → 原有非文本段。
+            # guard 会对文字重切/去句号/去 markdown，位置已经对不准，按卡上的退化规则
+            # 把 @ 统一放到正文最前面（宁可挪位置，也不错位或丢字）。
+            refs: list = []
+            if quote_id:
+                try:
+                    refs.append(self._reply_factory(quote_id))
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 构造 Reply 失败：%r" % (e,))
+            for _pos, user_id in mentions:
+                try:
+                    refs.append(self._at_factory(user_id))
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 构造 At 失败：%r" % (e,))
             try:
-                result.chain = [first] + rest
+                result.chain = refs + [first] + rest
             except Exception as e:
                 _safe_log(self._log, "[handlers] 写回 chain 失败：%r" % (e,))
                 return

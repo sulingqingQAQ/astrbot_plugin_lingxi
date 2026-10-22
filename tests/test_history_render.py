@@ -93,6 +93,16 @@ class TestFormatLine(unittest.TestCase):
         self.assertEqual(format_line(m, by_id={}, tz=TZ, include_sender_id=True, show_msg_id=True),
                          "[10-13 09:05] #m12 甲(u1): 你好")
 
+    def test_bot_own_message_has_no_msg_id(self):
+        """QUOTE-1：bot 自己那条的 id 是本地合成号（bot-<毫秒>），不渲染 #id。"""
+        me = mk("bot-1792630967", dt(13, "09:05"), is_bot=True, text="我上次说的")
+        self.assertEqual(
+            format_line(me, by_id={}, tz=TZ, include_sender_id=True, show_msg_id=True),
+            "[10-13 09:05] 甲(u1): 我上次说的")
+        v = build_view([me], cfg(**{"context.enable_message_id": True}), TZ)
+        self.assertNotIn("#bot-", v.text)
+        self.assertNotIn("bot-", v.text)
+
     def test_whitespace_fold(self):
         m = mk("m1", dt(13, "09:05"), text="第\n一  条\t消息")
         self.assertEqual(format_line(m, by_id={}, tz=TZ, include_sender_id=True, show_msg_id=False),

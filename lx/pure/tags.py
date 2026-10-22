@@ -36,6 +36,80 @@ def normalize_quote_id(raw_id: str | None) -> str:
     return quote_id.strip()
 
 
+#: QUOTE-1：bot 自己那条消息在历史里用的合成 id 前缀（brain.py:328 ``bot-<毫秒>``）。
+#: 平台上不存在这种 id，转成 Reply 会让真 NapCat 报错，所以一律不转。
+BOT_ID_PREFIX = "bot-"
+
+
+def _digits_only(value: str) -> bool:
+    return bool(value) and value.isdigit()
+
+
+def valid_quote_target(raw_id: str | None) -> str:
+    """把 ``<quote id="...">`` 里的 id 变成可以发给平台的引用 id；不合法返回空串。
+
+    合法 = 规范化（去 ``#``／去 ``msg`` 前缀）后非空、纯数字、且不是 bot 自己的
+    合成 id。拿不准一律返回空串，由调用方退化成「只剥标记」。
+    """
+    quote_id = normalize_quote_id(raw_id)
+    if not quote_id:
+        return ""
+    if quote_id.lower().startswith(BOT_ID_PREFIX):
+        return ""
+    if not _digits_only(quote_id):
+        return ""
+    return quote_id
+
+
+def valid_mention_target(raw_id: str | None) -> str:
+    """``<mention id="...">`` 的 QQ 号：只接受纯数字串，否则空串。"""
+    if not raw_id:
+        return ""
+    user_id = str(raw_id).strip()
+    return user_id if _digits_only(user_id) else ""
+
+
+def extract_inline_refs(
+    raw: str | None,
+    parse_mention: bool = True,
+) -> tuple[str | None, list[tuple[int, str]]]:
+    """在控制标签被剥掉之前，从模型原始输出里取出引用目标与 @ 目标。
+
+    为什么要在剥之前取：``guard_output`` 的 ``_strip_control_tags`` 会把
+    ``<mention id="x"/>``／``<quote id="x"/>`` 直接删掉，之后就没有 id 了；
+    而 ``At``／``Reply`` 组件要的是 id。
+
+    返回 ``(quote_id, mentions)``：
+
+    - ``quote_id``：规范化后的引用 id（只认**第一个** ``<quote>``）；不合法
+      （空／非纯数字／``bot-`` 合成 id）时为 ``None``。
+    - ``mentions``：``[(raw 里的字符位置, QQ 号)]``，按出现顺序；位置仅供调用方
+      参考——文字后面还会被 guard 重排（去句号／去 markdown／限字数重切），
+      对不上就整批挪到文字最前面，绝不为了对齐而丢字。``parse_mention=False``
+      （``speech.is_at`` 关）时恒为空列表。
+
+    落单的 ``</mention>``／``</quote>``、没写 id 的裸标签都不算目标。
+    """
+    text = raw if isinstance(raw, str) else ""
+    if not text:
+        return None, []
+
+    quote_id: str | None = None
+    match = QUOTE_RE.search(text)
+    if match is not None:
+        target = valid_quote_target(match.group(1))
+        if target:
+            quote_id = target
+
+    mentions: list[tuple[int, str]] = []
+    if parse_mention:
+        for hit in MENTION_RE.finditer(text):
+            user_id = valid_mention_target(hit.group(1))
+            if user_id:
+                mentions.append((hit.start(), user_id))
+    return quote_id, mentions
+
+
 def clean_response_text_for_history(completion_text: str) -> str:
     """把输出里的控制标签清洗成历史记录友好的纯文本。"""
     text = MENTION_RE.sub(r"[At: \1]", completion_text)
@@ -48,8 +122,14 @@ def clean_response_text_for_history(completion_text: str) -> str:
 def build_interaction_instructions(
     mention_parse: bool,
     include_sender_id: bool,
+    quote_parse: bool = True,
 ) -> str:
-    """注入给模型的标签使用说明。"""
+    """注入给模型的标签使用说明。
+
+    QUOTE-1：``## Quote`` 只在 ``quote_parse``（= ``context.enable_message_id``）
+    为真时注入——历史里没有 ``#msg_id`` 时教模型引用就是教它编不存在的 id。
+    ``## Mention`` 条件不变（``speech.is_at`` 且 ``include_sender_id``）。
+    """
     instructions = ""
     if mention_parse and include_sender_id:
         instructions += (
@@ -62,16 +142,17 @@ def build_interaction_instructions(
             "Important: mention tag is NOT a container tag. Do NOT output </mention>."
         )
 
-    instructions += (
-        "\n\n## Quote\n"
-        'When you want to quote/reply to a specific message, place <quote id="msg_id"/> '
-        "at the very beginning of your reply.\n"
-        'For example: <quote id="12345"/> I agree with this!\n'
-        "The msg_id can be found in the chat history after the # symbol (e.g. #msg12345).\n"
-        "You can only quote ONE message per reply. The quote tag MUST be the first thing in your output.\n"
-        "Only use quote when it is meaningful to reference a specific message.\n"
-        "Important: quote tag is NOT a container tag. Do NOT output </quote>."
-    )
+    if quote_parse:
+        instructions += (
+            "\n\n## Quote\n"
+            'When you want to quote/reply to a specific message, place <quote id="msg_id"/> '
+            "at the very beginning of your reply.\n"
+            'For example: <quote id="4321"/> I agree with this!\n'
+            "The msg_id can be found in the chat history after the # symbol (e.g. #4321).\n"
+            "You can only quote ONE message per reply. The quote tag MUST be the first thing in your output.\n"
+            "Only use quote when it is meaningful to reference a specific message.\n"
+            "Important: quote tag is NOT a container tag. Do NOT output </quote>."
+        )
     instructions += (
         "\n\n## Refuse\n"
         "If you decide not to reply, output exactly `<refuse/>` as the entire response.\n"
