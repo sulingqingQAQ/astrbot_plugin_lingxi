@@ -82,6 +82,24 @@ def _system_text(messages) -> str:
     )
 
 
+def _req_summary(reqs) -> "list[dict]":
+    """PROBE-1：把假 LLM 收到的请求压成可读摘要（区分 lingxi 请求 / AstrBot 默认流程请求）。"""
+    out = []
+    for i, req in enumerate(reqs or []):
+        users = _user_texts(req.get("messages"))
+        joined = "\n".join(users)
+        sys_text = _system_text(req.get("messages"))
+        out.append({
+            "i": i,
+            "n_messages": len(req.get("messages") or []),
+            "has_lingxi_trigger_marker": "[触发原因]" in joined,
+            "has_lingxi_history_block": "[聊天记录]" in joined,
+            "has_lingxi_system": "lingxi" in sys_text.lower() or "聊天记录" in sys_text,
+            "last_user_head": (users[-1][:120] if users else ""),
+        })
+    return out
+
+
 # -- 群动作（ACT-1）用的取出工具 -------------------------------------------------
 
 #: ACT-1 加的 12 个工具名（与 plugin_main.py 的 @llm_tool 名一致）
@@ -773,6 +791,441 @@ async def _sc_W3(ctx):
         % ([s["text"] for s in ctx.napcat.sent()],))
 
 
+# -- PROBE-1：①发送失败被记成什么（送达回执） ②<quote>/<mention> 出站发出去什么 ----
+#
+# 只测不改：所有观测值先 print 出来，断言只用来固定「观测到的行为」，
+# 不为「让它通过」放宽或改断言。假 NapCat 的失败注入开关见
+# tools/rig/fake_napcat.py::fail_next_send（"failed" / "drop"）。
+
+
+def _diag_path() -> str:
+    """插件诊断 JSONL 路径（plugin_main.py:154-155：<data_dir>/diag/events.jsonl）。"""
+    cands = glob.glob(os.path.join(ROOT, "data", "**", "diag", "events.jsonl"),
+                      recursive=True)
+    return cands[0] if cands else ""
+
+
+def _diag_events() -> "list[dict]":
+    """读诊断 JSONL（每行一条事件；正文 text/raw 不落文件，recorder.py:239-245）。"""
+    path = _diag_path()
+    if not path:
+        return []
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    out.append(obj)
+    except OSError:
+        return []
+    return out
+
+
+class _LogCursor:
+    """按行切片 AstrBot 日志：只取「本场景开始之后」新写出来的部分。"""
+
+    def __init__(self, path):
+        self._path = path
+        self._n = len(self._lines())
+
+    def _lines(self):
+        try:
+            with open(self._path, "rb") as f:
+                return f.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+
+    def since(self) -> str:
+        return "\n".join(self._lines()[self._n:])
+
+
+def _dump(label, value) -> None:
+    """把观测值打成一行 JSON（原始证据直接落在 e2e 日志里）。"""
+    print("PROBE %s: %s" % (label, json.dumps(value, ensure_ascii=False)),
+          flush=True)
+
+
+PROBE_EVIDENCE_DIR = os.path.join(ROOT, "probe_evidence")
+
+
+def _save_evidence(ctx, label: str) -> None:
+    """把本场景的 AstrBot 日志与诊断 JSONL 各存一份（组一换就被 wb 截断，得当场存）。"""
+    try:
+        os.makedirs(PROBE_EVIDENCE_DIR, exist_ok=True)
+    except OSError as e:
+        print("PROBE %s.evidence: <建目录失败 %r>" % (label, e), flush=True)
+        return
+    try:
+        with open(ctx.proc.log_path, "rb") as src:
+            data = src.read()
+        dst = os.path.join(PROBE_EVIDENCE_DIR, label + ".astrbot.log")
+        with open(dst, "wb") as out:
+            out.write(data)
+        print("PROBE %s.astrbot_log: %s" % (label, dst), flush=True)
+    except OSError as e:
+        print("PROBE %s.astrbot_log: <存失败 %r>" % (label, e), flush=True)
+    src_path = _diag_path()
+    if src_path:
+        try:
+            with open(src_path, "rb") as src:
+                data = src.read()
+            dst = os.path.join(PROBE_EVIDENCE_DIR, label + ".diag.jsonl")
+            with open(dst, "wb") as out:
+                out.write(data)
+            print("PROBE %s.diag_jsonl: %s" % (label, dst), flush=True)
+        except OSError as e:
+            print("PROBE %s.diag_jsonl: <存失败 %r>" % (label, e), flush=True)
+
+
+def _outbound(sent) -> "list[dict]":
+    """假 NapCat 收到的发消息调用的关键字段 + 原始 message 段数组。"""
+    return [{
+        "action": s.get("action"),
+        "text": s.get("text"),
+        "at": s.get("at"),
+        "reply": s.get("reply"),
+        "message": (s.get("params") or {}).get("message"),
+    } for s in sent]
+
+
+async def _sc_probe_send_ok(ctx):
+    """PROBE_SEND_OK：成功发送的对照组（作为三项观测值的基线）。"""
+    log = _LogCursor(ctx.proc.log_path)
+    n0 = len(_diag_events())
+    ctx.llm.script(["成功回复"])
+    await ctx.napcat.send_private(USER_IN, "在吗甲")
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(2)
+    sent = ctx.napcat.sent()
+    evs = [e for e in _diag_events()[n0:] if e.get("kind") in ("outcome", "gate")]
+    text_log = log.since()
+    _dump("OK.outbound", _outbound(sent))
+    _dump("OK.napcat_replies", ctx.napcat.replies())
+    _dump("OK.diag", evs)
+    _dump("OK.log_failed_to_send_count",
+          text_log.count("Failed to send the message chain"))
+    _save_evidence(ctx, "PROBE_SEND_OK")
+    assert sent, "期望假 NapCat 收到 1 次发送，实际 0 次（日志尾=%r）" % (text_log[-500:],)
+    assert sent[-1]["text"] == "成功回复", (
+        "期望发出「成功回复」，实际=%r" % ([s["text"] for s in sent],))
+    outcomes = [e for e in evs if e.get("kind") == "outcome"]
+    assert outcomes and outcomes[-1].get("result") == "delivered", (
+        "期望成功发送时诊断 outcome.result=delivered，实际=%r" % (evs,))
+    assert "Failed to send the message chain" not in text_log, (
+        "期望成功发送时日志没有 Failed to send the message chain，实际有 %d 处"
+        % text_log.count("Failed to send the message chain"))
+
+
+async def _sc_probe_send_fail(ctx):
+    """PROBE_SEND_FAIL：假 NapCat 回 status=failed/retcode=1200 → 记成什么。"""
+    await asyncio.sleep(7)  # 等上一场景成功回复起的硬冷却过去（否则本条在闸门就被 DEFER）
+    log = _LogCursor(ctx.proc.log_path)
+    n0 = len(_diag_events())
+
+    # ① 让这一次发送失败
+    ctx.napcat.fail_next_send("failed", times=1)
+    ctx.llm.script(["失败回复甲"])
+    await ctx.napcat.send_private(USER_IN, "在吗乙")
+    await ctx.napcat.wait_sent(1, 30)  # 失败也照旧记下「模型想发什么」
+    await asyncio.sleep(3)             # 等 respond 阶段报错 + on_after_sent + report
+    sent = ctx.napcat.sent()
+    replies = ctx.napcat.replies()
+    evs = [e for e in _diag_events()[n0:] if e.get("kind") in ("outcome", "gate")]
+    text_log = log.since()
+    _dump("FAIL.outbound", _outbound(sent))
+    _dump("FAIL.outbound_count", len(sent))
+    _dump("FAIL.llm_requests", _req_summary(ctx.llm.requests()))
+    _dump("FAIL.napcat_replies", replies)
+    _dump("FAIL.diag", evs)
+    _dump("FAIL.log_failed_to_send_count",
+          text_log.count("Failed to send the message chain"))
+    _dump("FAIL.log_ActionFailed", "ActionFailed" in text_log)
+    if "Failed to send the message chain" in text_log:
+        lines = text_log.splitlines()
+        for i, ln in enumerate(lines):
+            if "Failed to send the message chain" in ln:
+                _dump("FAIL.log_around_failure",
+                      lines[max(0, i - 2):i + 8])
+                break
+
+    # ② 失败之后马上再来一条：硬冷却只会在「当成已送达」时才起（brain.py:340-346）
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    n1 = len(_diag_events())
+    ctx.llm.script(["第二轮回复"])
+    await ctx.napcat.send_private(USER_IN, "在吗丙")
+    await asyncio.sleep(3)
+    evs2 = [e for e in _diag_events()[n1:] if e.get("kind") == "gate"]
+    _dump("FAIL.after.gate", evs2)
+    _dump("FAIL.after.llm_request_count", len(ctx.llm.requests()))
+    _dump("FAIL.after.outbound", _outbound(ctx.napcat.sent()))
+
+    # ③ 硬冷却过后再发一条：看失败那条回复有没有进 bot 自己的历史
+    await asyncio.sleep(7)
+    ctx.llm.clear()
+    ctx.napcat.clear()
+    ctx.llm.script(["第三轮回复"])
+    await ctx.napcat.send_private(USER_IN, "在吗丁")
+    reqs = []
+    for _ in range(60):
+        await asyncio.sleep(0.5)
+        reqs = ctx.llm.requests()
+        if reqs:
+            break
+    users = _user_texts(reqs[0].get("messages")) if reqs else []
+    hist = [t for t in users if "[聊天记录]" in t]
+    _dump("FAIL.history_block", hist[0] if hist else "")
+    _dump("FAIL.history_has_failed_reply",
+          any("失败回复甲" in t for t in hist))
+    await asyncio.sleep(2)
+
+    # -- 断言：只固定观测到的行为 --
+    _save_evidence(ctx, "PROBE_SEND_FAIL")
+    assert sent, "期望假 NapCat 收到 1 次发送尝试，实际 0 次"
+    assert any(s["text"] == "失败回复甲" for s in sent), (
+        "期望失败时也把「模型想发的正文」记下来，实际=%r" % ([s["text"] for s in sent],))
+    assert any(r.get("mode") == "failed" for r in replies), (
+        "期望假 NapCat 确实回过 status=failed，实际回包=%r" % (replies,))
+    assert text_log.count("Failed to send the message chain") >= 1, (
+        "期望 AstrBot 日志出现 Failed to send the message chain，实际没有")
+    outcomes = [e for e in evs if e.get("kind") == "outcome"]
+    assert outcomes, (
+        "期望发送失败后仍写出 outcome 诊断事件（=on_after_sent 触发了），实际没有：%r"
+        % (evs,))
+    assert outcomes[-1].get("result") == "delivered", (
+        "实测：发送失败后诊断 outcome.result=%r（若不是 delivered，说明推断被推翻）"
+        % (outcomes[-1].get("result"),))
+
+
+async def _sc_probe_send_drop(ctx):
+    """PROBE_SEND_DROP：发送途中直接断连（不回包）→ AstrBot 侧等超时后抛 NetworkError。"""
+    await asyncio.sleep(9)  # 等上一轮成功回复起的硬冷却过去，否则消息在闸门就被 DEFER
+    log = _LogCursor(ctx.proc.log_path)
+    n0 = len(_diag_events())
+    ctx.napcat.fail_next_send("drop", times=1)
+    ctx.llm.script(["断连回复"])
+    await ctx.napcat.send_private(USER_IN, "在吗戊")
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(2)
+    _dump("DROP.outbound", _outbound(ctx.napcat.sent()))
+    _dump("DROP.napcat_replies", ctx.napcat.replies())
+    print("PROBE DROP: 等 AstrBot 的 api_timeout_sec=180 超时"
+          "（aiocqhttp_platform_adapter.py:58）…", flush=True)
+    await asyncio.sleep(200)
+    evs = [e for e in _diag_events()[n0:] if e.get("kind") in ("outcome", "gate")]
+    text_log = log.since()
+    _dump("DROP.diag", evs)
+    _dump("DROP.log_failed_to_send_count",
+          text_log.count("Failed to send the message chain"))
+    _dump("DROP.log_NetworkError", "NetworkError" in text_log)
+    _dump("DROP.log_timeout", "WebSocket API call timeout" in text_log)
+    _dump("DROP.napcat_errors", ctx.napcat.errors())
+    _save_evidence(ctx, "PROBE_SEND_DROP")
+    assert ctx.napcat.replies() and ctx.napcat.replies()[-1].get("mode") == "drop", (
+        "期望假 NapCat 对这次发送执行了断连注入，实际回包=%r"
+        % (ctx.napcat.replies(),))
+    assert text_log.count("Failed to send the message chain") >= 1, (
+        "期望断连后 AstrBot 日志出现 Failed to send the message chain，实际没有；"
+        "日志尾=%r" % (text_log[-800:],))
+
+
+async def _sc_probe_group_fail(ctx):
+    """PROBE_GROUP_FAIL：群里发送（send_group_msg 通道）回 status=failed 时被记成什么。"""
+    log = _LogCursor(ctx.proc.log_path)
+    n0 = len(_diag_events())
+    ctx.napcat.fail_next_send("failed", times=1)
+    ctx.llm.script(["群里失败回复"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗庚", at_self=True)
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(3)
+    sent = ctx.napcat.sent()
+    replies = ctx.napcat.replies()
+    evs = [e for e in _diag_events()[n0:] if e.get("kind") in ("outcome", "gate")]
+    text_log = log.since()
+    _dump("GROUP_FAIL.outbound", _outbound(sent))
+    _dump("GROUP_FAIL.napcat_replies", replies)
+    _dump("GROUP_FAIL.diag", evs)
+    _dump("GROUP_FAIL.log_failed_to_send_count",
+          text_log.count("Failed to send the message chain"))
+    _dump("GROUP_FAIL.log_ActionFailed", "ActionFailed" in text_log)
+    _save_evidence(ctx, "PROBE_GROUP_FAIL")
+    assert sent, "期望假 NapCat 收到 1 次群发送尝试，实际 0 次"
+    assert sent[-1]["action"] == "send_group_msg", (
+        "期望群聊走 send_group_msg，实际=%r" % (sent[-1]["action"],))
+    assert any(r.get("mode") == "failed" for r in replies), (
+        "期望假 NapCat 对 send_group_msg 回过 status=failed，实际回包=%r" % (replies,))
+    assert text_log.count("Failed to send the message chain") >= 1, (
+        "期望群发送失败时 AstrBot 日志出现 Failed to send the message chain，实际没有")
+    outcomes = [e for e in evs if e.get("kind") == "outcome"]
+    assert outcomes and outcomes[-1].get("result") == "delivered", (
+        "实测：群发送失败后诊断 outcome.result=%r（若不是 delivered，说明推断被推翻）"
+        % ([e.get("result") for e in outcomes],))
+
+
+async def _sc_probe_group_drop(ctx):
+    """PROBE_GROUP_DROP：群里发送途中断连（不回包）→ 同私聊，等超时后报错。"""
+    await asyncio.sleep(9)  # 等上一场景成功回复起的硬冷却过去
+    log = _LogCursor(ctx.proc.log_path)
+    n0 = len(_diag_events())
+    ctx.napcat.fail_next_send("drop", times=1)
+    ctx.llm.script(["群里断连回复"])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗辛", at_self=True)
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(2)
+    _dump("GROUP_DROP.outbound", _outbound(ctx.napcat.sent()))
+    _dump("GROUP_DROP.napcat_replies", ctx.napcat.replies())
+    print("PROBE GROUP_DROP: 等 AstrBot 的 api_timeout_sec=180 超时…", flush=True)
+    await asyncio.sleep(200)
+    evs = [e for e in _diag_events()[n0:] if e.get("kind") in ("outcome", "gate")]
+    text_log = log.since()
+    _dump("GROUP_DROP.diag", evs)
+    _dump("GROUP_DROP.log_failed_to_send_count",
+          text_log.count("Failed to send the message chain"))
+    _dump("GROUP_DROP.log_NetworkError", "NetworkError" in text_log)
+    _dump("GROUP_DROP.log_timeout", "WebSocket API call timeout" in text_log)
+    _save_evidence(ctx, "PROBE_GROUP_DROP")
+    assert ctx.napcat.replies() and ctx.napcat.replies()[-1].get("mode") == "drop", (
+        "期望假 NapCat 对这次群发送执行了断连注入，实际回包=%r"
+        % (ctx.napcat.replies(),))
+    assert text_log.count("Failed to send the message chain") >= 1, (
+        "期望群发送断连后 AstrBot 日志出现 Failed to send the message chain，实际没有；"
+        "日志尾=%r" % (text_log[-800:],))
+
+
+# -- PROBE-1 探针 B：<quote> / <mention> 出站 --
+
+
+async def _probe_tags_round(ctx, label, text, reply, *, mid=None):
+    """发一条群消息（@bot）→ 假 LLM 按剧本回 → 打印提示词与假 NapCat 收到的段。"""
+    ctx.napcat.clear()
+    ctx.llm.clear()
+    ctx.llm.script([reply])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, text, at_self=True,
+                                message_id=mid)
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(2)
+    sent = ctx.napcat.sent()
+    reqs = ctx.llm.requests()
+    sys_text = _system_text(reqs[0].get("messages")) if reqs else ""
+    users = _user_texts(reqs[0].get("messages")) if reqs else []
+    hist = [t for t in users if "[聊天记录]" in t]
+    _dump(label + ".outbound", _outbound(sent))
+    _dump(label + ".system_has_tags", {
+        "Mention": "## Mention" in sys_text,
+        "Quote": "## Quote" in sys_text,
+        "Refuse": "## Refuse" in sys_text,
+    })
+    if "## Quote" in sys_text:
+        i = sys_text.index("## Quote")
+        _dump(label + ".system_quote_section", sys_text[i:i + 420])
+    if "## Mention" in sys_text:
+        i = sys_text.index("## Mention")
+        _dump(label + ".system_mention_section", sys_text[i:i + 420])
+    _dump(label + ".history_block", hist[0] if hist else "")
+    return sent, reqs, sys_text, hist
+
+
+async def _sc_probe_tags_on(ctx):
+    """PROBE_TAGS_ON：speech.is_at 开 + context.enable_message_id 开。"""
+    sent1, reqs1, sys1, hist1 = await _probe_tags_round(
+        ctx, "TAGS_ON.quote", "在吗", '<quote id="4321"/>好的', mid=4321)
+    assert "## Quote" in sys1, "期望提示词有 ## Quote，实际没有"
+    assert "## Mention" in sys1, (
+        "期望 speech.is_at 打开时提示词有 ## Mention，实际没有（system 尾 400 字=%r）"
+        % (sys1[-400:],))
+    assert sent1, "期望第一轮发出 1 条，实际 0 条"
+    assert sent1[0]["text"] == "好的", (
+        "期望 <quote> 只被剥标记、正文发出，实际=%r" % (sent1[0]["text"],))
+    assert sent1[0]["reply"] is None and sent1[0]["at"] == [], (
+        "实测：出站消息段里 reply/at=%r，期望（推断）没有 reply/at 段"
+        % ({"reply": sent1[0]["reply"], "at": sent1[0]["at"]},))
+    assert hist1 and "#4321" in hist1[0], (
+        "期望 enable_message_id 打开时聊天记录带 #4321（render.py:25 prefix），实际=%r"
+        % (hist1[0] if hist1 else "",))
+
+    sent2, reqs2, sys2, hist2 = await _probe_tags_round(
+        ctx, "TAGS_ON.mention", "叫我一下", '<mention id="10001"/>你好')
+    _save_evidence(ctx, "PROBE_TAGS_ON")
+    assert "## Mention" in sys2, "期望第二轮提示词仍有 ## Mention"
+    assert sent2, "期望第二轮发出 1 条，实际 0 条"
+    assert sent2[0]["text"] == "你好", (
+        "期望 <mention> 只被剥标记、正文发出，实际=%r" % (sent2[0]["text"],))
+    assert sent2[0]["at"] == [] and sent2[0]["reply"] is None, (
+        "实测：出站消息段里 at/reply=%r，期望（推断）没有 at/reply 段"
+        % ({"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
+
+
+async def _sc_probe_tags_off(ctx):
+    """PROBE_TAGS_OFF：默认配置（speech.is_at 关 + enable_message_id 关）。"""
+    sent1, reqs1, sys1, hist1 = await _probe_tags_round(
+        ctx, "TAGS_OFF.quote", "在吗", '<quote id="4321"/>好的', mid=4321)
+    assert "## Quote" in sys1, (
+        "期望 ## Quote 说明段无条件出现（tags.py:65-74），实际没有")
+    assert "## Mention" not in sys1, (
+        "期望 speech.is_at 关着时提示词没有 ## Mention，实际出现了")
+    assert sent1 and sent1[0]["text"] == "好的", (
+        "期望 <quote> 只被剥标记、正文发出，实际=%r"
+        % ([s["text"] for s in sent1],))
+    assert sent1[0]["reply"] is None and sent1[0]["at"] == [], (
+        "实测：出站消息段里 reply/at=%r" % (
+            {"reply": sent1[0]["reply"], "at": sent1[0]["at"]},))
+    assert hist1 and "#4321" not in hist1[0], (
+        "期望 enable_message_id 关着时聊天记录不带 #id，实际=%r"
+        % (hist1[0] if hist1 else ""))
+
+    sent2, reqs2, sys2, hist2 = await _probe_tags_round(
+        ctx, "TAGS_OFF.mention", "叫我一下", '<mention id="10001"/>你好')
+    _save_evidence(ctx, "PROBE_TAGS_OFF")
+    assert sent2 and sent2[0]["text"] == "你好", (
+        "期望 <mention> 只被剥标记、正文发出，实际=%r"
+        % ([s["text"] for s in sent2],))
+    assert sent2[0]["at"] == [] and sent2[0]["reply"] is None, (
+        "实测：出站消息段里 at/reply=%r" % (
+            {"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
+
+
+def _probe_fail_config():
+    """PROBE-A：私聊接管 + 群聊白名单 + 硬冷却 6 秒（用冷却反证「失败也被记成已送达」）。"""
+    cfg = _group1_config()
+    cfg["private"]["trigger"]["reply_cooldown_seconds"] = 6
+    cfg["group"] = {
+        "whitelist": {"enabled": True, "ids": [GROUP_ID]},
+        "activity": {"enabled": False},
+        "trigger": {"interval_count": 0, "direct_aggregate_seconds": 1},
+    }
+    return cfg
+
+
+def _probe_tags_on_config():
+    """PROBE-B 开：群聊 + speech.is_at 开 + context.enable_message_id 开。"""
+    cfg = _group3_config()
+    cfg["group"]["speech"] = {"is_at": True}
+    cfg["group"]["context"] = {"enable_message_id": True}
+    return cfg
+
+
+PROBE_GROUPS = [
+    ("PROBE-A 发送失败（私聊接管 + 群白名单 + 硬冷却 6 秒）", _probe_fail_config,
+     [("PROBE_SEND_OK", _sc_probe_send_ok),
+      ("PROBE_SEND_FAIL", _sc_probe_send_fail),
+      ("PROBE_GROUP_FAIL", _sc_probe_group_fail),
+      ("PROBE_SEND_DROP", _sc_probe_send_drop)]),
+    ("PROBE-A' 群聊断连（单独一轮，断连会掐死整条 ws 连接）", _probe_fail_config,
+     [("PROBE_GROUP_DROP", _sc_probe_group_drop)]),
+    ("PROBE-B 标签（is_at 开 + message_id 开）", _probe_tags_on_config,
+     [("PROBE_TAGS_ON", _sc_probe_tags_on)]),
+    ("PROBE-B 标签（默认关）", _group3_config,
+     [("PROBE_TAGS_OFF", _sc_probe_tags_off)]),
+]
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
@@ -786,7 +1239,7 @@ GROUPS = [
     ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
     ("组6定时唤醒（私聊开 / 群里关）", _wake_config,
      [("W1", _sc_W1), ("W2", _sc_W2), ("W3", _sc_W3)]),
-]
+] + PROBE_GROUPS
 
 
 # -- 组运行 --------------------------------------------------------------------

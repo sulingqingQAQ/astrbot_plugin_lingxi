@@ -79,6 +79,10 @@ class FakeNapCat:
         self._overrides: Dict[str, object] = {}
         self._errors: List[str] = []
         self._sent_event = asyncio.Event()
+        # PROBE-1：发送失败注入队列（"failed" = 回 status=failed；"drop" = 直接断连不回包）
+        self._fail_next: List[str] = []
+        # PROBE-1：假 NapCat 回给服务端的每一个应答帧（原始证据）
+        self._replies: List[dict] = []
 
     # -- 生命周期 --
 
@@ -243,9 +247,34 @@ class FakeNapCat:
                 "ts": int(time.time()),
             })
             self._sent_event.set()
+        # PROBE-1：注入的发送失败在「已经记下这次发送」之后才生效，
+        # 所以断言侧仍能看到模型到底想发什么。
+        fail_mode = None
+        if _is_send_action(action) and self._fail_next:
+            fail_mode = self._fail_next.pop(0)
+        if fail_mode == "drop":
+            # 不回包，直接断开：服务端那次 API 调用拿不到 echo 应答。
+            self._replies.append({"action": action, "echo": echo,
+                                  "frame": None, "mode": "drop"})
+            ws, self._ws = self._ws, None
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception as e:  # noqa: BLE001 - 记录即可
+                    self._errors.append(f"fail_drop.close: {e!r}")
+            return
         data = self._default_data(action, params)
-        await self._send({"status": "ok", "retcode": 0,
-                          "data": data, "echo": echo})
+        if fail_mode == "failed":
+            frame = {"status": "failed", "retcode": 1200,
+                     "data": None, "echo": echo}
+            self._replies.append({"action": action, "echo": echo,
+                                  "frame": frame, "mode": "failed"})
+            await self._send(frame)
+            return
+        frame = {"status": "ok", "retcode": 0, "data": data, "echo": echo}
+        self._replies.append({"action": action, "echo": echo,
+                              "frame": frame, "mode": "ok"})
+        await self._send(frame)
 
     def _default_data(self, action: str, params: dict) -> dict:
         override = self._overrides.get(action)
@@ -311,6 +340,23 @@ class FakeNapCat:
     def errors(self) -> List[str]:
         return list(self._errors)
 
+    def replies(self) -> List[dict]:
+        """假 NapCat 回给服务端的应答帧（PROBE-1 原始证据：证明了回的是什么）。"""
+        return list(self._replies)
+
+    def fail_next_send(self, mode: str = "failed", times: int = 1) -> None:
+        """让接下来 times 次「发消息」调用失败（PROBE-1）。
+
+        mode="failed"：照常记下这次发送，然后回 ``{"status":"failed","retcode":1200}``
+        （aiocqhttp/api_impl.py:37-38 会因此抛 ActionFailed）。
+        mode="drop"：照常记下这次发送，但不回包、直接断开连接
+        （服务端那次 API 调用等到超时，抛 NetworkError）。
+        """
+        if mode not in ("failed", "drop"):
+            raise ValueError("mode must be 'failed' or 'drop'")
+        for _ in range(max(0, int(times))):
+            self._fail_next.append(mode)
+
     def set_response(self, action: str,
                      data: "dict | Callable[[dict], dict]") -> None:
         self._overrides[action] = data
@@ -335,6 +381,8 @@ class FakeNapCat:
         self._calls.clear()
         self._sent.clear()
         self._sent_event.clear()
+        self._replies.clear()
+        self._fail_next.clear()
 
 
 __all__ = ["FakeNapCat"]
