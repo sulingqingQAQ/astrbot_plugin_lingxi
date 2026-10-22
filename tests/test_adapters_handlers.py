@@ -65,6 +65,9 @@ class FakeEvent:
         self._send_plan = list(send_plan or [])
         # AstrBot 的鸭子字段：失败时基类 send() 被跳过，它会留在 False
         self._has_send_oper = False
+        # SEND-1 修订：公开 API should_call_llm 的鸭子实现（astr_message_event.py:371-377）
+        self.call_llm = False
+        self.should_call_llm_calls = []
 
     def get_group_id(self):
         return self._group_id
@@ -91,6 +94,11 @@ class FakeEvent:
 
     def stop_event(self):
         self.stop_calls += 1
+
+    def should_call_llm(self, call_llm):
+        """SEND-1 修订：AstrBot 公开 API，只置 self.call_llm（:377）。"""
+        self.should_call_llm_calls.append(call_llm)
+        self.call_llm = call_llm
 
     def request_llm(self, **kw):
         self.request_calls.append(kw)
@@ -130,6 +138,46 @@ class FrozenEvent(FakeEvent):
 
 class PinBoomEvent(FakeEvent):
     """SEND-1：能包装 send，但不许改 _has_send_oper（模拟字段被改名 / 设只读）。"""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        object.__setattr__(self, "_pin_boom", True)
+
+    def __setattr__(self, name, value):
+        if name == "_has_send_oper" and self.__dict__.get("_pin_boom"):
+            raise AttributeError("合成：本 event 不让改 _has_send_oper")
+        super().__setattr__(name, value)
+
+
+class NoApiEvent(FakeEvent):
+    """SEND-1 修订：老版本 AstrBot 没有 should_call_llm 这个方法。"""
+
+    def __getattribute__(self, name):
+        if name == "should_call_llm":
+            raise AttributeError("合成：老版本 AstrBot 没有 should_call_llm")
+        return super().__getattribute__(name)
+
+
+class ApiBoomEvent(FakeEvent):
+    """SEND-1 修订：should_call_llm 存在但调用就抛。"""
+
+    def should_call_llm(self, call_llm):
+        raise RuntimeError("合成：should_call_llm 抛了")
+
+
+class NoopApiEvent(FakeEvent):
+    """SEND-1 修订：should_call_llm 存在、不抛，但没真把 call_llm 置 True。
+
+    真实场景：别的插件/未来版本把方法改成空实现，或者只改了个不相关的字段。
+    """
+
+    def should_call_llm(self, call_llm):
+        self.should_call_llm_calls.append(call_llm)
+        # 故意不写 self.call_llm
+
+
+class BothBoomEvent(ApiBoomEvent):
+    """SEND-1 修订：公开 API 抛，退回的私有字段也改不动。"""
 
     def __init__(self, **kw) -> None:
         super().__init__(**kw)
@@ -850,7 +898,7 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         return ev
 
     async def test_SEND1_all_send_ok_reports_true(self):
-        """全部发送成功 → 照旧登记 True，不动事件终止、不动 _has_send_oper。"""
+        """全部发送成功 → 照旧登记 True，不动事件终止、不碰 call_llm/_has_send_oper。"""
         brain = FakeBrain()
         parsed = _parsed(text="a", parts=["a"])
         self._finish_with(brain, parsed)
@@ -861,7 +909,9 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         await h.on_after_sent(ev)
         self.assertTrue(brain.reported[-1][3])
         self.assertEqual(ev.stop_calls, 0)
-        self.assertFalse(ev._has_send_oper)   # 成功路径不越俎代庖
+        self.assertEqual(ev.should_call_llm_calls, [])   # 成功路径不越俎代庖
+        self.assertFalse(ev.call_llm)
+        self.assertFalse(ev._has_send_oper)
 
     async def test_SEND1_send_raises_marks_false_and_reraises(self):
         """一次 send 抛异常 → 标记 False 且异常照常向上抛（不吞）。"""
@@ -877,11 +927,13 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         self.assertIs(ctx.exception, boom)          # 同一个异常，没被换成别的
         self.assertIs(ev.get_extra(SEND_OK_KEY), False)
 
-    async def test_SEND1_failed_send_reports_false_and_pins(self):
-        """失败 → report(delivered=False) + 把 _has_send_oper 钉成 True。
+    async def test_SEND1_failed_send_reports_false_and_blocks_default_llm(self):
+        """失败 → report(delivered=False) + 用公开 API should_call_llm(True) 挡默认 LLM。
 
-        钉标志（而不是 stop_event）是 rig 实测选出来的：停事件会让 respond 跳过
+        挡法（而不是 stop_event）是 rig 实测选出来的：停事件会让 respond 跳过
         clear_result()，残留 chain 会被下一次 ResultDecorate→Respond 再发一遍。
+        挡的时候优先公开 API（置 call_llm，process_stage/stage.py:59 读它），
+        不动私有字段 _has_send_oper。
         """
         brain = FakeBrain()
         parsed = _parsed(text="a", parts=["a"])
@@ -893,7 +945,9 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
             await ev.send([Plain("a")])
         await h.on_after_sent(ev)
         self.assertFalse(brain.reported[-1][3])
-        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.should_call_llm_calls, [True])
+        self.assertTrue(ev.call_llm)
+        self.assertFalse(ev._has_send_oper)   # 公开 API 生效时不吃私有字段
         self.assertEqual(ev.stop_calls, 0)
 
     async def test_SEND1_multi_send_later_fails_marks_false(self):
@@ -909,7 +963,9 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
             await ev.send([Plain("b")])
         await h.on_after_sent(ev)
         self.assertFalse(brain.reported[-1][3])
-        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.should_call_llm_calls, [True])
+        self.assertTrue(ev.call_llm)
+        self.assertFalse(ev._has_send_oper)
         self.assertEqual(ev.stop_calls, 0)
 
     async def test_SEND1_fail_then_ok_still_false(self):
@@ -925,7 +981,7 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         await ev.send([Plain("b")])        # 后一段成功，不能把结论翻回来
         await h.on_after_sent(ev)
         self.assertFalse(brain.reported[-1][3])
-        self.assertTrue(ev._has_send_oper)
+        self.assertTrue(ev.call_llm)
 
     async def test_SEND1_no_double_wrap(self):
         """重复调用不重复包装：包装体还是同一个对象，且 send 只被调一次。"""
@@ -968,14 +1024,70 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(brain.reported[-1][3])
         self.assertEqual(ev.stop_calls, 0)
 
-    async def test_SEND1_pin_raises_degrades(self):
-        """_has_send_oper 改不动（被改名 / 只读）→ 不崩，登记结果照旧是 False。"""
+    async def test_SEND1_no_public_api_falls_back_to_pin(self):
+        """老版本没有 should_call_llm → 退回钉 _has_send_oper（不崩、照样挡住）。"""
         logs: list = []
         brain = FakeBrain()
         parsed = _parsed(text="a", parts=["a"])
         self._finish_with(brain, parsed)
         c, h = self._handler(_components(brain=brain), logs)
-        ev = self._event(cls=PinBoomEvent,
+        ev = self._event(cls=NoApiEvent,
+                         send_plan=[RuntimeError("合成发送失败")])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await h.on_after_sent(ev)          # 不抛
+        self.assertFalse(brain.reported[-1][3])
+        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertTrue(any("should_call_llm" in s for s in logs),
+                        "期望记一行「公开 API 不可用、退回钉字段」日志，实际 %r" % (logs,))
+
+    async def test_SEND1_public_api_raises_falls_back_to_pin(self):
+        """should_call_llm 调用抛 → 退回钉 _has_send_oper（不崩、照样挡住）。"""
+        logs: list = []
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain), logs)
+        ev = self._event(cls=ApiBoomEvent,
+                         send_plan=[RuntimeError("合成发送失败")])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await h.on_after_sent(ev)          # 不抛
+        self.assertFalse(brain.reported[-1][3])
+        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertTrue(any("should_call_llm" in s for s in logs),
+                        "期望记一行 should_call_llm 失败的日志，实际 %r" % (logs,))
+
+    async def test_SEND1_noop_public_api_falls_back_to_pin(self):
+        """should_call_llm 不抛但没真置 call_llm → 仍要退回钉 _has_send_oper。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event(cls=NoopApiEvent,
+                         send_plan=[RuntimeError("合成发送失败")])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await h.on_after_sent(ev)
+        self.assertFalse(brain.reported[-1][3])
+        self.assertEqual(ev.should_call_llm_calls, [True])
+        self.assertFalse(ev.call_llm)          # 空实现没生效
+        self.assertTrue(ev._has_send_oper)     # 所以就退回钉字段
+        self.assertEqual(ev.stop_calls, 0)
+
+    async def test_SEND1_both_blockers_boom_degrades(self):
+        """公开 API 抛 + 私有字段也改不动 → 不崩，登记结果照旧是 False。"""
+        logs: list = []
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain), logs)
+        ev = self._event(cls=BothBoomEvent,
                          send_plan=[RuntimeError("合成发送失败")])
         await h.on_decorating_result(ev)
         with self.assertRaises(RuntimeError):
@@ -985,7 +1097,6 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ev.stop_calls, 0)
         self.assertTrue(any("_has_send_oper" in s for s in logs),
                         "期望记一行钉标志失败日志，实际 %r" % (logs,))
-
 
 if __name__ == "__main__":
     unittest.main()

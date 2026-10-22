@@ -460,8 +460,9 @@ class EHandlers:
 
         SEND-1：这次回复的 send 抛过异常（见 ``_wrap_send``）就登记
         ``delivered=False`` —— brain.report 对 False 的既有语义是「不记 bot 历史、
-        不起硬冷却、不确认便签、诊断记 undelivered」；同时把 AstrBot 的
-        ``_has_send_oper`` 钉成 True，挡住 ProcessStage 的默认 LLM 兜底分支。
+        不起硬冷却、不确认便签、诊断记 undelivered」；同时挡住 ProcessStage 的
+        默认 LLM 兜底分支：先用公开 API ``event.should_call_llm(True)``
+        （`astr_message_event.py:372`），不可用时退回钉 ``_has_send_oper``。
 
         为什么钉标志而不是 ``stop_event()``（两种都试过，rig 实测）：停事件会让
         respond 提前返回、跳过它自己的 ``clear_result()``（respond/stage.py:352），
@@ -497,11 +498,28 @@ class EHandlers:
                 # 发送失败时基类 send() 被跳过，_has_send_oper 留在 False
                 # （astr_message_event.py:500），ProcessStage 就会再跑一轮默认
                 # LLM、补一句不带任何 lingxi 注入的回复（SEND-2 实证）。
+                #
+                # 优先用公开 API should_call_llm(True)（astr_message_event.py:371-377，
+                # 置 call_llm=True）；ProcessStage 的门槛正是
+                # `not event._has_send_oper and event.is_at_or_wake_command
+                #  and not event.call_llm`（process_stage/stage.py:56-59），
+                # 走公开 API 升级后不会静默失效。它不存在/调用抛异常/没真把
+                # call_llm 置 True 时，才退回钉私有字段 _has_send_oper。
+                blocked = False
                 try:
-                    event._has_send_oper = True
+                    event.should_call_llm(True)
                 except Exception as e:
                     _safe_log(self._log,
-                              "[handlers] 置 _has_send_oper 失败：%r" % (e,))
+                              "[handlers] should_call_llm(True) 不可用，"
+                              "退回钉 _has_send_oper：%r" % (e,))
+                else:
+                    blocked = getattr(event, "call_llm", None) is True
+                if not blocked:
+                    try:
+                        event._has_send_oper = True
+                    except Exception as e:
+                        _safe_log(self._log,
+                                  "[handlers] 置 _has_send_oper 失败：%r" % (e,))
             try:
                 event.set_extra("lingxi.turn", None)
             except Exception:
