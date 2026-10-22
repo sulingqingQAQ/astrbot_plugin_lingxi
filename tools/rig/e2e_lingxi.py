@@ -33,7 +33,8 @@ from tools.rig.fake_llm import FakeLLM  # noqa: E402
 from tools.rig.fake_napcat import FakeNapCat  # noqa: E402
 from tools.rig.rig_config import install_plugin, prepare_root  # noqa: E402
 
-ROOT = r"F:\Gemini\agent临时测试目录\claude\astrbot_rig_lingxi"  # 我自己的专区（原先误写在 dsh 专区下）
+ROOT = (os.environ.get("LINGXI_RIG_ROOT")
+        or r"F:\Gemini\agent临时测试目录\claude\astrbot_rig_lingxi")  # 我自己的专区（原先误写在 dsh 专区下）
 BASE_CMD_CONFIG = (
     r"F:\Gemini\agent临时测试目录\claude\astrbot_test_root\data\cmd_config.json"
 )
@@ -1191,6 +1192,194 @@ async def _sc_probe_tags_off(ctx):
             {"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
 
 
+# -- SEND-2：失败后为什么多跑一轮默认 LLM（只读打点 + 反事实） ------------------
+
+#: SEND-2 用的 rig 专用打点插件（只读 event 状态，见 probe_plugin/main.py）
+SEND2_PROBE_SRC = os.path.join(_HERE, "probe_plugin")
+SEND2_PROBE_NAME = "send2_probe_plugin"
+
+
+def _send2_log_path():
+    """打点 jsonl 的绝对路径（插件默认也写这里：ROOT = 插件目录上三级）。"""
+    return os.path.join(ROOT, "send2_probe.jsonl")
+
+
+def _send2_pin_path():
+    """反事实实验开关：文件存在 → 插件在发送后钩子里把 _has_send_oper 置 True。"""
+    return os.path.join(ROOT, "send2_probe_pin.flag")
+
+
+def _send2_reset(pin=False):
+    """清掉上一次场景的打点与钉子（同组内多个场景复用同一个 AstrBot 实例）。"""
+    try:
+        os.remove(_send2_log_path())
+    except OSError:
+        pass
+    try:
+        os.remove(_send2_pin_path())
+    except OSError:
+        pass
+    if pin:
+        with open(_send2_pin_path(), "w", encoding="utf-8", newline="\n") as f:
+            f.write("pin\n")
+
+
+def _send2_rows():
+    rows = []
+    try:
+        with open(_send2_log_path(), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    rows.append(obj)
+    except OSError:
+        return []
+    return rows
+
+
+def _save_probe_evidence(label):
+    """把打点 jsonl 原样存一份（组一换 ROOT/data 就被清，得当场存）。"""
+    try:
+        os.makedirs(PROBE_EVIDENCE_DIR, exist_ok=True)
+        dst = os.path.join(PROBE_EVIDENCE_DIR, label + ".probe.jsonl")
+        with open(_send2_log_path(), encoding="utf-8", errors="replace") as f:
+            data = f.read()
+        with open(dst, "w", encoding="utf-8", newline="\n") as out:
+            out.write(data)
+        print("PROBE %s.probe_jsonl: %s" % (label, dst), flush=True)
+    except OSError as e:
+        print("PROBE %s.probe_jsonl: <存失败 %r>" % (label, e), flush=True)
+
+
+def _send2_brief(rows):
+    """压成好读的形状：只留 SEND-2 关心的钩子 + 关键状态 + 栈首（谁调用的）。"""
+    keys = ("hook", "_has_send_oper", "call_llm", "is_at_or_wake_command",
+            "stopped", "result_none", "lingxi_turn", "pin")
+    out = []
+    for r in rows:
+        if r.get("hook") not in ("llm_request", "after_sent", "pin_has_send_oper"):
+            continue
+        item = {k: r.get(k) for k in keys}
+        item["eid"] = r.get("eid")
+        stack = r.get("stack") or []
+        item["caller"] = stack[0] if stack else ""
+        out.append(item)
+    return out
+
+
+async def _sc_send2_ok(ctx):
+    """SEND2_OK：成功发送对照组——发送后 _has_send_oper=True，且全程只有 1 次 LLM 请求。"""
+    await asyncio.sleep(7)  # 等上一场景起的硬冷却过去
+    _send2_reset()
+    ctx.llm.script(["成功回复甲"])
+    await ctx.napcat.send_private(USER_IN, "在吗甲")
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(3)
+    rows = _send2_rows()
+    _dump("SEND2_OK.probe", _send2_brief(rows))
+    _dump("SEND2_OK.llm_requests", _req_summary(ctx.llm.requests()))
+    _dump("SEND2_OK.outbound", _outbound(ctx.napcat.sent()))
+    _save_evidence(ctx, "SEND2_OK")
+    llm_rows = [r for r in rows if r.get("hook") == "llm_request"]
+    after = [r for r in rows if r.get("hook") == "after_sent"]
+    _save_probe_evidence("SEND2_OK")
+    assert llm_rows, (
+        "期望打点插件在 OnLLMRequestEvent 记到请求（插件没装上？），实际 0 条：%r"
+        % (rows,))
+    assert after, "期望打点插件在 OnAfterMessageSentEvent 记到一条，实际 0 条"
+    assert after[0].get("_has_send_oper") is True, (
+        "实测：成功发送后 _has_send_oper=%r（若为 False，说明分叉点推断被推翻）"
+        % (after[0].get("_has_send_oper"),))
+    assert len(ctx.llm.requests()) == 1, (
+        "期望成功发送只有 1 次 LLM 请求，实际 %d 次"
+        % (len(ctx.llm.requests()),))
+
+
+async def _sc_send2_fail(ctx):
+    """SEND2_FAIL：失败注入后，看发送后钩子里的 _has_send_oper 与第 2 次请求是谁发的。"""
+    await asyncio.sleep(7)
+    _send2_reset()
+    ctx.napcat.fail_next_send("failed", times=1)
+    ctx.llm.script(["失败回复乙"])
+    await ctx.napcat.send_private(USER_IN, "在吗乙")
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(4)  # 等 respond 报错 + on_after_sent + 第 2 轮默认 LLM 跑完
+    rows = _send2_rows()
+    _dump("SEND2_FAIL.probe", _send2_brief(rows))
+    _dump("SEND2_FAIL.llm_requests", _req_summary(ctx.llm.requests()))
+    _dump("SEND2_FAIL.outbound", _outbound(ctx.napcat.sent()))
+    _dump("SEND2_FAIL.napcat_replies", ctx.napcat.replies())
+    llm_rows = [r for r in rows if r.get("hook") == "llm_request"]
+    after = [r for r in rows if r.get("hook") == "after_sent"]
+    if llm_rows:
+        # 第 2 次请求的调用栈（只留 AstrBot 自己的帧：能直接读出 file:line）
+        _dump("SEND2_FAIL.llm_request_stacks",
+              [r.get("stack") for r in llm_rows])
+    _save_probe_evidence("SEND2_FAIL")
+    _save_evidence(ctx, "SEND2_FAIL")
+    assert after, "期望发送后钩子照旧触发（失败也触发），实际 0 条"
+    assert after[0].get("_has_send_oper") is False, (
+        "实测：发送失败后 _has_send_oper=%r（若为 True，说明失败也会置位，"
+        "分叉点推断被推翻）" % (after[0].get("_has_send_oper"),))
+    assert len(llm_rows) == 2, (
+        "期望失败后同一条入站消息共 2 次 LLM 请求（lingxi 1 次 + 默认流程 1 次），"
+        "实际 %d 次：%r" % (len(llm_rows), _send2_brief(rows)))
+    assert llm_rows[0].get("lingxi_turn") == "dict", (
+        "期望第 1 次请求带 lingxi.turn（lingxi 自己发的），实际 %r"
+        % (llm_rows[0].get("lingxi_turn"),))
+    assert llm_rows[1].get("lingxi_turn") != "dict", (
+        "期望第 2 次请求已无 lingxi.turn（on_after_sent 把它清了），实际 %r"
+        % (llm_rows[1].get("lingxi_turn"),))
+    assert llm_rows[1].get("eid") == llm_rows[0].get("eid"), (
+        "期望两次请求是同一个 event 对象，实际 eid %r vs %r"
+        % (llm_rows[0].get("eid"), llm_rows[1].get("eid")))
+    assert len(ctx.napcat.sent()) >= 2, (
+        "期望假 NapCat 收到 2 次发送尝试（第 1 次失败、第 2 次成功），实际 %d 次"
+        % (len(ctx.napcat.sent()),))
+    assert ctx.napcat.sent()[-1].get("text") != "失败回复乙", (
+        "期望第 2 条出站不是 lingxi 那条正文（= 是另一轮新生成的），实际 %r"
+        % (ctx.napcat.sent()[-1].get("text"),))
+
+
+async def _sc_send2_fail_pinned(ctx):
+    """SEND2_FAIL_PINNED：同样的失败注入，但打点插件在发送后把 _has_send_oper 钉成 True。
+
+    这是因果链的反事实对照：如果第 2 轮默认 LLM 真被这个标志挡住，钉住之后
+    第 2 次请求应当消失。消失 = 闸就是它；不消失 = 推断被推翻。
+    """
+    await asyncio.sleep(7)
+    _send2_reset(pin=True)
+    ctx.napcat.fail_next_send("failed", times=1)
+    ctx.llm.script(["失败回复丙"])
+    await ctx.napcat.send_private(USER_IN, "在吗丙")
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(4)
+    rows = _send2_rows()
+    _dump("SEND2_FAIL_PINNED.probe", _send2_brief(rows))
+    _dump("SEND2_FAIL_PINNED.llm_requests", _req_summary(ctx.llm.requests()))
+    _dump("SEND2_FAIL_PINNED.outbound", _outbound(ctx.napcat.sent()))
+    llm_rows = [r for r in rows if r.get("hook") == "llm_request"]
+    pins = [r for r in rows if r.get("hook") == "pin_has_send_oper"]
+    _dump("SEND2_FAIL_PINNED.pin_rows", pins)
+    _save_probe_evidence("SEND2_FAIL_PINNED")
+    _send2_reset()  # 别让钉子漏到后面的场景
+    _save_evidence(ctx, "SEND2_FAIL_PINNED")
+    assert pins, "期望打点插件执行过钉住动作（pin 文件没生效？），实际 0 条"
+    assert pins[0].get("before") is False and pins[0].get("after") is True, (
+        "期望钉住动作把 _has_send_oper 从 False 改成 True，实际 %r" % (pins[0],))
+    assert len(llm_rows) == 1, (
+        "钉住 _has_send_oper=True 后仍出现 %d 次 LLM 请求（>1 即默认流程照跑）→ "
+        "说明挡住第 2 轮的不是这个标志" % (len(llm_rows),))
+    assert len(ctx.napcat.sent()) == 1, (
+        "期望钉住后只有 1 次发送尝试，实际 %d 次" % (len(ctx.napcat.sent()),))
+
+
 def _probe_fail_config():
     """PROBE-A：私聊接管 + 群聊白名单 + 硬冷却 6 秒（用冷却反证「失败也被记成已送达」）。"""
     cfg = _group1_config()
@@ -1225,6 +1414,14 @@ PROBE_GROUPS = [
      [("PROBE_TAGS_OFF", _sc_probe_tags_off)]),
 ]
 
+#: SEND-2 单独一轮：同一个隔离实例里先对成功、再对失败、最后对「钉住」三种情况打点
+SEND2_GROUPS = [
+    ("SEND-2 失败后多一轮默认 LLM（只读打点 + 反事实钉住）", _probe_fail_config,
+     [("SEND2_OK", _sc_send2_ok),
+      ("SEND2_FAIL", _sc_send2_fail),
+      ("SEND2_FAIL_PINNED", _sc_send2_fail_pinned)]),
+]
+
 
 GROUPS = [
     ("组1私聊接管", _group1_config,
@@ -1239,7 +1436,7 @@ GROUPS = [
     ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
     ("组6定时唤醒（私聊开 / 群里关）", _wake_config,
      [("W1", _sc_W1), ("W2", _sc_W2), ("W3", _sc_W3)]),
-] + PROBE_GROUPS
+] + PROBE_GROUPS + SEND2_GROUPS
 
 
 # -- 组运行 --------------------------------------------------------------------
@@ -1251,6 +1448,11 @@ async def _run_group(ctx, title, config, scenarios, pkg_dir, webui_port,
                  ws_port=ws_port, llm_base_url=ctx.llm.base_url,
                  self_id=SELF_ID)
     install_plugin(ROOT, pkg_dir, config=config)
+    # SEND-2：这一组额外装一个只读打点插件（rig 专用，来源在 tools/rig/probe_plugin）
+    if any(n.startswith("SEND2_") for n, _ in scenarios):
+        install_plugin(ROOT, SEND2_PROBE_SRC, name=SEND2_PROBE_NAME)
+        print("send2 probe plugin: %s" % os.path.join(
+            ROOT, "data", "plugins", SEND2_PROBE_NAME), flush=True)
     proc = AstrBotProc(ROOT, webui_port)
     napcat = FakeNapCat("ws://127.0.0.1:%d/ws" % ws_port, self_id=SELF_ID)
     ctx.proc, ctx.napcat = proc, napcat

@@ -1,0 +1,6 @@
+name: "send2_probe_plugin"
+display_name: "SEND-2 只读打点（rig 专用）"
+author: "fixer"
+version: "0.0.1"
+desc: "SEND-2 调查用：只在 OnLLMRequestEvent / OnAfterMessageSentEvent 上把 AstrMessageEvent 的内部状态追加成 jsonl，不改任何生产代码。"
+repo: ""
