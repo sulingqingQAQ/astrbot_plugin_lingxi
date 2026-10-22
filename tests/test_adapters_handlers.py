@@ -45,7 +45,8 @@ class FakeEvent:
     def __init__(self, umo="", group_id="", sender_id=OTHER_ID,
                  sender_name="member", text="合成消息一",
                  chain=(), message_id="m1", timestamp=1700000000.0,
-                 extra=None, self_id=SELF_ID, result=None) -> None:
+                 extra=None, self_id=SELF_ID, result=None,
+                 send_plan=None) -> None:
         self.unified_msg_origin = umo
         self.message_str = text
         self.message_obj = SimpleNamespace(
@@ -59,6 +60,11 @@ class FakeEvent:
         self.stop_calls = 0
         self.request_calls = []
         self._result = result
+        # SEND-1：每次 event.send 的行为脚本；None = 成功，异常实例 = 这一次抛它
+        self.send_calls = []
+        self._send_plan = list(send_plan or [])
+        # AstrBot 的鸭子字段：失败时基类 send() 被跳过，它会留在 False
+        self._has_send_oper = False
 
     def get_group_id(self):
         return self._group_id
@@ -95,6 +101,44 @@ class FakeEvent:
 
     def clear_result(self):
         self._result = None
+
+    async def send(self, chain=None, *args, **kwargs):
+        """SEND-1：鸭子 send。按 send_plan 决定这一次成功还是抛异常。"""
+        self.send_calls.append(chain)
+        i = len(self.send_calls) - 1
+        if i < len(self._send_plan) and self._send_plan[i] is not None:
+            raise self._send_plan[i]
+        return None
+
+
+class FrozenEvent(FakeEvent):
+    """SEND-1：不允许设实例属性的 event（模拟 __slots__ / 自定义 __setattr__）。
+
+    set_extra 仍然可用（写的是内部 dict），所以只挡住「给实例挂属性」这一种。
+    """
+
+    def __init__(self, **kw) -> None:
+        object.__setattr__(self, "_frozen", False)
+        super().__init__(**kw)
+        object.__setattr__(self, "_frozen", True)
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_frozen", False):
+            raise AttributeError("合成：本 event 不支持设置属性 %r" % (name,))
+        super().__setattr__(name, value)
+
+
+class PinBoomEvent(FakeEvent):
+    """SEND-1：能包装 send，但不许改 _has_send_oper（模拟字段被改名 / 设只读）。"""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        object.__setattr__(self, "_pin_boom", True)
+
+    def __setattr__(self, name, value):
+        if name == "_has_send_oper" and self.__dict__.get("_pin_boom"):
+            raise AttributeError("合成：本 event 不让改 _has_send_oper")
+        super().__setattr__(name, value)
 
 
 class FakeResult:
@@ -770,6 +814,162 @@ class TestBusyAndSafety(unittest.IsolatedAsyncioTestCase):
         await h.on_decorating_result(ev)  # 不抛
         await h.on_after_sent(ev)  # 不抛
         self.assertEqual(ev.stop_calls, 0)
+
+
+# -- SEND-1：发送失败不再记成「已送达」----------------------------------------
+
+SEND_OK_KEY = "lingxi.send_ok"
+
+
+class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
+    """SEND-1：on_decorating_result 给 event.send 包一层记成败，on_after_sent 据此登记。
+
+    规矩：异常照常向上抛（不改 AstrBot 行为）、不吞、不改返回值、幂等、
+    事件不许挂属性时安全降级（行为与修前一致）。
+    """
+
+    def _handler(self, c=None, logs=None):
+        c = c or _components()
+        h = EHandlers(c, plain_factory=lambda t: Plain(t),
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      log=(logs.append if logs is not None else (lambda s: None)))
+        return c, h
+
+    def _finish_with(self, brain, parsed):
+        def _finish(key, trigger, raw):
+            brain.finished.append((key, trigger, raw))
+            return parsed
+        brain.finish = _finish  # type: ignore[method-assign]
+
+    def _event(self, cls=FakeEvent, send_plan=None):
+        ev = cls(umo=f"aiocqhttp:GroupMessage:{GROUP_ID}", group_id=GROUP_ID,
+                 result=FakeResult(chain=[Plain("模型说了啥")]),
+                 send_plan=send_plan)
+        ev.set_extra("lingxi.turn", {"key": "k", "trigger": _trigger(),
+                                     "asm": _asm()})
+        return ev
+
+    async def test_SEND1_all_send_ok_reports_true(self):
+        """全部发送成功 → 照旧登记 True，不动事件终止、不动 _has_send_oper。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event()
+        await h.on_decorating_result(ev)
+        self.assertIsNone(await ev.send([Plain("a")]))
+        await h.on_after_sent(ev)
+        self.assertTrue(brain.reported[-1][3])
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertFalse(ev._has_send_oper)   # 成功路径不越俎代庖
+
+    async def test_SEND1_send_raises_marks_false_and_reraises(self):
+        """一次 send 抛异常 → 标记 False 且异常照常向上抛（不吞）。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        boom = RuntimeError("合成发送失败")
+        ev = self._event(send_plan=[boom])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError) as ctx:
+            await ev.send([Plain("a")])
+        self.assertIs(ctx.exception, boom)          # 同一个异常，没被换成别的
+        self.assertIs(ev.get_extra(SEND_OK_KEY), False)
+
+    async def test_SEND1_failed_send_reports_false_and_pins(self):
+        """失败 → report(delivered=False) + 把 _has_send_oper 钉成 True。
+
+        钉标志（而不是 stop_event）是 rig 实测选出来的：停事件会让 respond 跳过
+        clear_result()，残留 chain 会被下一次 ResultDecorate→Respond 再发一遍。
+        """
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event(send_plan=[RuntimeError("合成发送失败")])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await h.on_after_sent(ev)
+        self.assertFalse(brain.reported[-1][3])
+        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.stop_calls, 0)
+
+    async def test_SEND1_multi_send_later_fails_marks_false(self):
+        """一条回复发多段：前段成功、后段失败 → 整体算失败。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a\nb", parts=["a", "b"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event(send_plan=[None, RuntimeError("合成第二段失败")])
+        await h.on_decorating_result(ev)
+        await ev.send([Plain("a")])
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("b")])
+        await h.on_after_sent(ev)
+        self.assertFalse(brain.reported[-1][3])
+        self.assertTrue(ev._has_send_oper)
+        self.assertEqual(ev.stop_calls, 0)
+
+    async def test_SEND1_no_double_wrap(self):
+        """重复调用不重复包装：包装体还是同一个对象，且 send 只被调一次。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event()
+        await h.on_decorating_result(ev)
+        first = ev.send
+        await h.on_decorating_result(ev)
+        self.assertIs(ev.send, first)
+        await ev.send([Plain("a")])
+        self.assertEqual(len(ev.send_calls), 1)
+
+    async def test_SEND1_frozen_event_degrades(self):
+        """event 不许挂属性 → 记日志降级，行为与修前一致（True、不停事件）。"""
+        logs: list = []
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain), logs)
+        ev = self._event(cls=FrozenEvent)
+        await h.on_decorating_result(ev)   # 不抛
+        await ev.send([Plain("a")])        # 原来的 send 照常可用
+        self.assertEqual(len(ev.send_calls), 1)
+        await h.on_after_sent(ev)
+        self.assertTrue(brain.reported[-1][3])
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertTrue(any("send" in s for s in logs),
+                        "期望记一行降级日志，实际 %r" % (logs,))
+
+    async def test_SEND1_after_sent_without_marker_reports_true(self):
+        """没有标记（修前路径 / 没包装）→ 行为同修前：True，不停事件。"""
+        brain = FakeBrain()
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event()
+        ev.set_extra("lingxi.parsed", _parsed(text="a", parts=["a"]))
+        await h.on_after_sent(ev)
+        self.assertTrue(brain.reported[-1][3])
+        self.assertEqual(ev.stop_calls, 0)
+
+    async def test_SEND1_pin_raises_degrades(self):
+        """_has_send_oper 改不动（被改名 / 只读）→ 不崩，登记结果照旧是 False。"""
+        logs: list = []
+        brain = FakeBrain()
+        parsed = _parsed(text="a", parts=["a"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain), logs)
+        ev = self._event(cls=PinBoomEvent,
+                         send_plan=[RuntimeError("合成发送失败")])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await h.on_after_sent(ev)          # 不抛
+        self.assertFalse(brain.reported[-1][3])
+        self.assertEqual(ev.stop_calls, 0)
+        self.assertTrue(any("_has_send_oper" in s for s in logs),
+                        "期望记一行钉标志失败日志，实际 %r" % (logs,))
 
 
 if __name__ == "__main__":

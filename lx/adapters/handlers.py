@@ -40,6 +40,13 @@ def _safe_log(log: Callable[[str], None], msg: str) -> None:
         pass
 
 
+#: SEND-1：这一次回复的 event.send 有没有全部成功。
+#: True = 都成功；False = 至少一次抛过异常；缺省/None = 没包装（按修前行为记 True）。
+_SEND_OK_KEY = "lingxi.send_ok"
+#: 包装体上的标记：已经包过就别再包一层（幂等）。
+_SEND_WRAP_FLAG = "__lingxi_send_wrapped__"
+
+
 class EHandlers:
     """E 路径四个钩子。每个处理器最外层兜底：记 log 后正常返回。"""
 
@@ -393,6 +400,7 @@ class EHandlers:
             except Exception as e:
                 _safe_log(self._log, "[handlers] 写回 chain 失败：%r" % (e,))
                 return
+            self._wrap_send(event)
             try:
                 event.set_extra("lingxi.parsed", parsed)
             except Exception as e:
@@ -401,8 +409,65 @@ class EHandlers:
             _safe_log(self._log, "[handlers] on_decorating_result 异常：%r" % (e,))
         return
 
+    def _wrap_send(self, event: Any) -> None:
+        """SEND-1：给这一个 event 的 send 记成败（只加标记，不改 AstrBot 行为）。
+
+        为什么：AstrBot 发送失败时（respond/stage.py:341-347）只打一行
+        ``Failed to send the message chain`` 就把异常吞了，之后
+        OnAfterMessageSentEvent 照常触发（respond/stage.py:349）。过去 on_after_sent
+        据此一律登记 delivered=True —— 诊断记 delivered、失败的回复进了 bot 自己的
+        历史、硬冷却也起了（PROBE-1 实测 A-3/A-6）。
+
+        规矩：异常照原样向上抛、不改返回值、不吞；重复调用不重复包装；
+        event 不许挂属性时记一行日志、行为与修前一致（仍按 True 登记）。
+        """
+        try:
+            orig = event.send
+        except Exception as e:
+            _safe_log(self._log, "[handlers] 取 event.send 失败，不记发送成败：%r" % (e,))
+            return
+        if getattr(orig, _SEND_WRAP_FLAG, False):
+            return  # 已经包过：幂等，别套娃
+        try:
+            event.set_extra(_SEND_OK_KEY, True)
+        except Exception as e:
+            _safe_log(self._log, "[handlers] 无法记发送成败（set_extra）：%r" % (e,))
+            return
+
+        async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await orig(*args, **kwargs)
+            except BaseException:
+                try:
+                    event.set_extra(_SEND_OK_KEY, False)
+                except Exception as e:
+                    _safe_log(self._log,
+                              "[handlers] 记发送失败时 set_extra 出错：%r" % (e,))
+                raise
+
+        try:
+            setattr(_wrapped, _SEND_WRAP_FLAG, True)
+        except Exception:
+            pass
+        try:
+            event.send = _wrapped
+        except Exception as e:
+            _safe_log(self._log,
+                      "[handlers] 无法包装 event.send（降级为修前行为）：%r" % (e,))
+
     async def on_after_sent(self, event: Any) -> None:
-        """普通 async def。成功送达才登记 True，且只登记一次。"""
+        """普通 async def。按真实发送成败登记，且只登记一次。
+
+        SEND-1：这次回复的 send 抛过异常（见 ``_wrap_send``）就登记
+        ``delivered=False`` —— brain.report 对 False 的既有语义是「不记 bot 历史、
+        不起硬冷却、不确认便签、诊断记 undelivered」；同时把 AstrBot 的
+        ``_has_send_oper`` 钉成 True，挡住 ProcessStage 的默认 LLM 兜底分支。
+
+        为什么钉标志而不是 ``stop_event()``（两种都试过，rig 实测）：停事件会让
+        respond 提前返回、跳过它自己的 ``clear_result()``（respond/stage.py:352），
+        残留的 chain 又会被紧接着的那次 ResultDecorate→Respond 原样再发一遍
+        （实测同一条正文发了 2 次）。钉标志不改控制流，AstrBot 照常收尾。
+        """
         try:
             try:
                 turn = event.get_extra("lingxi.turn")
@@ -419,15 +484,34 @@ class EHandlers:
             if key is None or trigger is None:
                 return
             try:
-                self._c.brain.report(key, trigger, parsed, True)
+                send_ok = event.get_extra(_SEND_OK_KEY)
+            except Exception:
+                send_ok = None
+            delivered = send_ok is not False
+            try:
+                self._c.brain.report(key, trigger, parsed, delivered)
             except Exception as e:
                 _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+            if not delivered:
+                # 失败也要让 AstrBot 知道「这条事件 lingxi 已经出过话」：
+                # 发送失败时基类 send() 被跳过，_has_send_oper 留在 False
+                # （astr_message_event.py:500），ProcessStage 就会再跑一轮默认
+                # LLM、补一句不带任何 lingxi 注入的回复（SEND-2 实证）。
+                try:
+                    event._has_send_oper = True
+                except Exception as e:
+                    _safe_log(self._log,
+                              "[handlers] 置 _has_send_oper 失败：%r" % (e,))
             try:
                 event.set_extra("lingxi.turn", None)
             except Exception:
                 pass
             try:
                 event.set_extra("lingxi.parsed", None)
+            except Exception:
+                pass
+            try:
+                event.set_extra(_SEND_OK_KEY, None)
             except Exception:
                 pass
         except Exception as e:

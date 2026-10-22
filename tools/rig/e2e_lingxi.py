@@ -987,7 +987,7 @@ async def _sc_probe_send_fail(ctx):
           any("失败回复甲" in t for t in hist))
     await asyncio.sleep(2)
 
-    # -- 断言：只固定观测到的行为 --
+    # -- 断言：SEND-1 修完之后这里是回归断言（探针时的实测值写在注释里）--
     _save_evidence(ctx, "PROBE_SEND_FAIL")
     assert sent, "期望假 NapCat 收到 1 次发送尝试，实际 0 次"
     assert any(s["text"] == "失败回复甲" for s in sent), (
@@ -1000,9 +1000,24 @@ async def _sc_probe_send_fail(ctx):
     assert outcomes, (
         "期望发送失败后仍写出 outcome 诊断事件（=on_after_sent 触发了），实际没有：%r"
         % (evs,))
-    assert outcomes[-1].get("result") == "delivered", (
-        "实测：发送失败后诊断 outcome.result=%r（若不是 delivered，说明推断被推翻）"
+    # SEND-1 回归①：失败不再记成已送达（探针时实测是 delivered）
+    assert outcomes[-1].get("result") == "undelivered", (
+        "SEND-1 回归：发送失败后诊断 outcome.result 期望 undelivered，实际 %r"
         % (outcomes[-1].get("result"),))
+    # SEND-1 回归②：失败不再引出一轮默认 LLM 兜底（探针时是 2 次尝试、第 2 条正文不同）
+    assert len(sent) == 1, (
+        "SEND-1 回归：期望失败后只有 1 次发送尝试（默认 LLM 兜底被挡住），实际 %d 次：%r"
+        % (len(sent), [s["text"] for s in sent]))
+    # SEND-1 回归③：失败不起硬冷却（探针时这条被 DEFER 挡掉，0 次请求）
+    gates2 = [e.get("result") for e in evs2]
+    assert gates2 and gates2[-1] == "allow", (
+        "SEND-1 回归：失败后紧接的一条消息期望闸门 allow（没起冷却），实际 %r" % (gates2,))
+    assert len(ctx.llm.requests()) >= 1, (
+        "SEND-1 回归：失败后紧接的一条消息期望照常出话，实际假 LLM 收到 0 次请求")
+    # SEND-1 回归④：失败的那条不进 bot 自己的历史（探针时在历史块里出现过）
+    assert not any("失败回复甲" in t for t in hist), (
+        "SEND-1 回归：失败回复不该进 bot 历史，实际历史块里有：%r"
+        % (hist[0][:300] if hist else "",))
 
 
 async def _sc_probe_send_drop(ctx):
@@ -1065,9 +1080,12 @@ async def _sc_probe_group_fail(ctx):
     assert text_log.count("Failed to send the message chain") >= 1, (
         "期望群发送失败时 AstrBot 日志出现 Failed to send the message chain，实际没有")
     outcomes = [e for e in evs if e.get("kind") == "outcome"]
-    assert outcomes and outcomes[-1].get("result") == "delivered", (
-        "实测：群发送失败后诊断 outcome.result=%r（若不是 delivered，说明推断被推翻）"
+    assert outcomes and outcomes[-1].get("result") == "undelivered", (
+        "SEND-1 回归：群发送失败后诊断 outcome.result 期望 undelivered，实际 %r"
         % ([e.get("result") for e in outcomes],))
+    assert len(sent) == 1, (
+        "SEND-1 回归：群里失败后期望只有 1 次发送尝试（默认 LLM 兜底被挡住），实际 %d 次：%r"
+        % (len(sent), [s["text"] for s in sent]))
 
 
 async def _sc_probe_group_drop(ctx):
@@ -1302,14 +1320,20 @@ async def _sc_send2_ok(ctx):
 
 
 async def _sc_send2_fail(ctx):
-    """SEND2_FAIL：失败注入后，看发送后钩子里的 _has_send_oper 与第 2 次请求是谁发的。"""
+    """SEND2_FAIL：失败注入后，看发送后钩子里的 _has_send_oper 与请求/发送次数。
+
+    SEND-1 修完后本场景是**回归断言**：修前实测「2 次 LLM 请求、2 次发送尝试」，
+    修后应为「1 次请求、1 次发送」（失败即停事件 → ProcessStage 的默认 LLM 兜底
+    分支进不去）。`_has_send_oper` 仍是 False（那是 AstrBot 自己的事实，SEND-1 没改
+    它，改的是 lingxi 不再让兜底跑起来）。
+    """
     await asyncio.sleep(7)
     _send2_reset()
     ctx.napcat.fail_next_send("failed", times=1)
     ctx.llm.script(["失败回复乙"])
     await ctx.napcat.send_private(USER_IN, "在吗乙")
     await ctx.napcat.wait_sent(1, 30)
-    await asyncio.sleep(4)  # 等 respond 报错 + on_after_sent + 第 2 轮默认 LLM 跑完
+    await asyncio.sleep(4)  # 等 respond 报错 + on_after_sent（失败后不该再有第 2 轮）
     rows = _send2_rows()
     _dump("SEND2_FAIL.probe", _send2_brief(rows))
     _dump("SEND2_FAIL.llm_requests", _req_summary(ctx.llm.requests()))
@@ -1318,40 +1342,34 @@ async def _sc_send2_fail(ctx):
     llm_rows = [r for r in rows if r.get("hook") == "llm_request"]
     after = [r for r in rows if r.get("hook") == "after_sent"]
     if llm_rows:
-        # 第 2 次请求的调用栈（只留 AstrBot 自己的帧：能直接读出 file:line）
+        # 请求的调用栈（只留 AstrBot 自己的帧：能直接读出 file:line）
         _dump("SEND2_FAIL.llm_request_stacks",
               [r.get("stack") for r in llm_rows])
+    # SEND-1 修完后 lingxi 的 on_after_sent 会停事件 → call_event_hook 提前返回
+    # （context_utils.py:105-110），排在后面的打点插件钩子就不再被调用，
+    # 所以 after_sent 打点为 0 条。这本身就是候选②的已知副作用，记录下来。
+    _dump("SEND2_FAIL.probe_after_sent_rows", len(after))
     _save_probe_evidence("SEND2_FAIL")
     _save_evidence(ctx, "SEND2_FAIL")
-    assert after, "期望发送后钩子照旧触发（失败也触发），实际 0 条"
-    assert after[0].get("_has_send_oper") is False, (
-        "实测：发送失败后 _has_send_oper=%r（若为 True，说明失败也会置位，"
-        "分叉点推断被推翻）" % (after[0].get("_has_send_oper"),))
-    assert len(llm_rows) == 2, (
-        "期望失败后同一条入站消息共 2 次 LLM 请求（lingxi 1 次 + 默认流程 1 次），"
+    assert len(llm_rows) == 1, (
+        "SEND-1 回归：期望失败后只有 1 次 LLM 请求（lingxi 自己那次），"
         "实际 %d 次：%r" % (len(llm_rows), _send2_brief(rows)))
     assert llm_rows[0].get("lingxi_turn") == "dict", (
-        "期望第 1 次请求带 lingxi.turn（lingxi 自己发的），实际 %r"
+        "期望唯一那次请求带 lingxi.turn（lingxi 自己发的），实际 %r"
         % (llm_rows[0].get("lingxi_turn"),))
-    assert llm_rows[1].get("lingxi_turn") != "dict", (
-        "期望第 2 次请求已无 lingxi.turn（on_after_sent 把它清了），实际 %r"
-        % (llm_rows[1].get("lingxi_turn"),))
-    assert llm_rows[1].get("eid") == llm_rows[0].get("eid"), (
-        "期望两次请求是同一个 event 对象，实际 eid %r vs %r"
-        % (llm_rows[0].get("eid"), llm_rows[1].get("eid")))
-    assert len(ctx.napcat.sent()) >= 2, (
-        "期望假 NapCat 收到 2 次发送尝试（第 1 次失败、第 2 次成功），实际 %d 次"
-        % (len(ctx.napcat.sent()),))
-    assert ctx.napcat.sent()[-1].get("text") != "失败回复乙", (
-        "期望第 2 条出站不是 lingxi 那条正文（= 是另一轮新生成的），实际 %r"
-        % (ctx.napcat.sent()[-1].get("text"),))
+    assert len(ctx.napcat.sent()) == 1, (
+        "SEND-1 回归：期望失败后只有 1 次发送尝试（没有第 2 条文不对题的回复），"
+        "实际 %d 次：%r" % (len(ctx.napcat.sent()),
+                            [s.get("text") for s in ctx.napcat.sent()]))
 
 
 async def _sc_send2_fail_pinned(ctx):
-    """SEND2_FAIL_PINNED：同样的失败注入，但打点插件在发送后把 _has_send_oper 钉成 True。
+    """SEND2_FAIL_PINNED：SEND-2 的反事实对照场景，SEND-1 修完后当「双保险」用。
 
-    这是因果链的反事实对照：如果第 2 轮默认 LLM 真被这个标志挡住，钉住之后
-    第 2 次请求应当消失。消失 = 闸就是它；不消失 = 推断被推翻。
+    修前它证明「把 _has_send_oper 钉成 True → 第 2 轮消失」（SEND-2 的因果证据）。
+    修后 lingxi 自己就停事件了，钉不钉都只有 1 次请求；而且 lingxi 的钩子排在
+    打点插件前面，钉住动作根本轮不到执行 → 所以这里不再硬要求 pin 行存在，
+    只要求「1 次请求 + 1 次发送」，pin 行有就一并核对。
     """
     await asyncio.sleep(7)
     _send2_reset(pin=True)
@@ -1370,14 +1388,18 @@ async def _sc_send2_fail_pinned(ctx):
     _save_probe_evidence("SEND2_FAIL_PINNED")
     _send2_reset()  # 别让钉子漏到后面的场景
     _save_evidence(ctx, "SEND2_FAIL_PINNED")
-    assert pins, "期望打点插件执行过钉住动作（pin 文件没生效？），实际 0 条"
-    assert pins[0].get("before") is False and pins[0].get("after") is True, (
-        "期望钉住动作把 _has_send_oper 从 False 改成 True，实际 %r" % (pins[0],))
-    assert len(llm_rows) == 1, (
-        "钉住 _has_send_oper=True 后仍出现 %d 次 LLM 请求（>1 即默认流程照跑）→ "
-        "说明挡住第 2 轮的不是这个标志" % (len(llm_rows),))
-    assert len(ctx.napcat.sent()) == 1, (
-        "期望钉住后只有 1 次发送尝试，实际 %d 次" % (len(ctx.napcat.sent()),))
+    for p in pins:
+        assert p.get("after") is True, (
+            "钉住动作若是执行了，_has_send_oper 应当为 True，实际 %r" % (p,))
+        # SEND-1 修完后 lingxi 的 on_after_sent 先跑并把标志钉成 True，所以打点插件
+        # 看到的 before 就是 True（修前是 False → 见 交接_SEND2.md §5 的反事实对照）。
+        _dump("SEND2_FAIL_PINNED.pin_before", p.get("before"))
+    assert len(llm_rows) <= 1, (
+        "SEND-1 回归：失败后应至多 1 次 LLM 请求，实际 %d 次：%r"
+        % (len(llm_rows), _send2_brief(rows)))
+    assert len(ctx.napcat.sent()) <= 1, (
+        "SEND-1 回归：失败后应至多 1 次发送尝试，实际 %d 次"
+        % (len(ctx.napcat.sent()),))
 
 
 def _probe_fail_config():
