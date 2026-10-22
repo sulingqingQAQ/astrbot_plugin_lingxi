@@ -912,6 +912,21 @@ class TestSendOutcomeWrapping(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ev._has_send_oper)
         self.assertEqual(ev.stop_calls, 0)
 
+    async def test_SEND1_fail_then_ok_still_false(self):
+        """先失败后成功也算失败（不是「只看最后一次」）。"""
+        brain = FakeBrain()
+        parsed = _parsed(text="a\nb", parts=["a", "b"])
+        self._finish_with(brain, parsed)
+        c, h = self._handler(_components(brain=brain))
+        ev = self._event(send_plan=[RuntimeError("合成第一段失败"), None])
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send([Plain("a")])
+        await ev.send([Plain("b")])        # 后一段成功，不能把结论翻回来
+        await h.on_after_sent(ev)
+        self.assertFalse(brain.reported[-1][3])
+        self.assertTrue(ev._has_send_oper)
+
     async def test_SEND1_no_double_wrap(self):
         """重复调用不重复包装：包装体还是同一个对象，且 send 只被调一次。"""
         brain = FakeBrain()
