@@ -47,11 +47,15 @@ GROUP_ID = "900100200"  # 合成群号
 WEBUI_PORT = 16185
 WS_PORT = 16199
 
-# 场景 B system 断言用的 lingxi 稳定片段（assembler.py 生态）：
-# build_interaction_instructions() 无条件追加 "## Mention / ## Quote / ## Refuse"
-# 三段（lx/pure/tags.py），其中 "## Quote" 最稳定：silence 块受 silent_ok 门控，
-# next_reply/chat_status 块受各自开关门控，只有标签说明段是无条件的。
-SYSTEM_STABLE_FRAG = "## Quote"
+# 场景 B 的 system 断言用 lingxi 的稳定片段（assembler.py 生态）：
+# `build_interaction_instructions()`（lx/pure/tags.py）原本无条件追加
+# "## Mention / ## Quote / ## Refuse" 三段；QUOTE-1 之后只剩 "## Refuse" 还是无条件的：
+#   - "## Mention" 要 `speech.is_at` 且 `context.include_sender_id`（组1没开 is_at）；
+#   - "## Quote" 要 `context.enable_message_id`（组1没开，默认 False）——
+#     这条 gating 的两边由 PROBE_TAGS_ON（开，断言有）/ PROBE_TAGS_OFF（关，断言没有）
+#     两条 rig 场景分别盯着，所以 B 这里只断言「组1配置下确实没有 ## Quote」。
+SYSTEM_STABLE_FRAG = "## Refuse"
+SYSTEM_ABSENT_FRAG = "## Quote"
 
 
 # -- OpenAI 消息文本抽取 -----------------------------------------------------
@@ -372,6 +376,10 @@ async def _sc_B(ctx):
     assert SYSTEM_STABLE_FRAG in sys_text, (
         "期望 system 末尾含 lingxi 追加内容（%r），实际 system 尾 200 字=%r"
         % (SYSTEM_STABLE_FRAG, sys_text[-200:]))
+    assert SYSTEM_ABSENT_FRAG not in sys_text, (
+        "QUOTE-1：组1没开 context.enable_message_id，system 里不该出现 %r"
+        "（历史里没有 #msg_id，教了只能让模型编 id），实际 system 尾 300 字=%r"
+        % (SYSTEM_ABSENT_FRAG, sys_text[-300:]))
 
 
 async def _sc_C(ctx):
