@@ -789,7 +789,8 @@ class TestOnDecoratingResult(unittest.IsolatedAsyncioTestCase):
 
 
 class TestOnAfterSent(unittest.IsolatedAsyncioTestCase):
-    async def test_reports_once_and_clears(self):
+    async def test_reports_once_and_keeps_turn(self):
+        """TAIL-1：报送达只做一次，但 lingxi.turn 要留在事件上给后几轮过滤用。"""
         brain = FakeBrain()
         c = _components(brain=brain)
         h = EHandlers(c, plain_factory=Plain,
@@ -802,10 +803,13 @@ class TestOnAfterSent(unittest.IsolatedAsyncioTestCase):
         await h.on_after_sent(ev)
         self.assertEqual(brain.reported[-1][2], parsed)
         self.assertTrue(brain.reported[-1][3])
-        self.assertIsNone(ev.get_extra("lingxi.turn"))
+        turn = ev.get_extra("lingxi.turn")
+        self.assertIsInstance(
+            turn, dict, "TAIL-1：多步回合的后几轮还要靠 turn 过滤，不能清成 None")
+        self.assertTrue(turn.get("reported"), "turn 上要留「已报送达」的标记")
         self.assertIsNone(ev.get_extra("lingxi.parsed"))
         await h.on_after_sent(ev)
-        self.assertEqual(len(brain.reported), 1)
+        self.assertEqual(len(brain.reported), 1, "第二次出站不能再报送达")
 
     async def test_missing_parsed_no_report(self):
         brain = FakeBrain()
@@ -817,6 +821,160 @@ class TestOnAfterSent(unittest.IsolatedAsyncioTestCase):
                                      "asm": _asm()})
         await h.on_after_sent(ev)
         self.assertEqual(brain.reported, [])
+
+
+# -- TAIL-1：多步回合（一个事件多次装饰 / 多次出站） ---------------------------
+
+class TailBrain(FakeBrain):
+    """TAIL-1 用：finish 每次返回脚本化的 ParsedReply；记录 register_tail 调用。"""
+
+    def __init__(self):
+        super().__init__()
+        self.script = []          # 依次弹出的 ParsedReply
+        self.tails = []           # [(parsed, seen 快照)]
+
+    def finish(self, key, trigger, raw):
+        self.finished.append((key, trigger, raw))
+        if not self.script:
+            raise AssertionError("finish 没配脚本")
+        return self.script.pop(0)
+
+    def register_tail(self, key, trigger, parsed, seen=None):
+        seen = dict(seen or {})
+        self.tails.append((parsed, seen))
+        note = getattr(parsed, "status_note", None)
+        if note is not None and note != seen.get("note"):
+            seen["note"] = note
+        reason = getattr(parsed, "next_reply_reason", None)
+        if reason and reason != seen.get("next_reply"):
+            seen["next_reply"] = reason
+        return seen
+
+
+class TestMultiRoundTail(unittest.IsolatedAsyncioTestCase):
+    """TAIL-1：后几轮（工具循环的第 2 步起）也要过滤，且不重复报送达。"""
+
+    def _handler(self, brain=None):
+        brain = brain or TailBrain()
+        c = _components(brain=brain)
+        h = EHandlers(c, plain_factory=lambda t: Plain(t),
+                      text_part_factory=lambda t: SimpleNamespace(text=t),
+                      log=lambda s: None)
+        return brain, h
+
+    def _turn(self):
+        return {"key": "k", "trigger": _trigger(), "asm": _asm()}
+
+    def _parsed(self, text=None, parts=(), silent=False, note=None,
+                reason=None):
+        from lx.brain.outcome import ParsedReply
+        from lx.contracts import Outcome
+        return ParsedReply(
+            outcome=Outcome(text=text, silent=silent, reason="合成"),
+            parts=list(parts), status_note=note, next_reply_reason=reason)
+
+    async def test_second_round_strips_tags(self):
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]))
+        ev.set_extra("lingxi.turn", self._turn())
+        brain.script = [self._parsed(text="第一句", parts=["第一句"])]
+        await h.on_decorating_result(ev)
+        await h.on_after_sent(ev)   # AstrBot 每出站一次就调一次
+        self.assertEqual(ev._result.chain[0].text, "第一句")
+
+        # 第 2 步：收尾轮带标签 + 备忘
+        ev._result = FakeResult(chain=[Plain("好的<chat_status>备忘：带伞</chat_status>")])
+        brain.script = [self._parsed(
+            text="好的", parts=["好的"], note="备忘：带伞")]
+        await h.on_decorating_result(ev)
+        texts = [c.text for c in ev._result.chain if type(c).__name__ == "Plain"]
+        self.assertEqual(texts, ["好的"], "后几轮的标签必须被剥掉，正文照发")
+        self.assertTrue(brain.tails, "后几轮要把便签提取登记，不能只剥")
+        self.assertEqual(brain.tails[-1][0].status_note, "备忘：带伞")
+
+    async def test_second_round_only_tags_clears_chain_without_stop(self):
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]))
+        ev.set_extra("lingxi.turn", self._turn())
+        brain.script = [self._parsed(text="第一句", parts=["第一句"])]
+        await h.on_decorating_result(ev)
+        await h.on_after_sent(ev)
+
+        ev._result = FakeResult(
+            chain=[Plain('<chat_status>备忘：x</chat_status><next_reply reason="time_600s"/>')])
+        brain.script = [self._parsed(text=None, parts=[], silent=True,
+                                     note="备忘：x", reason="time_600s")]
+        await h.on_decorating_result(ev)
+        self.assertEqual(ev._result.chain, [], "剥空要清 chain")
+        self.assertEqual(ev.stop_calls, 0,
+                         "后几轮不许 stop_event：SEND-1 实测会让正文重发")
+        self.assertEqual(brain.tails[-1][0].next_reply_reason, "time_600s")
+
+    async def test_second_round_does_not_report_again(self):
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]))
+        ev.set_extra("lingxi.turn", self._turn())
+        brain.script = [self._parsed(text="第一句", parts=["第一句"])]
+        await h.on_decorating_result(ev)
+        await h.on_after_sent(ev)
+
+        ev._result = FakeResult(chain=[Plain("第二句")])
+        brain.script = [self._parsed(text="第二句", parts=["第二句"])]
+        await h.on_decorating_result(ev)
+        await h.on_after_sent(ev)
+        self.assertEqual(len(brain.reported), 1,
+                         "多轮里只报送达一次（历史/冷却/notes.confirm 都在 report 里）")
+
+    async def test_turn_survives_first_sent(self):
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]))
+        ev.set_extra("lingxi.turn", self._turn())
+        brain.script = [self._parsed(text="第一句", parts=["第一句"])]
+        await h.on_decorating_result(ev)
+        await h.on_after_sent(ev)
+        turn = ev.get_extra("lingxi.turn")
+        self.assertIsInstance(turn, dict)
+        self.assertEqual(turn.get("rounds"), 1)
+        self.assertTrue(turn.get("reported"))
+
+    async def test_llm_request_injected_only_once(self):
+        """第 2 步起不再重复注入 system tail / 临时 part（与修前一致）。"""
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]))
+        ev.set_extra("lingxi.turn",
+                     {"key": "k", "trigger": _trigger(),
+                      "asm": _asm(system_tail="尾巴", user_text="用户文本")})
+        req1 = FakeReq(system_prompt="原始提示")
+        await h.on_llm_request(ev, req1)
+        self.assertIn("尾巴", req1.system_prompt)
+        self.assertEqual(len(req1.extra_user_content_parts), 1)
+
+        req2 = FakeReq(system_prompt="原始提示")
+        await h.on_llm_request(ev, req2)
+        self.assertEqual(req2.system_prompt, "原始提示")
+        self.assertEqual(req2.extra_user_content_parts, [])
+
+    async def test_send_mark_rearmed_per_round(self):
+        """SEND-1 的成败标记按「每一轮」记：第一轮失败不能污染第二轮。"""
+        brain, h = self._handler()
+        ev = _group_event(result=FakeResult(chain=[Plain("第一句")]),
+                          send_plan=[RuntimeError("合成：第一轮发送失败")])
+        ev.set_extra("lingxi.turn", self._turn())
+        brain.script = [self._parsed(text="第一句", parts=["第一句"])]
+        await h.on_decorating_result(ev)
+        with self.assertRaises(RuntimeError):
+            await ev.send(ev._result)
+        await h.on_after_sent(ev)
+        self.assertFalse(brain.reported[-1][3], "第一轮失败要按 undelivered 报")
+
+        ev._result = FakeResult(chain=[Plain("第二句")])
+        brain.script = [self._parsed(text="第二句", parts=["第二句"])]
+        await h.on_decorating_result(ev)
+        self.assertIs(ev.get_extra("lingxi.send_ok"), True,
+                      "新一轮进来要先把「本轮还没失败」重置掉")
+        await ev.send(ev._result)
+        await h.on_after_sent(ev)
+        self.assertEqual(len(brain.reported), 1, "第二轮不再报送达")
 
 
 # -- busy 过期与异常安全 -------------------------------------------------------

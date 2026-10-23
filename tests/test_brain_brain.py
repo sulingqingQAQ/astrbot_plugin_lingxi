@@ -456,6 +456,75 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(len([m for _, m in args["history"].recorded if m.is_bot]), 1)
 
 
+class RegisterTailTest(unittest.TestCase):
+    """TAIL-1：多步回合的后几轮只做「提取登记」，不重复报送达。
+
+    后几轮（工具循环的第 2 步起）里模型写在 <chat_status>/<next_reply> 里的东西
+    必须留下来（否则收尾那步的备忘就丢了），但历史 / 冷却 / notes.confirm /
+    ticker 都属于「这一轮真的送达了」，只在第一轮报一次。
+    """
+
+    def test_registers_note_and_reason(self):
+        b, args, _ = _brain()
+        key = _key()
+        seen = b.register_tail(
+            key, _trigger(), _parsed(text=None, silent=True, note="备忘：带伞",
+                                     nxt="time_600s"))
+        self.assertEqual(args["notes"].registered, [(key, "备忘：带伞")])
+        self.assertEqual(args["next_reply"].registered, [(key, "time_600s")])
+        self.assertEqual(seen.get("note"), "备忘：带伞")
+        self.assertEqual(seen.get("next_reply"), "time_600s")
+
+    def test_same_note_not_registered_twice(self):
+        b, args, _ = _brain()
+        key = _key()
+        seen = b.register_tail(key, _trigger(),
+                               _parsed(text=None, silent=True, note="备忘：带伞"),
+                               {})
+        seen = b.register_tail(key, _trigger(),
+                               _parsed(text=None, silent=True, note="备忘：带伞"),
+                               seen)
+        self.assertEqual(len(args["notes"].registered), 1)
+        self.assertEqual(seen.get("note"), "备忘：带伞")
+
+    def test_changed_note_registered_again(self):
+        b, args, _ = _brain()
+        key = _key()
+        seen = b.register_tail(key, _trigger(),
+                               _parsed(text=None, silent=True, note="备忘：甲"), {})
+        b.register_tail(key, _trigger(),
+                        _parsed(text=None, silent=True, note="备忘：乙"), seen)
+        self.assertEqual([t for _, t in args["notes"].registered],
+                         ["备忘：甲", "备忘：乙"])
+
+    def test_none_note_and_empty_reason_skipped(self):
+        b, args, _ = _brain()
+        b.register_tail(_key(), _trigger(),
+                        _parsed(text=None, silent=True, note=None, nxt=""), {})
+        self.assertEqual(args["notes"].registered, [])
+        self.assertEqual(args["next_reply"].registered, [])
+
+    def test_no_delivery_side_effects(self):
+        b, args, _ = _brain()
+        key = _key()
+        b.register_tail(key, _trigger(),
+                        _parsed(text="合成回复", note="备忘：带伞", nxt="time_60s"), {})
+        self.assertEqual([m for _, m in args["history"].recorded if m.is_bot], [])
+        self.assertEqual(args["notes"].confirmed, [])
+        self.assertEqual(args["ticker"].calls, [])
+        self.assertFalse(getattr(args["store"].get(key), "cooldown_until", 0))
+
+    def test_failures_logged_not_raised(self):
+        b, args, logs = _brain()
+        args["notes"].fail_register = True
+        args["next_reply"].fail = True
+        seen = b.register_tail(_key(), _trigger(),
+                               _parsed(text=None, silent=True, note="备忘：x",
+                                       nxt="time_60s"), {})
+        self.assertEqual(seen.get("note"), "备忘：x")
+        self.assertTrue(logs)
+
+
 class ConverseTTest(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)

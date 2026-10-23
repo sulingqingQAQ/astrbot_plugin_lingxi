@@ -362,6 +362,49 @@ class Brain:
         self._diag_outcome(key, trigger, parsed, outcome, delivered)
         return outcome
 
+    # -- 规则 4b：多步回合的后几轮只登记、不报送达（TAIL-1） --
+
+    def register_tail(
+        self,
+        key: SessionKey,
+        trigger: Trigger,
+        parsed: ParsedReply,
+        seen: Optional[dict] = None,
+    ) -> dict:
+        """把后几轮里提取到的便签 / 自约登记掉，别让收尾那步写的东西丢了。
+
+        为什么只做这两件：``report`` 的副作用里，只有「写便签（status_note）」和
+        「登记自约（next_reply_reason）」在后几轮也该发生；历史登记 / 硬冷却 /
+        ``notes.confirm`` / 通知 ticker 都属于「这一轮真的送达了」，只在第一轮报
+        一次（由 ``handlers.on_after_sent`` 保证不重复）。
+
+        ``seen``：调用方（``handlers`` 存在 ``lingxi.turn`` 里）用来去重的字典，
+        值没变就不重复登记——模型每轮都重写同一句备忘时不会一直续命。
+        """
+        if seen is None:
+            seen = {}
+        note = getattr(parsed, "status_note", None)
+        if note is not None and note != seen.get("note"):
+            try:
+                self._notes.register_from_buffer(key, note)
+            except Exception as e:
+                _safe_log(self._log, "[brain] 后几轮登记便签失败：%r" % (e,))
+            seen["note"] = note
+        reason = getattr(parsed, "next_reply_reason", None)
+        if reason and reason != seen.get("next_reply"):
+            seen["next_reply"] = reason
+            try:
+                cfg = self._resolver.resolve(key)
+            except Exception as e:
+                _safe_log(self._log, "[brain] 后几轮取配置失败，跳过自约：%r" % (e,))
+                cfg = None
+            if cfg is not None:
+                try:
+                    self._next_reply.register(key, reason, cfg)
+                except Exception as e:
+                    _safe_log(self._log, "[brain] 后几轮登记自约失败：%r" % (e,))
+        return seen
+
     # -- 规则 5：converse_t --
 
     async def converse_t(

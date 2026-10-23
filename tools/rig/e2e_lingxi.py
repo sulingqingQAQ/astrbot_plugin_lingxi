@@ -1244,6 +1244,165 @@ async def _sc_probe_tags_off(ctx):
             {"at": sent2[0]["at"], "reply": sent2[0]["reply"]},))
 
 
+# -- TAIL-1：多步回合（一个事件多次 on_decorating_result） ---------------------
+#
+# AstrBot 4.29.1 的本地 Agent 循环每走一步、只要有文字就单独 set_result + yield
+# （core/astr_agent_run_util.py:274-291，非流式且没开 buffer_intermediate_messages），
+# 于是**一个事件里装饰/发送阶段会跑好几次**。lingxi 修前只在第一轮过滤（第一次
+# on_after_sent 把 lingxi.turn 置 None），后几轮原样放行 —— 用户 2026-10-23 在真群
+# 里看到 <chat_status> 备忘 / <next_reply/> / <quote/> 被拆成多条发出去就是这个。
+#
+# 怎么造「多步」：假 LLM 第 1 步给文字 + 一个 tool_call（名字故意不存在，AstrBot
+# 记一行 warning 就继续循环，见 tool_loop_agent_runner.py:1244），第 2 步只给标签。
+
+TAIL1_TOOL_NAME = "tail1_no_such_tool"
+TAIL1_LEAK_KEYS = ("chat_status", "next_reply", "<quote", "</", "<")
+
+
+def _tail1_tool_call():
+    return {"name": TAIL1_TOOL_NAME, "arguments": {"note": "tail1 复现用"}}
+
+
+def _leak_hits(texts):
+    """把「带标签的正文」挑出来：这些就是修前会漏进群的脏消息。"""
+    hits = []
+    for t in texts:
+        s = t or ""
+        if any(k in s for k in TAIL1_LEAK_KEYS):
+            hits.append(s)
+    return hits
+
+
+def _status_json_text():
+    """读本组实例里 lingxi 的 status.json（<插件数据目录>/state/status.json）。"""
+    for path in glob.glob(os.path.join(ROOT, "data", "**", "status.json"),
+                          recursive=True):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return path, f.read()
+        except OSError:
+            continue
+    return "", ""
+
+
+async def _sc_tail1_multi(ctx):
+    """TAIL1_MULTI：第 1 步文字+工具调用，第 2 步只剩标签 → 标签不能出站，备忘要登记。
+
+    修前的现象（本场景就是为它写的）：第 2 步原样发进群，`<chat_status>备忘…`
+    与 `<next_reply/>` 都能在假 NapCat 的 message 里看到。
+    """
+    ctx.llm.script([
+        {"text": "我先说一句。", "tool_calls": [_tail1_tool_call()]},
+        {"text": '<chat_status>备忘：明天提醒他去看牙</chat_status>'
+                 '<next_reply reason="time_600s"/>'},
+    ])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗", at_self=True)
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(4)  # 等第 2 步走完（工具轮 + 收尾轮）
+    sent = ctx.napcat.sent()
+    texts = [s["text"] for s in sent]
+    reqs = ctx.llm.requests()
+    status_path, status_text = _status_json_text()
+    _dump("TAIL1_MULTI.outbound", _outbound(sent))
+    _dump("TAIL1_MULTI.texts", texts)
+    _dump("TAIL1_MULTI.llm_request_count", len(reqs))
+    _dump("TAIL1_MULTI.status_path", status_path)
+    _dump("TAIL1_MULTI.status_json", status_text)
+    _save_evidence(ctx, "TAIL1_MULTI")
+
+    assert len(reqs) >= 2, (
+        "期望真的走了多步（至少 2 次模型请求），实际 %d 次 —— 复现前提没成立"
+        % len(reqs))
+    assert texts and texts[0] == "我先说一句", (
+        "期望第 1 步正文先发出去，实际=%r" % (texts,))
+    leaked = _leak_hits(texts)
+    assert not leaked, (
+        "TAIL-1：后续轮的标签漏进群了：%r（全部出站=%r）" % (leaked, texts))
+    assert len(texts) == 1, (
+        "期望收尾轮只剩标签 → 不出站（共 1 条），实际 %d 条：%r"
+        % (len(texts), texts))
+    assert "去看牙" in status_text, (
+        "TAIL-1：收尾轮里的 <chat_status> 备忘应被提取登记进 status.json，"
+        "实际没找到（status.json 内容=%r）" % (status_text[:400],))
+
+
+async def _sc_tail1_multi_text(ctx):
+    """TAIL1_MULTI_TEXT：后几轮带正文+标签 → 正文照发、标签剥掉、备忘登记。"""
+    ctx.llm.script([
+        {"text": "先垫一句。", "tool_calls": [_tail1_tool_call()]},
+        {"text": '好的<chat_status>备忘：记得带伞</chat_status>'},
+    ])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗乙", at_self=True)
+    await ctx.napcat.wait_sent(2, 30)
+    await asyncio.sleep(4)
+    sent = ctx.napcat.sent()
+    texts = [s["text"] for s in sent]
+    _dump("TAIL1_MULTI_TEXT.outbound", _outbound(sent))
+    _dump("TAIL1_MULTI_TEXT.texts", texts)
+    _save_evidence(ctx, "TAIL1_MULTI_TEXT")
+
+    leaked = _leak_hits(texts)
+    assert not leaked, (
+        "TAIL-1：后续轮正文里的标签漏进群了：%r（全部出站=%r）" % (leaked, texts))
+    assert texts == ["先垫一句", "好的"], (
+        "期望两条正文依次发出（后一条的标签被剥掉），实际=%r" % (texts,))
+    _path, status_text = _status_json_text()
+    assert "带伞" in status_text, (
+        "TAIL-1：后续轮的 <chat_status> 备忘应被登记，实际 status.json=%r"
+        % (status_text[:400],))
+
+
+async def _sc_tail1_buffer(ctx):
+    """TAIL1_BUFFER_ON：AstrBot 侧 buffer_intermediate_messages=True 的对照。
+
+    开缓冲后中间结果被攒着、结束才合并成一条 → 装饰/发送阶段只跑一次，修前也不漏。
+    这是给用户的**临时缓解**（不是修法），要有实测才敢说；本场景固定住这个事实。
+    """
+    ctx.llm.script([
+        {"text": "缓冲先垫一句。", "tool_calls": [_tail1_tool_call()]},
+        {"text": '<chat_status>备忘：缓冲实验</chat_status>'},
+    ])
+    await ctx.napcat.send_group(GROUP_ID, USER_IN, "在吗丙", at_self=True)
+    await ctx.napcat.wait_sent(1, 30)
+    await asyncio.sleep(4)
+    sent = ctx.napcat.sent()
+    texts = [s["text"] for s in sent]
+    reqs = ctx.llm.requests()
+    _dump("TAIL1_BUFFER_ON.outbound", _outbound(sent))
+    _dump("TAIL1_BUFFER_ON.texts", texts)
+    _dump("TAIL1_BUFFER_ON.llm_request_count", len(reqs))
+    _dump("TAIL1_BUFFER_ON.cmd_config_buffer", _cmd_config_buffer_flag())
+    _save_evidence(ctx, "TAIL1_BUFFER_ON")
+
+    assert _cmd_config_buffer_flag() is True, (
+        "对照实验的前提没成立：cmd_config 里 "
+        "provider_settings.buffer_intermediate_messages 不是 true")
+    assert len(reqs) >= 2, (
+        "期望模型仍然被调用至少 2 次（缓冲的是结果，不是步数），实际 %d 次"
+        % len(reqs))
+    leaked = _leak_hits(texts)
+    assert not leaked, (
+        "TAIL-1：开了 buffer_intermediate_messages 仍然漏标签：%r" % (leaked,))
+    assert texts == ["缓冲先垫一句"], (
+        "期望开缓冲后只发一条合并后的正文，实际=%r" % (texts,))
+
+
+def _cmd_config_buffer_flag():
+    """读本组实例 cmd_config.json 里 buffer_intermediate_messages 的实际值。
+
+    AstrBot 启动后会用自己的写入器把 cmd_config.json 重写一遍（带 UTF-8 BOM），
+    所以这里必须用 utf-8-sig 读，否则会误判成「没生效」。
+    """
+    path = os.path.join(ROOT, "data", "cmd_config.json")
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    val = (cfg.get("provider_settings") or {}).get("buffer_intermediate_messages")
+    return val
+
+
 # -- SEND-2：失败后为什么多跑一轮默认 LLM（只读打点 + 反事实） ------------------
 
 #: SEND-2 用的 rig 专用打点插件（只读 event 状态，见 probe_plugin/main.py）
@@ -1479,6 +1638,16 @@ SEND2_GROUPS = [
 ]
 
 
+#: TAIL-1 的组：同一份群聊配置，只在 AstrBot 侧开关上分「不缓冲 / 开缓冲」两种。
+TAIL1_GROUPS = [
+    ("TAIL-1 多步回合（默认不缓冲）", _group3_config,
+     [("TAIL1_MULTI", _sc_tail1_multi),
+      ("TAIL1_MULTI_TEXT", _sc_tail1_multi_text)]),
+    ("TAIL-1 多步回合（buffer_intermediate_messages 开）", _group3_config,
+     [("TAIL1_BUFFER_ON", _sc_tail1_buffer)]),
+]
+
+
 GROUPS = [
     ("组1私聊接管", _group1_config,
      [("A", _sc_A), ("B", _sc_B), ("C", _sc_C), ("D", _sc_D),
@@ -1492,7 +1661,16 @@ GROUPS = [
     ("组5私聊戳一戳开", _group5_config, [("P1", _sc_P1)]),
     ("组6定时唤醒（私聊开 / 群里关）", _wake_config,
      [("W1", _sc_W1), ("W2", _sc_W2), ("W3", _sc_W3)]),
-] + PROBE_GROUPS + SEND2_GROUPS
+] + PROBE_GROUPS + SEND2_GROUPS + TAIL1_GROUPS
+
+
+#: 个别组要改 AstrBot 自身配置（{组标题: 覆盖表}，深度合并进 cmd_config）。
+#: 只用于 TAIL-1 的「buffer_intermediate_messages 开」对照实验，别处一律不改。
+CMD_OVERRIDES = {
+    "TAIL-1 多步回合（buffer_intermediate_messages 开）": {
+        "provider_settings": {"buffer_intermediate_messages": True},
+    },
+}
 
 
 # -- 组运行 --------------------------------------------------------------------
@@ -1502,7 +1680,7 @@ async def _run_group(ctx, title, config, scenarios, pkg_dir, webui_port,
     print("=== %s ===" % title, flush=True)
     prepare_root(ROOT, BASE_CMD_CONFIG, webui_port=webui_port,
                  ws_port=ws_port, llm_base_url=ctx.llm.base_url,
-                 self_id=SELF_ID)
+                 self_id=SELF_ID, extra=CMD_OVERRIDES.get(title))
     install_plugin(ROOT, pkg_dir, config=config)
     # SEND-2：这一组额外装一个只读打点插件（rig 专用，来源在 tools/rig/probe_plugin）
     if any(n.startswith("SEND2_") for n, _ in scenarios):

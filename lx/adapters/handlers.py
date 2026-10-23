@@ -288,6 +288,20 @@ class EHandlers:
                 return
             if not isinstance(turn, dict):
                 return
+            # TAIL-1：多步回合里 AstrBot 会对同一个事件多次调 on_llm_request。
+            # 修前第一次送达后 turn 被清成 None，后续轮天然不再注入；现在 turn 要在
+            # 整个事件里活着（后几轮还得靠它过滤出站），所以这里显式「只注入第一次」，
+            # 行为与修前一致：第 2 步起不再重复追加 system tail / 临时 part / 裁剪 contexts。
+            try:
+                calls = int(turn.get("llm_calls", 0))
+            except Exception:
+                calls = 0
+            try:
+                turn["llm_calls"] = calls + 1
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 记模型调用次数失败：%r" % (e,))
+            if calls > 0:
+                return
             asm = turn.get("asm")
             if asm is None:
                 return
@@ -343,6 +357,18 @@ class EHandlers:
             trigger = turn.get("trigger")
             if key is None or trigger is None:
                 return
+            # TAIL-1：AstrBot 的本地 Agent 循环「每步只要有文字就单独出站」
+            # （core/astr_agent_run_util.py:274-291），所以一个事件里本钩子会跑多次。
+            # 记轮次：第 1 轮照旧全量处理；第 2 轮起只做「过滤 + 提取登记」。
+            try:
+                rounds = int(turn.get("rounds", 0))
+            except Exception:
+                rounds = 0
+            try:
+                turn["rounds"] = rounds + 1
+            except Exception as e:
+                _safe_log(self._log, "[handlers] 记轮次失败：%r" % (e,))
+            is_tail = rounds > 0
             try:
                 self._c.busy.discard(key)
             except Exception:
@@ -359,6 +385,10 @@ class EHandlers:
             chain = getattr(result, "chain", None) if result is not None else None
             if not chain:
                 parsed = self._c.brain.finish(key, trigger, None)
+                if is_tail:
+                    # 后几轮没有内容=工具还在跑，别重复报送达（on_after_sent 已报过）
+                    self._register_tail_side_effects(turn, key, trigger, parsed)
+                    return
                 try:
                     self._c.brain.report(key, trigger, parsed, False)
                 except Exception as e:
@@ -394,11 +424,21 @@ class EHandlers:
             outcome = getattr(parsed, "outcome", None)
             silent = bool(getattr(outcome, "silent", False))
             parts = getattr(parsed, "parts", None) or []
+            if is_tail:
+                # TAIL-1：后几轮不再走 report（历史/冷却/notes.confirm/ticker 都只做一次），
+                # 但收尾那步写在 <chat_status>/<next_reply> 里的东西必须提取登记，否则丢。
+                self._register_tail_side_effects(turn, key, trigger, parsed)
+            else:
+                self._mark_tail_seen(turn, parsed)
             if silent or not parts:
                 try:
                     result.chain = []
                 except Exception as e:
                     _safe_log(self._log, "[handlers] 清空 chain 失败：%r" % (e,))
+                if is_tail:
+                    # 后几轮剥空：只清 chain，**不** stop_event()。SEND-1 实测停事件会让
+                    # respond 跳过自己的 clear_result()，残留 chain 被原样再发一遍（正文重发）。
+                    return
                 try:
                     # D 场景：只清空 chain 不停事件的话，AstrBot 内置
                     # on_message 会走默认 LLM 补发一句兜底文。停事件后
@@ -455,6 +495,34 @@ class EHandlers:
             _safe_log(self._log, "[handlers] on_decorating_result 异常：%r" % (e,))
         return
 
+    def _mark_tail_seen(self, turn: dict, parsed: Any) -> None:
+        """TAIL-1：把第 1 轮已经（将由 report）登记过的便签/自约记进去重表。
+
+        否则后几轮模型重写同一句备忘会被当成「新内容」再登记一次。
+        """
+        try:
+            turn["tail_seen"] = {
+                "note": getattr(parsed, "status_note", None),
+                "next_reply": getattr(parsed, "next_reply_reason", None),
+            }
+        except Exception as e:
+            _safe_log(self._log, "[handlers] 记去重表失败：%r" % (e,))
+
+    def _register_tail_side_effects(self, turn: dict, key: Any, trigger: Any,
+                                    parsed: Any) -> None:
+        """TAIL-1：后几轮只登记便签 / 自约，不重复报送达（见 brain.register_tail）。"""
+        try:
+            seen = turn.get("tail_seen")
+            if not isinstance(seen, dict):
+                seen = {}
+            register = getattr(self._c.brain, "register_tail", None)
+            if register is None:
+                return
+            seen = register(key, trigger, parsed, seen) or seen
+            turn["tail_seen"] = seen
+        except Exception as e:
+            _safe_log(self._log, "[handlers] 后几轮登记失败：%r" % (e,))
+
     def _wrap_send(self, event: Any) -> None:
         """SEND-1：给这一个 event 的 send 记成败（只加标记，不改 AstrBot 行为）。
 
@@ -466,19 +534,31 @@ class EHandlers:
 
         规矩：异常照原样向上抛、不改返回值、不吞；重复调用不重复包装；
         event 不许挂属性时记一行日志、行为与修前一致（仍按 True 登记）。
+
+        TAIL-1：标记改成**按每一轮**记 —— 每次进装饰阶段都先把「本轮还没失败」重置。
+        多步回合里 AstrBot 每个结果都会重跑一遍这个钩子，第二轮不能继承第一轮留下的
+        False（否则一轮失败会把后面每一轮都记成 undelivered）。
+
+        TAIL-1 形状出处：private_companion v7.0.0（commit 29848a0，作者 menglimi，
+        https://github.com/menglimi/astrbot_plugin_private_companion）
+        ``astrbot_host/core_reply.py:367-392``（``activate_core_reply_delivery_guard``
+        / ``restore_core_reply_event``，原注释：“A native agent can yield several
+        results around tool calls. AstrBot's after-send hook restores methods after
+        each result, so re-arm here.”）。本仓库只借这条**形状**（每个结果重新武装），
+        没有抄它的四层 ``event.send`` 包装，也没有铺 ``suppress_default_reply``。
         """
+        try:
+            event.set_extra(_SEND_OK_KEY, True)
+        except Exception as e:
+            _safe_log(self._log, "[handlers] 无法记发送成败（set_extra）：%r" % (e,))
+            return
         try:
             orig = event.send
         except Exception as e:
             _safe_log(self._log, "[handlers] 取 event.send 失败，不记发送成败：%r" % (e,))
             return
         if getattr(orig, _SEND_WRAP_FLAG, False):
-            return  # 已经包过：幂等，别套娃
-        try:
-            event.set_extra(_SEND_OK_KEY, True)
-        except Exception as e:
-            _safe_log(self._log, "[handlers] 无法记发送成败（set_extra）：%r" % (e,))
-            return
+            return  # 已经包过：幂等，别套娃（标记已在上面按本轮重置）
 
         async def _wrapped(*args: Any, **kwargs: Any) -> Any:
             try:
@@ -535,10 +615,19 @@ class EHandlers:
             except Exception:
                 send_ok = None
             delivered = send_ok is not False
-            try:
-                self._c.brain.report(key, trigger, parsed, delivered)
-            except Exception as e:
-                _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+            # TAIL-1：报送达只做一次。一个事件在 Agent 循环里会出站多次，这里是每次
+            # 出站后都会跑 —— 只有第一轮报（历史/冷却/notes.confirm/自约/诊断全在
+            # report 里），后几轮只由 on_decorating_result 走 register_tail 补登记。
+            already = bool(turn.get("reported", False))
+            if not already:
+                try:
+                    self._c.brain.report(key, trigger, parsed, delivered)
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] report 失败：%r" % (e,))
+                try:
+                    turn["reported"] = True
+                except Exception as e:
+                    _safe_log(self._log, "[handlers] 记已报送达失败：%r" % (e,))
             if not delivered:
                 # 失败也要让 AstrBot 知道「这条事件 lingxi 已经出过话」：
                 # 发送失败时基类 send() 被跳过，_has_send_oper 留在 False
@@ -566,10 +655,10 @@ class EHandlers:
                     except Exception as e:
                         _safe_log(self._log,
                                   "[handlers] 置 _has_send_oper 失败：%r" % (e,))
-            try:
-                event.set_extra("lingxi.turn", None)
-            except Exception:
-                pass
+            # TAIL-1：**不要**再把 lingxi.turn 清成 None —— 多步回合里后几轮还要靠它
+            # 才知道「这条事件归 lingxi 管」，清掉就等于后几轮不过滤（标签直接漏进群）。
+            # 事件范围内的保持由 AstrBot 的 event 生命周期兜底；同一事件的重复报告由
+            # turn["reported"] 拦住。
             try:
                 event.set_extra("lingxi.parsed", None)
             except Exception:

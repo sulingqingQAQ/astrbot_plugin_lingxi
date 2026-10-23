@@ -29,12 +29,17 @@ def build_cmd_config(
     ws_port: int,
     llm_base_url: str,
     self_id: str = "10000",
+    extra: dict | None = None,
 ) -> dict:
     """在 AstrBot 默认配置 base 上改出隔离实例的 cmd_config。
 
     self_id 不进 AstrBot 配置（aiocqhttp 模板没有该字段，AstrBot 侧
     client_self_id 是随机 uuid）：留给冒烟脚本给 FakeNapCat 用。
     不修改传入的 base（深拷贝后改）。
+
+    ``extra``（TAIL-1 新增，可空）：最后一层深度合并进 cmd_config 的覆盖表，
+    只给个别组改 AstrBot 自身的开关（例：``provider_settings
+    .buffer_intermediate_messages=True`` 的对照实验）。为 None 时行为与旧版完全一致。
     """
     _ = self_id
     cfg = copy.deepcopy(base)
@@ -85,7 +90,19 @@ def build_cmd_config(
     )
     platform_settings["enable"] = False
 
+    if extra:
+        _deep_merge(cfg, extra)
     return cfg
+
+
+def _deep_merge(dst: dict, src: dict) -> dict:
+    """把 src 深度合并进 dst（src 里同名的 dict 递归合并，其余直接覆盖）。"""
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            dst[k] = copy.deepcopy(v)
+    return dst
 
 
 def _load_base(base) -> dict:
@@ -103,10 +120,12 @@ def prepare_root(
     ws_port: int,
     llm_base_url: str,
     self_id: str = "10000",
+    extra: dict | None = None,
 ) -> str:
     """清空并重建 root/data，写 data/cmd_config.json（UTF-8 无 BOM）。
 
     base 可为 dict 或 json 文件路径（模板带 BOM，用 utf-8-sig 读）。
+    extra 见 ``build_cmd_config``（可空，None 时行为与旧版一致）。
     返回写出的 cmd_config.json 绝对路径。
     """
     data_dir = os.path.join(root, "data")
@@ -119,6 +138,7 @@ def prepare_root(
         ws_port=ws_port,
         llm_base_url=llm_base_url,
         self_id=self_id,
+        extra=extra,
     )
     out = os.path.join(data_dir, "cmd_config.json")
     with open(out, "w", encoding="utf-8", newline="\n") as f:
