@@ -557,8 +557,9 @@ class EHandlers:
         except Exception as e:
             _safe_log(self._log, "[handlers] 取 event.send 失败，不记发送成败：%r" % (e,))
             return
+        # 已经包过就别套娃；成败标记上面已经按「本轮」重置过了。
         if getattr(orig, _SEND_WRAP_FLAG, False):
-            return  # 已经包过：幂等，别套娃（标记已在上面按本轮重置）
+            return  # 已经包过：幂等，别套娃
 
         async def _wrapped(*args: Any, **kwargs: Any) -> Any:
             try:
