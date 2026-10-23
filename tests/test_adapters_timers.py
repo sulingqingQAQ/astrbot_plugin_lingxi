@@ -64,22 +64,91 @@ class FakePersonaManager:
 
 
 class FakeProvider:
-    def __init__(self, pid: str):
-        self.id = pid
+    """照 AstrBot 4.29.1 真实 ``Provider`` 的形状：**没有 ``.id``**。
+
+    真对象只有 ``provider_config``（dict）和 ``meta()``（见
+    ``F:\\Gemini\\AstrBot\\AstrBot\\backend\\app\\astrbot\\core\\provider\\provider.py:28-59``），
+    provider id 只在 ``meta().id``（``entities.py:42-51`` 的 ``ProviderMeta.id``）
+    或 ``provider_config["id"]`` 里。修前这里写过 ``self.id = pid``，假对象比真
+    对象多一个属性，把 TIMER-1 漏掉了。
+    """
+
+    def __init__(self, pid: str = "prov-auto", *, meta_id=None,
+                 provider_config=None, model: str = "fake-model"):
+        self.provider_config = (
+            {"id": pid, "type": "openai"} if provider_config is None
+            else provider_config)
+        self.model_name = model
+        # meta_id=None → meta().id 用 pid；meta_id="" → 空串；NO_META_ID → 没有 id 属性
+        self._meta_id = pid if meta_id is None else meta_id
+        self.meta_calls: int = 0
+
+    def meta(self):
+        self.meta_calls += 1
+        if self._meta_id is NO_META_ID:
+            return SimpleNamespace(model=self.model_name, type="openai")
+        return SimpleNamespace(id=self._meta_id, model=self.model_name,
+                               type="openai", provider_type="chat_completion")
+
+
+class MetaRaisesProvider(FakeProvider):
+    """``meta()`` 抛 ValueError（provider 类型没注册时真实现就抛这个）。"""
+
+    def meta(self):
+        self.meta_calls += 1
+        raise ValueError("Provider type fake-type not registered")
+
+
+class NoMetaProvider(FakeProvider):
+    """没有 ``meta`` 方法的老对象：只有 ``provider_config``。"""
+
+    meta = None
+
+
+NO_META_ID = object()
 
 
 class FakeContext:
-    def __init__(self, provider="auto", persona_manager=None, completion_text="模型回话"):
+    def __init__(self, provider="auto", persona_manager=None,
+                 completion_text="模型回话", *, async_raises=None,
+                 sync_raises=None, has_async=True, has_sync=True):
         if provider == "auto":
             provider = FakeProvider("prov-auto")
         self._provider = provider
         self.persona_manager = persona_manager or FakePersonaManager()
         self._completion_text = completion_text
         self.llm_calls: list = []
-        self.using_provider_calls: list = []
+        self._calls: list = []  # ("async"|"sync", umo)
+        self._async_raises = async_raises
+        self._sync_raises = sync_raises
+        if not has_async:  # 模拟没有 async 版的 host
+            self.get_using_provider_async = None
+        if not has_sync:
+            self.get_using_provider = None
+
+    @property
+    def async_calls(self) -> list:
+        return [umo for kind, umo in self._calls if kind == "async"]
+
+    @property
+    def sync_calls(self) -> list:
+        return [umo for kind, umo in self._calls if kind == "sync"]
+
+    @property
+    def using_provider_calls(self) -> list:
+        """两边取 provider 的调用（umo）合起来，按先后顺序。"""
+        return [umo for _kind, umo in self._calls]
+
+    async def get_using_provider_async(self, umo=None, *, locale="zh-CN"):
+        self._calls.append(("async", umo))
+        if self._async_raises is not None:
+            raise self._async_raises
+        return self._provider
 
     def get_using_provider(self, umo=None):
-        self.using_provider_calls.append(umo)
+        self._calls.append(("sync", umo))
+        if self._sync_raises is not None:
+            raise self._sync_raises
         return self._provider
 
     async def llm_generate(self, **kwargs):
@@ -112,14 +181,124 @@ class GenerateTest(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(provider=FakeProvider("prov-auto"))
         gen, _ = make_generate(ctx, {"base.model": ""})
         await gen(KEY, make_asm())
-        self.assertEqual(ctx.using_provider_calls, [to_umo(KEY)])
+        self.assertEqual(ctx.async_calls, [to_umo(KEY)])
         self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-auto")
 
     async def test_no_provider_raises(self):
         ctx = FakeContext(provider=None)
         gen, _ = make_generate(ctx, {"base.model": ""})
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError) as cm:
             await gen(KEY, make_asm())
+        self.assertIn("没有可用的聊天模型", str(cm.exception))
+        self.assertEqual(ctx.llm_calls, [])
+
+    # ------------------------------------------------------------ TIMER-1
+    # 缺陷编号 TIMER-1：取默认聊天模型 id 时写错属性（getattr(prov, "id")），
+    # AstrBot 4.29.1 的 Provider 没有 .id → base.model 为空时主动开口永远抛
+    # RuntimeError。下面的假 provider 一律照真对象形状（没有 .id）。
+
+    async def test_TIMER_1_provider_id_from_meta(self):
+        """真形状的 provider（无 .id）：从 meta().id 取到 id。"""
+        prov = FakeProvider("prov-meta")
+        self.assertFalse(hasattr(prov, "id"))
+        ctx = FakeContext(provider=prov)
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        out = await gen(KEY, make_asm())
+        self.assertEqual(out, "模型回话")
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-meta")
+        self.assertEqual(prov.meta_calls, 1)
+
+    async def test_TIMER_1_provider_id_from_config_when_meta_raises(self):
+        """meta() 抛异常（类型没注册）→ 退 provider_config["id"]，不炸。"""
+        prov = MetaRaisesProvider("prov-cfg")
+        ctx = FakeContext(provider=prov)
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-cfg")
+
+    async def test_TIMER_1_provider_id_from_config_when_no_meta(self):
+        """老对象没有 meta 方法 → 只用 provider_config["id"]。"""
+        ctx = FakeContext(provider=NoMetaProvider("prov-only-cfg"))
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-only-cfg")
+
+    async def test_TIMER_1_meta_without_id_falls_back_to_config(self):
+        """meta() 返回的对象没有 id 属性 → 退 provider_config["id"]。"""
+        ctx = FakeContext(provider=FakeProvider(
+            "prov-fb", meta_id=NO_META_ID))
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-fb")
+
+    async def test_TIMER_1_empty_id_raises_clear_error(self):
+        """id 取到空串/空白 → 报清楚的错，别把空 id 传给 llm_generate。"""
+        for pid in ("", "   "):
+            with self.subTest(pid=repr(pid)):
+                ctx = FakeContext(provider=FakeProvider(
+                    pid, meta_id=pid, provider_config={"id": pid}))
+                gen, _ = make_generate(ctx, {"base.model": ""})
+                with self.assertRaises(RuntimeError) as cm:
+                    await gen(KEY, make_asm())
+                self.assertIn("没有可用的聊天模型", str(cm.exception))
+                self.assertEqual(ctx.llm_calls, [])
+
+    async def test_TIMER_1_non_dict_provider_config_no_attribute_error(self):
+        """provider_config 不是 dict（meta 也炸）→ 报 RuntimeError，不是 AttributeError。"""
+        prov = MetaRaisesProvider("x", provider_config=["id", "prov-bad"])
+        ctx = FakeContext(provider=prov)
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        with self.assertRaises(RuntimeError) as cm:
+            await gen(KEY, make_asm())
+        self.assertIn("没有可用的聊天模型", str(cm.exception))
+        self.assertEqual(ctx.llm_calls, [])
+
+    async def test_TIMER_1_async_getter_preferred(self):
+        """优先 get_using_provider_async（同步版已标 deprecated，不许再被调）。"""
+        ctx = FakeContext(provider=FakeProvider("prov-async"))
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.async_calls, [to_umo(KEY)])
+        self.assertEqual(ctx.sync_calls, [])
+
+    async def test_TIMER_1_async_raises_falls_back_to_sync(self):
+        """async 版抛异常 → 退同步版，两个都兜异常。"""
+        ctx = FakeContext(provider=FakeProvider("prov-sync"),
+                          async_raises=RuntimeError("async 版坏了"))
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.async_calls, [to_umo(KEY)])
+        self.assertEqual(ctx.sync_calls, [to_umo(KEY)])
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-sync")
+
+    async def test_TIMER_1_async_missing_uses_sync(self):
+        """host 没有 async 版 → 直接用同步版。"""
+        ctx = FakeContext(provider=FakeProvider("prov-old"), has_async=False)
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        await gen(KEY, make_asm())
+        self.assertEqual(ctx.sync_calls, [to_umo(KEY)])
+        self.assertEqual(ctx.llm_calls[0]["chat_provider_id"], "prov-old")
+
+    async def test_TIMER_1_both_getters_raise_clear_error(self):
+        """两版都炸 → 报“取默认聊天模型失败”，带上原始异常。"""
+        ctx = FakeContext(provider=None,
+                          async_raises=RuntimeError("async 版坏了"),
+                          sync_raises=RuntimeError("同步版也坏了"))
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        with self.assertRaises(RuntimeError) as cm:
+            await gen(KEY, make_asm())
+        self.assertIn("取默认聊天模型失败", str(cm.exception))
+        self.assertIn("同步版也坏了", str(cm.exception))
+        self.assertEqual(ctx.llm_calls, [])
+
+    async def test_TIMER_1_async_none_does_not_try_sync(self):
+        """async 版明确说“没有” → 不退回同步版（默认模型确实没配）。"""
+        ctx = FakeContext(provider=None)
+        gen, _ = make_generate(ctx, {"base.model": ""})
+        with self.assertRaises(RuntimeError) as cm:
+            await gen(KEY, make_asm())
+        self.assertIn("没有可用的聊天模型", str(cm.exception))
+        self.assertEqual(ctx.sync_calls, [])
         self.assertEqual(ctx.llm_calls, [])
 
     async def test_configured_persona_used(self):

@@ -64,6 +64,85 @@ def _persona_text(persona: Any) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# 出处（任务卡 TIMER-1 §3.1）：下面 ``_provider_id_of`` / ``_fetch_default_provider``
+# 的形状抄自 private_companion（作者 menglimi）：
+#   仓库   https://github.com/menglimi/astrbot_plugin_private_companion
+#   原文件 astrbot_host/model_settings.py，commit 29848a0，
+#          第 11-35 行 ``conversation_provider_resolver`` 取 provider id 的那几行：
+#            meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
+#            provider_id = getattr(meta, "id", None) or \
+#                getattr(provider, "provider_config", {}).get("id")
+# 按 lingxi 的边界改的地方：
+#   1. 删掉原实现里的 ``profile.kind`` 之类 task profile 判断（lingxi 没有这套）；
+#   2. 异常换成 lingxi 自己的 ``RuntimeError``，两句文案沿用本文件原有的；
+#   3. 会话地址用 ``lx/session/key.py`` 的 ``to_umo`` 拼好再传进来；
+#   4. 补 ``isinstance(provider_config, dict)`` 检查（原实现直接 ``.get``，
+#      配置不是 dict 时会抛 ``AttributeError``）；
+#   5. 优先调 ``get_using_provider_async``（AstrBot 4.29.1 已把同步版标
+#      deprecated），取不到再退同步版，两版都兜异常；
+#   6. 没抄它的 ``get_provider_by_id(...) is not provider`` 身份复核（见卡片“另记”）。
+# ---------------------------------------------------------------------------
+
+_PROVIDER_FETCH_TIMEOUT_S = 1.0
+
+
+def _provider_id_of(provider: Any) -> Optional[str]:
+    """按 AstrBot 4.29.1 的真实形状取 provider id；取不到返回 None。
+
+    ``Provider`` **没有 ``.id``**（``core/provider/provider.py:28-59``）：id 只在
+    ``meta().id``（``core/provider/entities.py:42-51`` 的 ``ProviderMeta.id``）或
+    ``provider_config["id"]``。``meta()`` 在 provider 类型没注册时会抛
+    ``ValueError``，所以整段兜异常再退配置；两处都没有（或只有空串/空白）
+    就返回 None，由调用方抛清楚的错。
+    """
+    if provider is None:
+        return None
+    meta_fn = getattr(provider, "meta", None)
+    if callable(meta_fn):
+        try:
+            meta = meta_fn()
+        except Exception:
+            meta = None
+        pid = getattr(meta, "id", None)
+        if isinstance(pid, str) and pid.strip():
+            return pid.strip()
+    config = getattr(provider, "provider_config", None)
+    if isinstance(config, dict):
+        pid = config.get("id")
+        if isinstance(pid, str) and pid.strip():
+            return pid.strip()
+    return None
+
+
+async def _fetch_default_provider(context: Any, umo: str) -> tuple:
+    """取当前会话默认聊天模型，返回 ``(provider, error)``。
+
+    AstrBot 4.29.1 起 ``context.get_using_provider`` 已标 deprecation
+    （``core/star/context.py:488``）指向 ``get_using_provider_async``（``:514``）：
+    先试异步版（给 1 秒超时），没有再退同步版；两版都兜异常（异常放进
+    ``error`` 交给调用方措辞）。任一版明确返回 None —— 会话确实没配默认模型
+    —— 就直接返回 ``(None, None)``，不再往下试。
+    """
+    err: Optional[BaseException] = None
+    for name in ("get_using_provider_async", "get_using_provider"):
+        getter = getattr(context, name, None)
+        if not callable(getter):
+            continue
+        try:
+            got = getter(umo=umo)
+            if asyncio.iscoroutine(got) or asyncio.isfuture(got):
+                got = await asyncio.wait_for(
+                    got, timeout=_PROVIDER_FETCH_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            err = e
+            continue
+        return got, None
+    return None, err
+
+
 def make_generate_t(
     context: Any,
     resolver: Any,
@@ -88,13 +167,12 @@ def make_generate_t(
         if isinstance(model, str) and model.strip():
             provider_id = model.strip()
         else:
-            try:
-                prov = context.get_using_provider(umo=umo)
-            except Exception as e:
-                raise RuntimeError(
-                    f"会话 {key} 取默认聊天模型失败：{e}") from e
-            prov_id = getattr(prov, "id", None) if prov is not None else None
-            if not isinstance(prov_id, str) or not prov_id:
+            prov, prov_err = await _fetch_default_provider(context, umo)
+            prov_id = _provider_id_of(prov)
+            if prov_id is None:
+                if prov is None and prov_err is not None:
+                    raise RuntimeError(
+                        f"会话 {key} 取默认聊天模型失败：{prov_err}") from prov_err
                 raise RuntimeError(
                     f"会话 {key} 没有可用的聊天模型："
                     "配置 base.model 为空，且 AstrBot 当前默认模型也取不到；"
