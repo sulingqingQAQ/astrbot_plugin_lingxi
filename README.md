@@ -16,6 +16,14 @@
 > [chatluna-character](https://github.com/CookSleep/chatluna-character)（同作者开源项目）：
 > 群活跃度评分、直呼聚合、空闲触发的指数退避模型、historyPull 重启回拉历史。
 > 各处源码注释均标明了对应的原始实现位置。
+>
+> v3 系列里有两处修复借鉴了 menglimi 的
+> [astrbot_plugin_private_companion](https://github.com/menglimi/astrbot_plugin_private_companion)
+> （v7.0.0，commit `29848a0`）：一是"取会话默认聊天模型的 provider id"的写法
+> （`lx/adapters/timers.py`，对应对方 `astrbot_host/model_settings.py`），
+> 二是"多步回合里每产出一个结果就重新挂一次过滤"的做法（`lx/adapters/handlers.py` 的 `_wrap_send`，
+> 对应对方 `astrbot_host/core_reply.py`）。都只借了写法的形状，没有整体搬运，源码里写明了出处。
+> 对方仓库当时没有附 LICENSE 文件；如对方对此有异议，请联系本项目作者，我们会调整或移除。感谢 menglimi。
 
 ---
 
